@@ -1,0 +1,52 @@
+# Attacker container
+
+Kali on the `soclab` bridge. Every packet it sends carries a real container IP
+(e.g. 10.211.0.x), so all four sensors attribute the attack to one true source —
+which is what makes `same_field` and `cross_source_activity` correlation
+actually work. Attacking from the host instead masquerades everything to the
+gateway (10.211.0.1) and the correlation is meaningless.
+
+## First run
+
+```bash
+docker compose up -d attacker
+docker exec -it soc-attacker /scripts/provision.sh   # installs the toolkit, ~few min
+```
+
+Provisioning is idempotent and also runs at the top of each attack script, so
+you can skip the manual step — the first attack just takes longer.
+
+## Run attacks
+
+```bash
+docker exec -it soc-attacker /scripts/attack-web.sh      # sqlmap + discovery vs Juice Shop
+docker exec -it soc-attacker /scripts/attack-cowrie.sh   # hydra brute -> shell vs Cowrie
+docker exec -it soc-attacker /scripts/attack-all.sh      # both, one IP, correlatable
+```
+
+Then on the host, turn telemetry into candidates:
+
+```bash
+python3 pipeline/ingest.py && python3 pipeline/rules.py --all
+```
+
+## Interactive
+
+```bash
+docker exec -it soc-attacker bash
+# msfconsole, nmap, sqlmap, hydra all on PATH; targets are cowrie:2222 and nginx:80
+```
+
+## What each attack should light up
+
+| Attack | Suricata | Wazuh | pipeline |
+|---|---|---|---|
+| hydra SSH brute | flow/scan sigs | 100110/111/113 | ssh candidate |
+| post-login cmds  | (encrypted)    | 100121/122/123/124 | — |
+| sqlmap / SQLi    | ET WebServer sigs | 31100-series | ids + wazuh candidates |
+| content discovery| scan sigs      | web 404 rules | http_rate |
+| full run (all)   | all of the above | all | **cross_source_activity, 4 sources** |
+
+## Loot
+
+`attacker/loot/` is bind-mounted, so nmap/hydra/sqlmap output lands on the host.

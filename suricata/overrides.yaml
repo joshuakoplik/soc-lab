@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# Suricata OVERRIDES — deltas only. This file is NOT a Suricata config.
+#
+# Hard-won lesson: Suricata does not layer configs. `-c` takes exactly one
+# file, so mounting a partial config over /etc/suricata/suricata.yaml REPLACES
+# the shipped one rather than extending it — silently disabling every protocol
+# you didn't list and making thousands of ET rules fail to parse.
+#
+# So: entrypoint.sh deep-merges this onto the image's shipped config at start.
+# Everything not mentioned here keeps its shipped default.
+# ---------------------------------------------------------------------------
+
+vars:
+  address-groups:
+    # The soclab bridge. Both targets live here.
+    HOME_NET: "[10.211.0.0/16,10.210.0.0/24,172.16.0.0/12]"
+    # Lab convenience, not a real posture: normally "!$HOME_NET". Our attacker
+    # shares the bridge with the targets, so under the real setting every ET
+    # rule oriented EXTERNAL_NET->SERVER would see an internal source and stay
+    # silent. "any" lets them fire. Cost: some extra false positives.
+    EXTERNAL_NET: "any"
+  port-groups:
+    HTTP_PORTS: "80,3000,8080"
+    SSH_PORTS: "22,2222"
+
+app-layer:
+  protocols:
+    # ET Open ships rules for ICS protocols that Suricata disables by default.
+    # A rule referencing a disabled protocol is a parse error — that's the
+    # modbus spam. Two ways out: strip the rules, or enable the parsers.
+    # Enabling is cheaper and less fragile: a parser that never sees traffic
+    # costs nothing, and no regex has to guess which rules to drop.
+    modbus:
+      enabled: yes
+    dnp3:
+      enabled: yes
+    enip:
+      enabled: yes
+
+outputs:
+  - eve-log:
+      # Stable flow hash — lets a Suricata alert and the matching nginx line be
+      # correlated on the same key later.
+      community-id: yes
+      community-id-seed: 0
+      types:
+        - alert:
+            payload: yes
+            payload-printable: yes
+            metadata: yes          # attaches the HTTP txn that triggered the rule
+            http-body: yes
+        - anomaly:
+            enabled: yes

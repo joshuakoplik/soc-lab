@@ -1,0 +1,173 @@
+name: soc-lab
+
+services:
+  # --- Target 1: SSH honeypot. Clean JSON telemetry, attacker-controlled usernames. ---
+  cowrie:
+    image: cowrie/cowrie:latest
+    container_name: soc-cowrie
+    restart: unless-stopped
+    ports:
+      - "2222:2222"
+    volumes:
+      - ./cowrie/cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
+      - ./cowrie/userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
+      - ./logs/cowrie:/cowrie/cowrie-git/var/log/cowrie
+      # CTF flag plant. custom-fs.pickle is the shipped fs.pickle plus one new
+      # /root/flag.txt directory-tree entry (content-less -- see honeyfs/
+      # below); honeyfs/ supplies the actual bytes via [honeypot]
+      # contents_path. Two separate mounts because Cowrie's own filesystem
+      # model separates "does this path exist" (the pickle) from "what are
+      # its bytes" (the honeyfs overlay) -- see cowrie/cowrie.cfg.
+      - ./cowrie/custom-fs.pickle:/cowrie/cowrie-git/custom-fs.pickle:ro
+      - ./cowrie/honeyfs:/cowrie/cowrie-git/honeyfs:ro
+    networks: [soclab]
+
+  # --- Target 2: the web app. Not exposed directly; all traffic goes through nginx. ---
+  juiceshop:
+    image: bkimminich/juice-shop:latest
+    container_name: soc-juiceshop
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      # Enables Juice Shop's native CTF mode -- flag values for each solved
+      # challenge derive from this key rather than us inventing a separate
+      # flag system. See README/pipeline docs for how the red-team agent
+      # retrieves them.
+      - CTF_KEY=${CTF_KEY}
+    networks: [soclab]
+
+  # --- Web telemetry source. Reverse proxy in front of Juice Shop. ---
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: soc-nginx
+    restart: unless-stopped
+    depends_on: [juiceshop]
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs/nginx:/var/log/nginx
+      - ./nginx/decoys:/etc/nginx/decoys:ro
+    networks: [soclab]
+
+  # --- Target 3: a real vulnerable Linux box, not an emulated honeypot. Real
+  #     remote exploits (distccd, Samba usermap_script, the ingreslock
+  #     backdoor, Tomcat manager default creds) and a real filesystem/kernel
+  #     to escalate privileges on afterward -- what Cowrie's emulated shell
+  #     and Juice Shop's app-level bugs can't offer. ---
+  metasploitable:
+    image: tleemcjr/metasploitable2:latest
+    container_name: soc-metasploitable
+    hostname: metasploitable
+    restart: unless-stopped
+    # The image's default CMD ("services.sh && bash") starts every classic
+    # Metasploitable2 vulnerable service, then drops into an interactive
+    # bash that exits on EOF with no tty attached -- taking the whole
+    # container down with it, same problem the attacker service below solves
+    # the same way. sleep infinity in place of bash keeps the
+    # already-started services running indefinitely.
+    command: ["sh", "-c", "/bin/services.sh && sleep infinity"]
+    networks: [soclab]
+    # No ports published, no host bind, ever. This image is intentionally
+    # and extensively vulnerable -- real backdoors (a root shell on the
+    # ingreslock port), real RCE (distccd, Samba usermap_script, Tomcat
+    # manager), unauthenticated MySQL/PostgreSQL/NFS. It must only ever be
+    # reachable from soc-attacker over the internal soclab bridge, same rule
+    # as Juice Shop and Cowrie's real sshd port, just with a much sharper
+    # consequence if it were ever exposed.
+
+  # --- Network IDS. Watches the whole bridge; emits EVE JSON. ---
+  suricata:
+    image: jasonish/suricata:latest
+    container_name: soc-suricata
+    restart: unless-stopped
+    # host netns so Suricata can see the bridge interface 'soclab0' that the
+    # network below is pinned to. This is why the bridge gets a fixed name.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN     # bring the interface into promiscuous mode
+      - NET_RAW       # raw packet capture
+      - SYS_NICE      # thread priority for the worker threads
+    environment:
+      - SURICATA_IFACE=soclab0
+    # /bin/sh explicitly: the script does not need to be executable, which
+    # survives the file being copied/pasted around.
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      # NOT mounted over /etc/suricata/suricata.yaml — that REPLACES the
+      # shipped config. entrypoint.sh merges this onto it instead.
+      - ./suricata/overrides.yaml:/overrides.yaml:ro
+      - ./suricata/entrypoint.sh:/entrypoint.sh:ro
+      - ./logs/suricata:/var/log/suricata
+      - suricata-rules:/var/lib/suricata/rules   # persist ET Open across restarts
+    depends_on: [nginx, cowrie]
+
+
+  # --- The SIEM. Log-based detection: reads Cowrie + nginx, applies rules. ---
+  # Manager ONLY. No indexer, no dashboard, no agents. The manager is the rules
+  # engine; the indexer/dashboard are just storage and a UI, and our consumer is
+  # ingest.py, not a human with a browser. That's what keeps this ~1GB instead
+  # of the 8GB an all-in-one wants.
+  wazuh:
+    image: wazuh/wazuh-manager:4.14.6
+    container_name: soc-wazuh
+    restart: unless-stopped
+    hostname: soc-wazuh
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile:  { soft: 655360, hard: 655360 }
+    environment:
+      # Filebeat ships alerts to an indexer we don't run, so it will complain
+      # in the logs forever. Harmless: analysisd writes alerts.json regardless,
+      # and alerts.json is the only output we consume.
+      - INDEXER_URL=disabled
+      - FILEBEAT_SSL_VERIFICATION_MODE=none
+    volumes:
+      # Config goes to wazuh-config-mount, NOT straight onto /var/ossec/etc.
+      # The image copies it into place at boot; bind-mounting over the live
+      # path fights the entrypoint.
+      - ./wazuh/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
+      - ./wazuh/local_rules.xml:/wazuh-config-mount/etc/rules/local_rules.xml:ro
+      # Our telemetry, read-only. Wazuh is a consumer here, not a producer.
+      - ./logs:/lab-logs:ro
+      # THE OUTPUT. alerts.json lands on the host for ingest.py to tail.
+      - ./logs/wazuh:/var/ossec/logs/alerts
+    networks: [soclab]
+
+  # --- The red team. On the bridge, so every packet carries a TRUE container
+  #     IP that all four sensors see. This is what makes same_field and
+  #     cross_source correlation mean something instead of everything looking
+  #     like it came from the gateway. ---
+  attacker:
+    image: kalilinux/kali-rolling:latest
+    container_name: soc-attacker
+    hostname: kali
+    # Stay up idling so you can exec in. Without this the container runs its
+    # command and exits.
+    command: ["sleep", "infinity"]
+    # Interactive tooling wants a tty.
+    tty: true
+    stdin_open: true
+    cap_add:
+      - NET_RAW        # nmap SYN scans, hping, anything crafting raw packets
+      - NET_ADMIN
+    volumes:
+      # The attack scripts, and a place to drop loot/output back on the host.
+      - ./attacker/scripts:/scripts:ro
+      - ./attacker/loot:/loot
+    networks: [soclab]
+    # No ports published. The attacker reaches the targets over the internal
+    # bridge by service name (cowrie:2222, nginx:80); nothing is exposed to the
+    # host, and it can't be reached from outside the lab.
+
+networks:
+  soclab:
+    driver: bridge
+    driver_opts:
+      # Pin the Linux bridge name so Suricata's -i soclab0 is deterministic.
+      # Without this Docker generates br-<hash> and the sensor can't find it.
+      com.docker.network.bridge.name: soclab0
+
+volumes:
+  suricata-rules:
