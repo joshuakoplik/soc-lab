@@ -1,11 +1,13 @@
 name: soc-lab
 
 services:
-  # --- Target 1: SSH honeypot. Clean JSON telemetry, attacker-controlled usernames. ---
+  # --- Target 1: SSH honeypot. Clean JSON telemetry, attacker-controlled usernames.
+  #     easy-mode only -- see lab-mode.sh. Not started at all in hard mode. ---
   cowrie:
     image: cowrie/cowrie:latest
     container_name: soc-cowrie
     restart: unless-stopped
+    profiles: ["easy"]
     ports:
       - "2222:2222"
     volumes:
@@ -48,19 +50,24 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./logs/nginx:/var/log/nginx
-      - ./nginx/decoys:/etc/nginx/decoys:ro
+      # Easy-mode decoy set (planted leaked credentials). compose.hard.yml
+      # overrides this whole volumes list to point at ./nginx/decoys-hard
+      # instead -- see lab-mode.sh.
+      - ./nginx/decoys-easy:/etc/nginx/decoys:ro
     networks: [soclab]
 
   # --- Target 3: a real vulnerable Linux box, not an emulated honeypot. Real
   #     remote exploits (distccd, Samba usermap_script, the ingreslock
   #     backdoor, Tomcat manager default creds) and a real filesystem/kernel
   #     to escalate privileges on afterward -- what Cowrie's emulated shell
-  #     and Juice Shop's app-level bugs can't offer. ---
+  #     and Juice Shop's app-level bugs can't offer. easy-mode only -- see
+  #     lab-mode.sh. Not started at all in hard mode. ---
   metasploitable:
     image: tleemcjr/metasploitable2:latest
     container_name: soc-metasploitable
     hostname: metasploitable
     restart: unless-stopped
+    profiles: ["easy"]
     # The image's default CMD ("services.sh && bash") starts every classic
     # Metasploitable2 vulnerable service, then drops into an interactive
     # bash that exits on EOF with no tty attached -- taking the whole
@@ -101,7 +108,11 @@ services:
       - ./suricata/entrypoint.sh:/entrypoint.sh:ro
       - ./logs/suricata:/var/log/suricata
       - suricata-rules:/var/lib/suricata/rules   # persist ET Open across restarts
-    depends_on: [nginx, cowrie]
+    # cowrie deliberately not listed: it's easy-mode-only (profiles: ["easy"]),
+    # and this is a passive network sniffer, not something that calls cowrie
+    # directly -- there's no functional ordering requirement, only nginx's
+    # (log directory expectations) matters.
+    depends_on: [nginx]
 
 
   # --- The SIEM. Log-based detection: reads Cowrie + nginx, applies rules. ---

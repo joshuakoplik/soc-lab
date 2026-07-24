@@ -6,11 +6,18 @@ NOT a subpackage like pipeline/providers/ -- there's exactly one backend here
 (docker exec into one named container), nothing to swap, no Protocol to
 justify the extra structure.
 
-Scope fencing lives here, not just in tool schemas: ALLOWED_TARGETS is the
-single source of truth, and validate_target() is the check redteam_agent.py's
-dispatch_tool() calls BEFORE run() is ever reached -- a JSON-schema "enum" on
-a tool's target parameter is advisory (models don't always respect schema
-outside a grammar-locked call, see providers/local.py), this is not.
+Scope fencing lives here, not just in tool schemas: validate_target() is the
+check redteam_agent.py's dispatch_tool() calls BEFORE run() is ever reached
+-- a JSON-schema "enum" on a tool's target parameter is advisory (models
+don't always respect schema outside a grammar-locked call, see
+providers/local.py), this is not. The allowed set itself is NOT a static
+constant here -- it comes from lab_modes.active_config()["targets"], which
+depends on lab_mode.json (see lab_modes.py). Easy mode allows cowrie/nginx/
+metasploitable; hard mode allows nginx only, because cowrie and
+metasploitable aren't even running in that mode. Re-read on every call
+rather than cached at import time, so a mode switch mid-process (unlikely,
+but --continue-assess resumes an old session) can't leave this checking
+against a stale allowlist.
 
 ALLOWED_NETWORKS is a separate, narrower question: not "can this name be
 touched at all" but "is it fully inside our own lab, such that a gated
@@ -18,24 +25,33 @@ action against it is safe to run without a human approval round trip".
 in_whitelisted_network() resolves the target the same way soc-attacker's
 own DNS would and checks the result against ALLOWED_NETWORKS -- see
 redteam_agent.py's tool_propose_action() and execute_pending_action() for
-where that answer changes behavior.
+where that answer changes behavior. Unlike the target allowlist, this one
+IS static across modes: it's the physical lab subnet, not a function of
+which containers happen to be up.
 """
 
 import ipaddress
+import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import lab_modes  # noqa: E402
+
 CONTAINER = "soc-attacker"
-ALLOWED_TARGETS = {"cowrie", "nginx", "metasploitable"}
 
 # The soclab bridge's subnet (confirmed via `docker network inspect
 # soc-lab_soclab`; Docker assigns it, there's no static IPAM config in
 # compose.yaml, so re-check if this ever looks stale). Every target reachable
-# at all is already inside it -- ALLOWED_TARGETS is a strict subset of what's
-# reachable here -- so this whitelist is what lets a gated action against
-# cowrie/nginx skip the human approval gate entirely: it's lab-internal,
-# contained, and reversible by construction.
+# at all is already inside it -- the mode-specific target allowlist (see
+# lab_modes.py) is always a subset of what's reachable here -- so this
+# whitelist is what lets a gated action against a lab-internal target skip
+# the human approval gate entirely: it's contained and reversible by
+# construction, regardless of difficulty mode.
 ALLOWED_NETWORKS = [ipaddress.ip_network("10.211.0.0/24")]
 
 DEFAULT_TIMEOUT_S = 120
@@ -43,15 +59,17 @@ DEFAULT_MAX_OUTPUT_CHARS = 16000
 
 
 class ScopeError(Exception):
-    """Raised when a tool call names a target outside ALLOWED_TARGETS. Never
-    reaches run() -- the whole point is that redteam_exec.run() only ever
-    sees argv that already passed this check."""
+    """Raised when a tool call names a target outside the active mode's
+    allowed targets. Never reaches run() -- the whole point is that
+    redteam_exec.run() only ever sees argv that already passed this check."""
 
 
 def validate_target(target):
-    if target not in ALLOWED_TARGETS:
+    allowed = lab_modes.active_config()["targets"]
+    if target not in allowed:
         raise ScopeError(
-            f"{target!r} is not an allowed target (allowed: {sorted(ALLOWED_TARGETS)})"
+            f"{target!r} is not an allowed target in {lab_modes.current_mode()!r} "
+            f"mode (allowed: {sorted(allowed)})"
         )
 
 

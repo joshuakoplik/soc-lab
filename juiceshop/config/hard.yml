@@ -1,0 +1,25 @@
+# Hard-mode Juice Shop config -- see lab-mode.sh and pipeline/redteam/lab_modes.py.
+#
+# Verified against the running image's lib/config.schema.ts and against
+# Juice Shop's own upstream config/ctf.yml preset before writing this: these
+# aren't unusual settings, they're the documented way this app is configured
+# for CTF/pentest-practice use. Selected via NODE_ENV=hard (node-config's
+# standard convention -- NODE_ENV=<name> loads config/<name>.yml merged over
+# config/default.yml), set in compose.hard.yml.
+challenges:
+  showSolvedNotifications: false   # no free confirmation that a guess worked
+  showHints: false                 # no hint buttons on the score board
+  showMitigations: false           # no mitigation writeup after solving
+  codingChallengesEnabled: never   # no fill-in-the-blank coding-challenge mode
+  restrictToTutorialsFirst: false  # don't gate the challenge set behind tutorials either
+  # Unlocks challenges Juice Shop disables by default in Docker. Verified
+  # against the actual challenge list (data/static/challenges.yml), not just
+  # the docs -- the 14 affected challenges break down as: 5 XSS/CSP ones
+  # disabled only because Docker can't visually confirm a JS alert() fired
+  # (harmless to re-enable), 4 DoS-shaped (NoSQL/XXE/RCE DoS, Memory Bomb --
+  # capped via this service's mem_limit/cpus in compose.hard.yml), and 4
+  # file read/write scoped to this container's own disk. None grant an
+  # interactive shell or remote code execution on their own.
+  safetyMode: disabled
+hackingInstructor:
+  isEnabled: false   # no interactive walkthrough tutorials

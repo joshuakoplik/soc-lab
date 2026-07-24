@@ -6,6 +6,9 @@ soc.db
 soc.db-wal
 soc.db-shm
 
+# Runtime state written by lab-mode.sh, not source -- see pipeline/redteam/lab_modes.py.
+lab_mode.json
+
 # Python
 .venv/
 __pycache__/
