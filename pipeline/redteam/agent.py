@@ -82,7 +82,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, PIPELINE)
 import executor as redteam_exec  # noqa: E402
 import lab_modes  # noqa: E402
-from providers.base import AgenticResult, ProviderError  # noqa: E402
+from providers.base import AgenticResult, ContextBudgetExceeded, ProviderError  # noqa: E402
 from providers.claude import ClaudeProvider  # noqa: E402
 from providers.fireworks import FireworksProvider  # noqa: E402
 from providers.gmi import GMIProvider  # noqa: E402
@@ -171,6 +171,22 @@ RECON_TOOLS = [
                 "method": {"type": "string", "enum": ["GET", "POST"], "default": "GET"},
             },
             "required": ["target", "paths"],
+        },
+    },
+    {
+        "name": "get_recon_findings",
+        "description": (
+            "Review recon findings already recorded THIS session before scanning/probing "
+            "further -- most useful right after picking a fresh investigation back up, so "
+            "you don't repeat a scan or path check you already did. Pass `target` to fetch "
+            "just that target's findings; omit it for everything at once."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "enum": _TARGETS},
+            },
+            "required": [],
         },
     },
 ]
@@ -338,6 +354,13 @@ Don't assume standard ports or a shallow set of paths are the whole story:
   /backup/credentials.txt, /backup/backup.zip, /backup/db.sql,
   /backup/.env, and similar. The filename is usually the part worth
   guessing, not just the directory.
+- Batch independent checks into the same turn rather than one call, wait,
+  one call, wait -- if you've got five path guesses queued up and none
+  depends on another's result, request all five at once. This costs
+  nothing extra and the whole investigation moves faster for it.
+- If you're picking this investigation back up after a pause, call
+  get_recon_findings first to see what's already been checked rather than
+  re-running a scan or path check you already have the answer to.
 
 When you've gathered enough evidence, stop calling tools and write a concise
 summary: open ports, services and versions, web paths and their responses,
@@ -404,7 +427,10 @@ sqlmap, executing a command against a compromised host, anything beyond
 looking -- call propose_action. Its result tells you what actually happened
 (exit code, stdout/stderr) -- read that before deciding what to say. Only
 describe an action as exploited/breached/accessed if the tool result you got
-back actually shows that; don't claim a result you haven't seen.
+back actually shows that; don't claim a result you haven't seen. If you have
+several independent things worth checking or trying and none depends on
+another's result, request them in the same turn rather than one at a time --
+it costs nothing extra and moves the investigation along faster.
 {_assess_credential_block}
 When you're done, write a concise summary: what vulnerabilities you
 identified, and what actions (if any) you proposed and why."""
@@ -570,6 +596,8 @@ def dispatch_recon_tool(conn, session_id, name, tool_input):
                 conn, session_id, tool_input.get("target"),
                 tool_input.get("paths") or [], tool_input.get("method", "GET"),
             )
+        if name == "get_recon_findings":
+            return tool_get_recon_findings(conn, session_id, tool_input.get("target"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
@@ -1113,7 +1141,51 @@ def _progress_wrapper(dispatch_fn, conn, session_id):
     return execute
 
 
-def run_stage_turn(provider, system, user, tools, execute_tool, max_iterations):
+# Defaults for the chained-chunk mechanism (see _run_chained_stage). A
+# chunk restarts once its accumulated prompt tokens cross DEFAULT_CONTEXT_BUDGET
+# -- picked from watching real campaigns against this lab: individual calls
+# were already costing 50-110K prompt tokens by iteration 10-15 of a single
+# unchunked stage (see the token-growth discussion this was built to address),
+# so restarting well before that point keeps each chunk's calls cheap.
+# DEFAULT_MAX_CHUNKS bounds how many times a stage will restart before giving
+# up -- a backstop against the model never converging, distinct from
+# max_iterations (which bounds one chunk) and from a hard token ceiling
+# (which bounds the whole chain, see --max-tokens-per-stage).
+DEFAULT_CONTEXT_BUDGET = 50_000
+DEFAULT_MAX_CHUNKS = 4
+
+RECON_CONTINUATION_USER = (
+    "Continue reconnaissance for this session -- your last chunk ran long "
+    "enough that we're picking it back up fresh rather than let it keep "
+    "growing. Call get_recon_findings first to see what you've already "
+    "checked so you don't repeat a scan or path probe. Keep going until "
+    "you've genuinely covered the in-scope target(s), then write the "
+    "summary."
+)
+
+ASSESS_CONTINUATION_USER = (
+    "Continue the assessment for this session. New evidence may be "
+    "available since your last pass -- results from an executed "
+    "action, new loot, possibly a working credential or shell "
+    "access. Use get_pending_actions (includes result_json for "
+    "anything already executed) and get_loot to see what's happened "
+    "since you last looked. If you now have a working credential or "
+    "command execution on a target, use that to investigate "
+    "further: what's on the system, signs of other users, "
+    "services, or hosts reachable from there, anything worth "
+    "exfiltrating, or a path to escalate privileges. If a proposed "
+    "credential was tried and failed, that doesn't mean the "
+    "approach is wrong -- a real breach dump usually has several "
+    "credentials in it, and a single wrong or rate-limited guess "
+    "isn't proof the rest won't work. If you still have untried "
+    "credentials from a finding, propose trying another one before "
+    "concluding there's nothing left to do. Propose whatever's "
+    "warranted next, or say clearly if you've genuinely exhausted "
+    "what's worth trying."
+)
+
+
+def run_stage_turn(provider, system, user, tools, execute_tool, max_iterations, token_budget=None):
     """Uniform call across providers despite their run_agentic_turn()
     signatures legitimately differing one level down: Claude's Messages API
     keeps `system` as its own top-level field, Ollama's /api/chat embeds it
@@ -1123,9 +1195,61 @@ def run_stage_turn(provider, system, user, tools, execute_tool, max_iterations):
     lower-level agentic-turn API."""
     if isinstance(provider, ClaudeProvider):
         messages = [{"role": "user", "content": [{"type": "text", "text": user}]}]
-        return provider.run_agentic_turn(system, messages, tools, execute_tool, max_iterations)
+        return provider.run_agentic_turn(system, messages, tools, execute_tool, max_iterations,
+                                          token_budget=token_budget)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    return provider.run_agentic_turn(messages, tools, execute_tool, max_iterations)
+    return provider.run_agentic_turn(messages, tools, execute_tool, max_iterations,
+                                      token_budget=token_budget)
+
+
+def _run_chained_stage(provider, system, first_user, continuation_user, tools, execute_tool,
+                        max_iterations, context_budget, max_chunks, max_tokens_hard_cap, label):
+    """Runs up to `max_chunks` bounded calls to run_stage_turn, restarting
+    with a fresh `continuation_user` prompt (the same re-orientation pattern
+    --continue-assess already used manually, generalized here to also cover
+    recon and to trigger automatically) whenever a chunk raises
+    ContextBudgetExceeded instead of finishing normally.
+
+    Each chunk gets the FULL max_iterations allowance -- context_budget is
+    what actually ends a chunk early in practice, max_iterations is just the
+    per-chunk safety ceiling if token_budget is disabled or growth happens
+    to be iteration-heavy rather than token-heavy. This means total cost
+    isn't bounded by iteration count summed across chunks, it's bounded by
+    max_chunks * (roughly context_budget prompt tokens) -- max_tokens_hard_cap
+    is a second, absolute ceiling on top of that: chaining stops immediately
+    if crossed, even with chunks left.
+
+    Any ProviderError OTHER than ContextBudgetExceeded propagates unchanged
+    -- only a context-budget restart is treated as recoverable here; a real
+    failure (bad key, network, rate limit) is still the caller's problem,
+    same as before this existed."""
+    cumulative = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    user = first_user
+    for chunk in range(1, max_chunks + 1):
+        budget = context_budget or None
+        try:
+            result = run_stage_turn(provider, system, user, tools, execute_tool, max_iterations,
+                                     token_budget=budget)
+        except ContextBudgetExceeded as e:
+            print(f"    [{label} chunk {chunk}/{max_chunks} hit context budget -- {e}]")
+            if max_tokens_hard_cap and cumulative["prompt_tokens"] >= max_tokens_hard_cap:
+                raise ProviderError(
+                    f"{label}: hard token cap ({max_tokens_hard_cap}) reached across "
+                    f"{chunk} chunks without a final turn"
+                ) from e
+            user = continuation_user
+            continue
+
+        if result.usage:
+            for k in cumulative:
+                cumulative[k] += result.usage.get(k, 0)
+        if chunk > 1:
+            print(f"    [{label} concluded after {chunk} chunks, cumulative usage: "
+                  f"{cumulative['prompt_tokens']} prompt / {cumulative['completion_tokens']} "
+                  f"completion / {cumulative['total_tokens']} total]")
+        return result
+
+    raise ProviderError(f"{label}: exceeded {max_chunks} chained chunks without a final turn")
 
 
 def _stage_failure_result(provider):
@@ -1143,7 +1267,9 @@ def _stage_failure_result(provider):
     return AgenticResult(final_text="", tool_calls=0, thinking=None, messages=[], model=provider.model)
 
 
-def run_recon_stage(conn, session_id, provider, max_iterations):
+def run_recon_stage(conn, session_id, provider, max_iterations,
+                     context_budget=DEFAULT_CONTEXT_BUDGET, max_chunks=DEFAULT_MAX_CHUNKS,
+                     max_tokens_hard_cap=None):
     user = (
         "Begin reconnaissance. Targets in scope:\n" + _targets_block +
         "\nUse your tools to identify what's exposed."
@@ -1152,7 +1278,9 @@ def run_recon_stage(conn, session_id, provider, max_iterations):
     execute = _progress_wrapper(dispatch_recon_tool, conn, session_id)
 
     try:
-        result = run_stage_turn(provider, RECON_SYSTEM_PROMPT, user, RECON_TOOLS, execute, max_iterations)
+        result = _run_chained_stage(provider, RECON_SYSTEM_PROMPT, user, RECON_CONTINUATION_USER,
+                                     RECON_TOOLS, execute, max_iterations, context_budget,
+                                     max_chunks, max_tokens_hard_cap, label="recon")
     except ProviderError as e:
         note = f"[recon incomplete -- {e}]"
         print(f"    {note}")
@@ -1172,7 +1300,9 @@ def run_recon_stage(conn, session_id, provider, max_iterations):
     return result
 
 
-def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation=False):
+def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation=False,
+                      context_budget=DEFAULT_CONTEXT_BUDGET, max_chunks=DEFAULT_MAX_CHUNKS,
+                      max_tokens_hard_cap=None):
     """A single assess pass. Called once per campaign normally, but nothing
     about it depends on recon having *just* run -- it only ever reads this
     session's recon_findings/loot/pending_actions through the ASSESS_TOOLS.
@@ -1180,34 +1310,18 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     executed a proposed action: the model sees the new loot/result_json (a
     credential that worked, a shell's output, ...) and can propose the next
     step from there. Each real action still goes through the same gate --
-    this only lets the model look again, never act more than once per call."""
-    if is_continuation:
-        user = (
-            "Continue the assessment for this session. New evidence may be "
-            "available since your last pass -- results from an executed "
-            "action, new loot, possibly a working credential or shell "
-            "access. Use get_pending_actions (includes result_json for "
-            "anything already executed) and get_loot to see what's happened "
-            "since you last looked. If you now have a working credential or "
-            "command execution on a target, use that to investigate "
-            "further: what's on the system, signs of other users, "
-            "services, or hosts reachable from there, anything worth "
-            "exfiltrating, or a path to escalate privileges. If a proposed "
-            "credential was tried and failed, that doesn't mean the "
-            "approach is wrong -- a real breach dump usually has several "
-            "credentials in it, and a single wrong or rate-limited guess "
-            "isn't proof the rest won't work. If you still have untried "
-            "credentials from a finding, propose trying another one before "
-            "concluding there's nothing left to do. Propose whatever's "
-            "warranted next, or say clearly if you've genuinely exhausted "
-            "what's worth trying."
-        )
-    else:
-        user = (
-            "Review the recon findings from this session and assess what's worth "
-            "acting on. Record vulnerability findings and propose any actions you "
-            "believe are warranted."
-        )
+    this only lets the model look again, never act more than once per call.
+
+    is_continuation (an explicit --continue-assess) and internal chunk
+    restarts (see _run_chained_stage) share the exact same re-orientation
+    prompt, ASSESS_CONTINUATION_USER -- "review what's new via the read
+    tools, then keep going" reads the same whether a human triggered the
+    resume or a context-budget restart did."""
+    user = ASSESS_CONTINUATION_USER if is_continuation else (
+        "Review the recon findings from this session and assess what's worth "
+        "acting on. Record vulnerability findings and propose any actions you "
+        "believe are warranted."
+    )
     print("    waiting on model...")
     execute = _progress_wrapper(dispatch_assess_tool, conn, session_id)
 
@@ -1215,7 +1329,9 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     prior = (row["assess_summary"] or "") if row else ""
 
     try:
-        result = run_stage_turn(provider, ASSESS_SYSTEM_PROMPT, user, ASSESS_TOOLS, execute, max_iterations)
+        result = _run_chained_stage(provider, ASSESS_SYSTEM_PROMPT, user, ASSESS_CONTINUATION_USER,
+                                     ASSESS_TOOLS, execute, max_iterations, context_budget,
+                                     max_chunks, max_tokens_hard_cap, label="assess")
     except ProviderError as e:
         note = f"[assess incomplete -- {e}]"
         print(f"    {note}")
@@ -1380,6 +1496,18 @@ def main():
     ap.add_argument("--max-iterations", type=int, default=None,
                      help="override both stages' tool-call budget (default: "
                           f"recon={RECON_MAX_ITERATIONS}, assess={ASSESS_MAX_ITERATIONS})")
+    ap.add_argument("--context-budget", type=int, default=DEFAULT_CONTEXT_BUDGET,
+                     help="prompt-token ceiling per chunk before restarting fresh with a "
+                          f"re-orientation prompt (default: {DEFAULT_CONTEXT_BUDGET}; 0 disables "
+                          "chunking -- old single-call-per-stage behavior). Only enforced for "
+                          "providers with real usage reporting (gmi, fireworks); local/claude "
+                          "ignore it, see providers/local.py's run_agentic_turn docstring")
+    ap.add_argument("--max-chunks", type=int, default=DEFAULT_MAX_CHUNKS,
+                     help=f"max chunk restarts per stage before giving up (default: {DEFAULT_MAX_CHUNKS})")
+    ap.add_argument("--max-tokens-per-stage", type=int, default=None,
+                     help="hard ceiling on cumulative tokens for one stage across all its "
+                          "chunks; stops chaining immediately if crossed, even with chunks "
+                          "left (default: none -- max-chunks is the only ceiling)")
     ap.add_argument("--stats", action="store_true", help="show session/finding/pending counts, then exit")
     ap.add_argument("--list-pending", action="store_true", help="list pending_actions awaiting approval/execution")
     ap.add_argument("--approve", type=int, default=None, metavar="ID",
@@ -1420,7 +1548,9 @@ def main():
         print(f"[*] continuing assess on session {session_id} via "
               f"provider={row['provider']} model={provider.model}")
         assess_budget = args.max_iterations or ASSESS_MAX_ITERATIONS
-        result = run_assess_stage(conn, session_id, provider, assess_budget, is_continuation=True)
+        result = run_assess_stage(conn, session_id, provider, assess_budget, is_continuation=True,
+                                   context_budget=args.context_budget, max_chunks=args.max_chunks,
+                                   max_tokens_hard_cap=args.max_tokens_per_stage)
         print(f"    {result.tool_calls} tool call(s)")
         cmd_stats(conn)
         return
@@ -1435,6 +1565,9 @@ def main():
               f"provider={args.provider} model={resolved}")
         print(f"    lab mode: {lab_modes.current_mode()!r} (targets: {_TARGETS}, "
               f"gated tools: {list(GATED_TOOLS)})")
+        cb_desc = "disabled (single call per stage)" if not args.context_budget else f"{args.context_budget} prompt tokens/chunk"
+        cap_desc = "none" if not args.max_tokens_per_stage else f"{args.max_tokens_per_stage} tokens"
+        print(f"    chunking: context_budget={cb_desc}, max_chunks={args.max_chunks}, hard_cap={cap_desc}")
         print(f"    RECON  tools: {[t['name'] for t in RECON_TOOLS]}")
         print(f"    ASSESS tools: {[t['name'] for t in ASSESS_TOOLS]}")
         print("    Any exploitation/lateral-move/exfil action against a target inside "
@@ -1455,7 +1588,9 @@ def main():
           f"provider={args.provider} model={provider.model}")
 
     print("[*] stage: recon")
-    recon_result = run_recon_stage(conn, session_id, provider, recon_budget)
+    recon_result = run_recon_stage(conn, session_id, provider, recon_budget,
+                                    context_budget=args.context_budget, max_chunks=args.max_chunks,
+                                    max_tokens_hard_cap=args.max_tokens_per_stage)
     print(f"    {recon_result.tool_calls} tool call(s)")
     if recon_result.usage:
         u = recon_result.usage
@@ -1469,7 +1604,9 @@ def main():
         return
 
     print("[*] stage: assess")
-    assess_result = run_assess_stage(conn, session_id, provider, assess_budget)
+    assess_result = run_assess_stage(conn, session_id, provider, assess_budget,
+                                      context_budget=args.context_budget, max_chunks=args.max_chunks,
+                                      max_tokens_hard_cap=args.max_tokens_per_stage)
     print(f"    {assess_result.tool_calls} tool call(s)")
     if assess_result.usage:
         u = assess_result.usage

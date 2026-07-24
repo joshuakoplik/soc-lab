@@ -94,7 +94,7 @@ class LocalProvider:
                 self._supports_thinking = False
         return self._supports_thinking
 
-    def run_agentic_turn(self, messages, tools, execute_tool, max_iterations):
+    def run_agentic_turn(self, messages, tools, execute_tool, max_iterations, token_budget=None):
         """Send `messages`, dispatching any tool calls the model requests via
         execute_tool, until it stops requesting tools and gives a free-text
         turn. This is the shared loop mechanics both complete() (triage,
@@ -104,7 +104,16 @@ class LocalProvider:
         convention, not one per caller.
 
         `messages` is mutated in place and also returned via the result, so
-        the caller can keep the conversation going after this turn ends."""
+        the caller can keep the conversation going after this turn ends.
+
+        `token_budget` is accepted but ignored -- Ollama's /api/chat reports
+        usage as prompt_eval_count/eval_count, not the
+        {prompt_tokens,completion_tokens,total_tokens} shape openai_compat.py
+        tracks, and AgenticResult.usage stays None for this provider (see
+        base.py). Accepted anyway so redteam/agent.py's chunked stage runner
+        can pass the same call uniformly across all four providers without
+        needing to know which ones actually enforce it -- here it's just a
+        no-op, chunking degrades to iteration-count-only for local models."""
         # Ollama's tool format is OpenAI-shaped: {type, function:{name,
         # description, parameters}}. Our ToolSpec is already
         # {name, description, input_schema} -- just the field names differ.

@@ -19,7 +19,14 @@ import os
 import urllib.error
 import urllib.request
 
-from .base import AgenticResult, Heartbeat, ProviderError, Verdict, parse_verdict_json
+from .base import (
+    AgenticResult,
+    ContextBudgetExceeded,
+    Heartbeat,
+    ProviderError,
+    Verdict,
+    parse_verdict_json,
+)
 
 MAX_TOOL_ITERATIONS = 8
 
@@ -42,10 +49,22 @@ class OpenAICompatibleProvider:
             raise ProviderError(f"{self.api_key_env} is not set")
         return api_key
 
-    def run_agentic_turn(self, messages, tools, execute_tool, max_iterations):
+    def run_agentic_turn(self, messages, tools, execute_tool, max_iterations, token_budget=None):
         """Send `messages` (OpenAI chat-message shape), dispatching any
         tool_calls the model requests via execute_tool, until it stops
-        requesting tools and gives a final text turn."""
+        requesting tools and gives a final text turn.
+
+        `token_budget`, if given, is a second, tighter ceiling than
+        max_iterations: once this call's accumulated prompt tokens reach it
+        AND the model wants to keep calling tools, raise ContextBudgetExceeded
+        instead of dispatching another round -- deliberately checked only
+        when the model is about to continue, never on a turn that would
+        otherwise return a real final answer, so a legitimately-concluding
+        call is never discarded just for arriving a little over budget. See
+        redteam/agent.py's chunked stage runner, the caller this exists for:
+        it catches ContextBudgetExceeded specifically to mean "start a fresh
+        chunk," distinct from every other ProviderError, which means "this
+        campaign is genuinely broken, stop."""
         openai_tools = [
             {
                 "type": "function",
@@ -76,6 +95,11 @@ class OpenAICompatibleProvider:
             requested = message.get("tool_calls") or []
 
             if requested:
+                if token_budget and usage_totals["prompt_tokens"] >= token_budget:
+                    raise ContextBudgetExceeded(
+                        f"context budget exceeded: {usage_totals['prompt_tokens']} prompt "
+                        f"tokens >= {token_budget} (model still requesting tool calls)"
+                    )
                 messages.append(message)
                 for call in requested:
                     tool_calls += 1

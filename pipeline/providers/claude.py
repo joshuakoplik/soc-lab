@@ -30,7 +30,7 @@ class ClaudeProvider:
     def __init__(self, model):
         self.model = model
 
-    def run_agentic_turn(self, system, messages, tools, execute_tool, max_iterations):
+    def run_agentic_turn(self, system, messages, tools, execute_tool, max_iterations, token_budget=None):
         """Send `messages` (Anthropic content-block shape), dispatching any
         tool_use blocks via execute_tool, until the model stops requesting
         tools and gives a final text turn. Loop mechanics shared between
@@ -40,7 +40,12 @@ class ClaudeProvider:
         tool_use/tool_result content-block bookkeeping, not one per caller.
 
         `messages` is mutated in place and also returned via the result, so
-        the caller can keep the conversation going after this turn ends."""
+        the caller can keep the conversation going after this turn ends.
+
+        `token_budget` is accepted but ignored -- usage isn't wired up for
+        this provider yet (see base.py's AgenticResult.usage docstring), so
+        there's nothing to check it against. Accepted for the same uniform-
+        call-signature reason as local.py's no-op."""
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise ProviderError("ANTHROPIC_API_KEY is not set")

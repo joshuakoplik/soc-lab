@@ -110,6 +110,18 @@ class ProviderError(Exception):
     move on." One candidate's bad day does not get to kill the batch."""
 
 
+class ContextBudgetExceeded(ProviderError):
+    """Raised by run_agentic_turn() instead of the plain "exceeded N
+    iterations" ProviderError when a `token_budget` was given and this
+    call's accumulated prompt tokens crossed it -- deliberately BEFORE
+    max_iterations, so a caller doing chunked/chained turns (see
+    redteam/agent.py's run_recon_stage/run_assess_stage) can tell "this
+    chunk got too big, start a fresh one" apart from a real failure or
+    genuine iteration exhaustion. Still a ProviderError, so code that only
+    catches the base class (e.g. pipeline/triage/agent.py, which has no
+    concept of chunking) keeps working unchanged."""
+
+
 class Provider(Protocol):
     model: str
 
