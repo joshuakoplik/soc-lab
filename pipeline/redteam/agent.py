@@ -82,6 +82,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, PIPELINE)
 import executor as redteam_exec  # noqa: E402
 import lab_modes  # noqa: E402
+from providers.base import AgenticResult, ProviderError  # noqa: E402
 from providers.claude import ClaudeProvider  # noqa: E402
 from providers.fireworks import FireworksProvider  # noqa: E402
 from providers.gmi import GMIProvider  # noqa: E402
@@ -1127,6 +1128,21 @@ def run_stage_turn(provider, system, user, tools, execute_tool, max_iterations):
     return provider.run_agentic_turn(messages, tools, execute_tool, max_iterations)
 
 
+def _stage_failure_result(provider):
+    """Stand-in AgenticResult for a stage that raised ProviderError instead
+    of returning normally -- iteration-budget exhaustion (the model never
+    produced a final non-tool-call turn) is the case this was written for,
+    but a bad API key, a network blip, or a rate limit all raise the same
+    ProviderError and deserve the same treatment: don't crash with a raw
+    traceback, record what's known, let the caller continue or exit
+    cleanly. tool_calls=0 here is a placeholder, not a real count -- every
+    tool call the model actually made before the failure is already
+    committed to recon_findings/pending_actions/vuln_findings as a dispatch
+    side effect (see _progress_wrapper), so nothing about the model's
+    actions is lost, only its own wrap-up text."""
+    return AgenticResult(final_text="", tool_calls=0, thinking=None, messages=[], model=provider.model)
+
+
 def run_recon_stage(conn, session_id, provider, max_iterations):
     user = (
         "Begin reconnaissance. Targets in scope:\n" + _targets_block +
@@ -1135,7 +1151,18 @@ def run_recon_stage(conn, session_id, provider, max_iterations):
     print("    waiting on model (first call can take a while on local models)...")
     execute = _progress_wrapper(dispatch_recon_tool, conn, session_id)
 
-    result = run_stage_turn(provider, RECON_SYSTEM_PROMPT, user, RECON_TOOLS, execute, max_iterations)
+    try:
+        result = run_stage_turn(provider, RECON_SYSTEM_PROMPT, user, RECON_TOOLS, execute, max_iterations)
+    except ProviderError as e:
+        note = f"[recon incomplete -- {e}]"
+        print(f"    {note}")
+        conn.execute(
+            "UPDATE redteam_sessions SET status='incomplete', recon_summary=?, ended=? WHERE id=?",
+            (note, now_iso(), session_id),
+        )
+        conn.commit()
+        return _stage_failure_result(provider)
+
     conn.execute(
         "UPDATE redteam_sessions SET stage='assess', recon_summary=? WHERE id=?",
         (result.final_text, session_id),
@@ -1184,9 +1211,22 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     print("    waiting on model...")
     execute = _progress_wrapper(dispatch_assess_tool, conn, session_id)
 
-    result = run_stage_turn(provider, ASSESS_SYSTEM_PROMPT, user, ASSESS_TOOLS, execute, max_iterations)
     row = conn.execute("SELECT assess_summary FROM redteam_sessions WHERE id=?", (session_id,)).fetchone()
     prior = (row["assess_summary"] or "") if row else ""
+
+    try:
+        result = run_stage_turn(provider, ASSESS_SYSTEM_PROMPT, user, ASSESS_TOOLS, execute, max_iterations)
+    except ProviderError as e:
+        note = f"[assess incomplete -- {e}]"
+        print(f"    {note}")
+        combined = f"{prior}\n\n--- assess round, {now_iso()} (incomplete) ---\n{note}" if prior else note
+        conn.execute(
+            "UPDATE redteam_sessions SET stage='done', status='incomplete', assess_summary=?, ended=? WHERE id=?",
+            (combined, now_iso(), session_id),
+        )
+        conn.commit()
+        return _stage_failure_result(provider)
+
     combined = f"{prior}\n\n--- assess round, {now_iso()} ---\n{result.final_text}" if prior else result.final_text
     conn.execute(
         "UPDATE redteam_sessions SET stage='done', assess_summary=? WHERE id=?",
@@ -1422,6 +1462,12 @@ def main():
         print(f"    tokens: {u['prompt_tokens']} prompt / {u['completion_tokens']} "
               f"completion / {u['total_tokens']} total")
 
+    status_row = conn.execute("SELECT status FROM redteam_sessions WHERE id=?", (session_id,)).fetchone()
+    if status_row["status"] == "incomplete":
+        print(f"\n[*] session {session_id} stopped after recon (incomplete) -- skipping assess.")
+        cmd_stats(conn)
+        return
+
     print("[*] stage: assess")
     assess_result = run_assess_stage(conn, session_id, provider, assess_budget)
     print(f"    {assess_result.tool_calls} tool call(s)")
@@ -1430,8 +1476,10 @@ def main():
         print(f"    tokens: {u['prompt_tokens']} prompt / {u['completion_tokens']} "
               f"completion / {u['total_tokens']} total")
 
+    # No-op if run_assess_stage already marked this 'incomplete' -- the WHERE
+    # clause is what makes that authoritative rather than overwritten here.
     conn.execute(
-        "UPDATE redteam_sessions SET status='completed', ended=? WHERE id=?",
+        "UPDATE redteam_sessions SET status='completed', ended=? WHERE id=? AND status='running'",
         (now_iso(), session_id),
     )
     conn.commit()
