@@ -1343,10 +1343,18 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
         conn.commit()
         return _stage_failure_result(provider)
 
+    # assess is always the last stage, so its own successful conclusion is
+    # what "this session is done" means -- set status here rather than
+    # leaving it to the caller. Matters most for --continue-assess: before
+    # this, a session whose FIRST assess attempt failed (status='incomplete')
+    # stayed marked incomplete forever even after a successful retry, since
+    # nothing on the retry path ever touched status. Unconditional on success
+    # (not WHERE status='running') because a retry is expected to start from
+    # 'incomplete', not 'running'.
     combined = f"{prior}\n\n--- assess round, {now_iso()} ---\n{result.final_text}" if prior else result.final_text
     conn.execute(
-        "UPDATE redteam_sessions SET stage='done', assess_summary=? WHERE id=?",
-        (combined, session_id),
+        "UPDATE redteam_sessions SET stage='done', status='completed', assess_summary=?, ended=? WHERE id=?",
+        (combined, now_iso(), session_id),
     )
     conn.commit()
     print(f"    assess summary: {_preview(result.final_text, 200)}")
@@ -1613,13 +1621,8 @@ def main():
         print(f"    tokens: {u['prompt_tokens']} prompt / {u['completion_tokens']} "
               f"completion / {u['total_tokens']} total")
 
-    # No-op if run_assess_stage already marked this 'incomplete' -- the WHERE
-    # clause is what makes that authoritative rather than overwritten here.
-    conn.execute(
-        "UPDATE redteam_sessions SET status='completed', ended=? WHERE id=? AND status='running'",
-        (now_iso(), session_id),
-    )
-    conn.commit()
+    # run_assess_stage itself now sets status/ended on both its success and
+    # failure paths -- nothing left to do here.
 
     if recon_result.usage and assess_result.usage:
         total = {
