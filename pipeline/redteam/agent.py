@@ -106,7 +106,18 @@ DEFAULT_MODEL = {
 RECON_MAX_ITERATIONS = 20
 ASSESS_MAX_ITERATIONS = 15
 
-GATED_TOOLS = ("hydra_bruteforce", "sqlmap_scan", "ssh_exec", "msf_run_module")
+GATED_TOOLS = ("hydra_bruteforce", "sqlmap_scan", "ssh_exec", "msf_run_module", "shell_exec")
+
+# shell_exec is deliberately unconstrained at the Python level -- no target
+# allowlist, no module allowlist, arbitrary shell string. That's only safe
+# because containment moved to a layer this file doesn't control: soc-attacker
+# is expected to be running under an iptables OUTPUT policy (loopback + the
+# lab subnet only, default DROP) applied out-of-band for engagements that
+# enable this tool. A JSON-schema enum or a Python allowlist is advisory --
+# see executor.py's own docstring -- but a container that physically cannot
+# route anywhere outside 10.211.0.0/24 is not. Do not enable shell_exec
+# against a soc-attacker that hasn't had that lockdown applied; it has no
+# guardrail of its own.
 
 # Every entry here was verified end-to-end against the running metasploitable
 # container (not just msf's own `check`, which several of these don't even
@@ -258,18 +269,25 @@ ASSESS_TOOLS = [
             "propose_action(tool=\"hydra_bruteforce\", target=\"cowrie\", "
             "params={\"username\": \"svc-deploy\", \"password\": \"the-actual-password\"}, "
             "rationale=\"credential found in exposed backup file\"). To exploit "
-            "metasploitable, tool=\"msf_run_module\" with params={\"module\": one of "
+            "metasploitable via the curated msf helper, tool=\"msf_run_module\" with "
+            "params={\"module\": one of "
             f"{sorted(ALLOWED_MSF_MODULES)}, \"session_commands\": optional list of "
             "shell commands to run on the session that opens (e.g. recon or privilege-"
             "escalation checks -- SUID binaries, sudo -l, writable configs). If the "
             "module lands a non-root shell, that's not a dead end: use session_commands "
-            "in a follow-up proposal to look for a path to root."
+            "in a follow-up proposal to look for a path to root. "
+            "tool=\"shell_exec\" runs ANY command inside the attacker box, no allowlist -- "
+            "the full Kali toolset (msfconsole with any module, searchsploit, john, "
+            "custom scripts, anything) via params={\"command\": \"<shell string>\", "
+            "\"timeout_s\": optional, default 180s/600s unrestricted, capped at 900s}. "
+            "Use target=\"lab\" for shell_exec calls not tied to one specific named "
+            "target (e.g. a searchsploit lookup)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "tool": {"type": "string", "enum": list(GATED_TOOLS)},
-                "target": {"type": "string", "enum": ["cowrie", "nginx", "metasploitable"]},
+                "target": {"type": "string", "enum": ["cowrie", "nginx", "metasploitable", "lab"]},
                 "params": {"type": "object", "description": "tool-specific; validated at execution time, not here"},
                 "rationale": {"type": "string"},
                 "based_on": {"type": "array", "items": {"type": "integer"}, "description": "vuln_findings ids"},
@@ -331,8 +349,8 @@ are inside the lab's whitelisted network, which means calling propose_action
 against any of them runs immediately -- there is no human approval step for
 this engagement, so treat propose_action as "do it", not "ask to do it".
 
-For metasploitable specifically, use tool="msf_run_module" with a `module`
-from this allowlist (any other module name will be rejected):
+For metasploitable specifically, tool="msf_run_module" gives you a curated,
+pre-verified helper for these modules:
 """ + "\n".join(f"  {m} -- {spec['description']}" for m, spec in ALLOWED_MSF_MODULES.items()) + """
 Pass session_commands (a list of shell commands) to act on the session the
 module opens -- recon, or privilege-escalation checks if the shell isn't
@@ -342,6 +360,25 @@ proposal cannot reconnect to one already open. If a module lands a non-root
 shell, don't treat that as a dead end -- use session_commands right there to
 look for a path to root (SUID binaries, sudo -l, writable configs, and
 similar are worth checking).
+
+You also have tool="shell_exec": runs ANY command inside the attacker box,
+no module allowlist, no target restriction, the full Kali toolset --
+msfconsole with any module (not just the four above), searchsploit, john,
+hydra with syntax the curated hydra_bruteforce tool doesn't expose, custom
+multi-step shell pipelines, anything you'd type in a real terminal. Use it
+via params={"command": "<shell string>", "timeout_s": optional}. You do not
+need to self-restrict which hosts a command touches for safety -- the
+attacker container is under a network-level lockdown (only the lab subnet
+is routable at all, everything else is physically unreachable from inside
+it) -- but you should still stay purposeful: cowrie/nginx/metasploitable are
+the actual engagement scope, so keep shell_exec calls aimed at those three
+(target="lab" is fine for something not tied to one of them, e.g. a
+searchsploit lookup). This tool has no training wheels: read msfconsole's
+own module options (`info <module>`, `show options`) rather than guessing
+RHOSTS/LHOST/payload names, and don't treat one failed attempt as final --
+a different payload, a different technique, or acting on what a session
+already gave you (creds, a foothold, a config file) are all fair game.
+Reason as long as you need to; there's no reward for stopping early.
 
 Use get_recon_findings / get_loot / get_pending_actions to review what's
 already known. Call raise_vuln_finding for anything you assess as a real
@@ -615,7 +652,12 @@ def tool_raise_vuln_finding(conn, session_id, target, category, severity, descri
 def tool_propose_action(conn, session_id, tool, target, params, rationale, based_on):
     if tool not in GATED_TOOLS:
         return json.dumps({"error": f"unknown gated tool: {tool!r}, must be one of {GATED_TOOLS}"}), True
-    redteam_exec.validate_target(target)  # fence even at proposal time -- fail loud, don't queue garbage
+    # shell_exec is the one tool with no target allowlist at all (see its
+    # GATED_TOOLS comment) -- "lab" is a valid label for it precisely
+    # because it isn't one of ALLOWED_TARGETS, so validate_target() would
+    # reject every shell_exec call outright if applied here.
+    if tool != "shell_exec":
+        redteam_exec.validate_target(target)  # fence even at proposal time -- fail loud, don't queue garbage
     if isinstance(params, str):
         # Observed live against llama3.3:70b: it sent `params` as a
         # JSON-encoded string instead of a nested object, even though the
@@ -633,8 +675,12 @@ def tool_propose_action(conn, session_id, tool, target, params, rationale, based
     # Whitelisted-network exception (see module docstring): a target fully
     # inside redteam_exec.ALLOWED_NETWORKS is lab-internal by construction,
     # so a gated action against it skips the approve/execute-approved round
-    # trip and runs in this same call.
-    auto = redteam_exec.in_whitelisted_network(target)
+    # trip and runs in this same call. shell_exec has no single target to
+    # resolve/check this way (in_whitelisted_network("lab") would just fail
+    # to resolve and return False) -- its containment is the iptables
+    # lockdown on soc-attacker itself, not this IP check, so it always
+    # qualifies for the same immediate-execution path.
+    auto = True if tool == "shell_exec" else redteam_exec.in_whitelisted_network(target)
     ts = now_iso()
     cur = conn.execute(
         "INSERT INTO pending_actions (session_id, tool, target, input_json, rationale, based_on, "
@@ -881,11 +927,46 @@ def _exec_msf_run_module(session_id, target, params, unrestricted=False):
     return result, rc_ctr
 
 
+def _exec_shell(session_id, target, params, unrestricted=False):
+    """Free-form command execution inside soc-attacker. Deliberately skips
+    redteam_exec.validate_target() -- there is no single target this command
+    is scoped to, that's the point of the tool -- and there is no module or
+    argument allowlist of any kind. See GATED_TOOLS' comment: the thing that
+    makes this safe to expose at all is an iptables OUTPUT lockdown on
+    soc-attacker applied outside this codebase (loopback + 10.211.0.0/24
+    only, default DROP), not anything in this function. If that lockdown
+    isn't active, this function has no containment of its own.
+
+    Runs via `bash -c` rather than a plain argv list so pipes, redirects,
+    and multi-command shell syntax all work -- msfconsole -x with
+    semicolons, searchsploit | grep, a multi-step recon-and-crack chain,
+    anything a real terminal session could do.
+    """
+    command = params.get("command")
+    if not command:
+        raise ValueError("command is required")
+    requested = int(params.get("timeout_s") or (600 if unrestricted else 180))
+    timeout_s = min(requested, 900)
+
+    argv = ["bash", "-c", command]
+    result = redteam_exec.run(argv, timeout_s=timeout_s, max_output_chars=24000)
+
+    loot_host, loot_ctr = _loot_paths(session_id, f"shell-{int(time.time())}.log")
+    with open(loot_host, "w") as f:
+        f.write(
+            f"$ {command}\n\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}\n"
+            f"--- exit_code={result.exit_code} timed_out={result.timed_out} "
+            f"elapsed_s={result.elapsed_s:.1f} ---\n"
+        )
+    return result, loot_ctr
+
+
 GATED_EXECUTORS = {
     "hydra_bruteforce": _exec_hydra_bruteforce,
     "sqlmap_scan": _exec_sqlmap_scan,
     "ssh_exec": _exec_ssh_exec,
     "msf_run_module": _exec_msf_run_module,
+    "shell_exec": _exec_shell,
 }
 
 
