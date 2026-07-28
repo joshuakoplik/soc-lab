@@ -316,6 +316,11 @@ _TARGET_DESCRIPTIONS = {
         "container, IRC, and more). Unlike cowrie this is a genuine OS -- "
         "findings here are real, not emulated."
     ),
+    "wp2shell": (
+        "a real WordPress installation, reached directly (no reverse proxy "
+        "in front of it, unlike the nginx target elsewhere in this lab). A "
+        "genuine CMS, not an emulated or scripted app -- findings here are real."
+    ),
 }
 _targets_block = "\n".join(f"  {t:<15} -- {_TARGET_DESCRIPTIONS[t]}" for t in _TARGETS)
 
