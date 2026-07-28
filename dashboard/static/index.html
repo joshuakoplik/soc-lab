@@ -21,30 +21,39 @@
   </div>
 </header>
 
-<main class="columns">
-  <section class="panel" id="panel-telemetry">
-    <div class="panel-head">
-      <h2>Live Telemetry</h2>
-      <span class="panel-sub">raw events, as ingested</span>
-    </div>
-    <div class="feed" id="feed-events"></div>
-  </section>
+<nav class="tabs">
+  <button class="tab-btn active" data-view="monitoring">Monitoring</button>
+  <button class="tab-btn" data-view="telemetry">Live Telemetry</button>
+</nav>
 
-  <section class="panel" id="panel-defender">
-    <div class="panel-head">
-      <h2>Defender Log</h2>
-      <span class="panel-sub">triage reasoning &middot; alerts &middot; block actions</span>
-    </div>
-    <div class="feed" id="feed-defender"></div>
-  </section>
+<main>
+  <div class="view columns active" id="view-monitoring">
+    <section class="panel" id="panel-defender">
+      <div class="panel-head">
+        <h2>Defender Log</h2>
+        <span class="panel-sub">triage reasoning &middot; alerts &middot; block actions</span>
+      </div>
+      <div class="feed" id="feed-defender"></div>
+    </section>
 
-  <section class="panel" id="panel-attacker">
-    <div class="panel-head">
-      <h2>Attacker Campaigns</h2>
-      <span class="panel-sub">red-team sessions against this lab</span>
-    </div>
-    <div class="feed" id="feed-attacker"></div>
-  </section>
+    <section class="panel" id="panel-attacker">
+      <div class="panel-head">
+        <h2>Attacker Campaigns</h2>
+        <span class="panel-sub">red-team sessions against this lab</span>
+      </div>
+      <div class="feed" id="feed-attacker"></div>
+    </section>
+  </div>
+
+  <div class="view columns" id="view-telemetry">
+    <section class="panel" id="panel-telemetry">
+      <div class="panel-head">
+        <h2>Live Telemetry</h2>
+        <span class="panel-sub">raw events, as ingested</span>
+      </div>
+      <div class="feed" id="feed-events"></div>
+    </section>
+  </div>
 </main>
 
 <script src="/static/app.js"></script>

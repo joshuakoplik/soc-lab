@@ -108,16 +108,39 @@ h1 .muted { color: var(--muted); font-weight: 400; }
   margin-top: 2px;
 }
 
-.columns {
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 20px 0;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--gridline);
+}
+.tab-btn {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  padding: 8px 14px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tab-btn:hover { color: var(--text-primary); }
+.tab-btn.active { color: var(--text-primary); border-bottom-color: var(--series-cowrie); }
+
+.view { display: none; }
+.view.active {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 1px;
   background: var(--gridline);
-  height: calc(100vh - 108px);
+  height: calc(100vh - 148px);
 }
+#view-telemetry.active { grid-template-columns: 1fr; }
 
 @media (max-width: 1100px) {
-  .columns { grid-template-columns: 1fr; height: auto; }
+  .view.active { grid-template-columns: 1fr; height: auto; }
   .panel { height: 70vh; }
 }
 

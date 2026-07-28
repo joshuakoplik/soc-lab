@@ -40,20 +40,22 @@ function updateStat(id, value) {
   document.getElementById(id).textContent = value;
 }
 
-function isNearBottom(el) {
-  return el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+function isNearTop(el) {
+  return el.scrollTop < 60;
 }
 
+// Feeds render newest-first: new lines are prepended, and the oldest line is
+// trimmed off the bottom once a feed exceeds its cap.
 function appendLine(feedEl, innerHtml, statusClass, cap = 400) {
   const placeholder = feedEl.querySelector(".empty");
   if (placeholder) placeholder.remove();
-  const wasNear = isNearBottom(feedEl);
+  const wasNear = isNearTop(feedEl);
   const div = document.createElement("div");
   div.className = "line" + (statusClass ? " " + statusClass : "");
   div.innerHTML = innerHtml;
-  feedEl.appendChild(div);
-  while (feedEl.children.length > cap) feedEl.removeChild(feedEl.firstChild);
-  if (wasNear) feedEl.scrollTop = feedEl.scrollHeight;
+  feedEl.insertBefore(div, feedEl.firstChild);
+  while (feedEl.children.length > cap) feedEl.removeChild(feedEl.lastChild);
+  if (wasNear) feedEl.scrollTop = 0;
 }
 
 function buildEntry(ts, headHtml, bodyHtml) {
@@ -368,6 +370,17 @@ function connectWS() {
     try { handleMessage(JSON.parse(ev.data)); } catch (e) { console.error(e); }
   };
 }
+
+// ---------- tabs ----------
+
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("view-" + btn.dataset.view).classList.add("active");
+  });
+});
 
 // ---------- init ----------
 
