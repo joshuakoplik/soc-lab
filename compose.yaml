@@ -84,6 +84,107 @@ services:
     # as Juice Shop and Cowrie's real sshd port, just with a much sharper
     # consequence if it were ever exposed.
 
+  # --- Target 4: real WordPress core, pinned to the version vulnerable to
+  #     "wp2shell" (CVE-2026-63030 batch REST API logic flaw chained with
+  #     CVE-2026-60137 SQL injection in WP_Query) -- unauthenticated RCE.
+  #     See wordpress-wp2shell/README for the vuln writeup and why
+  #     auto-update has to be hard-disabled. Own profile, separate from
+  #     easy/hard, same reasoning as legacy-svc: a single-target scenario
+  #     isolating one specific vulnerability rather than a difficulty rung. ---
+  wp2shell-db:
+    image: mariadb:10.11
+    container_name: soc-wp2shell-db
+    restart: unless-stopped
+    profiles: ["wp2shell"]
+    environment:
+      - MYSQL_DATABASE=wordpress
+      - MYSQL_USER=wordpress
+      - MYSQL_PASSWORD=${WP2SHELL_DB_PASSWORD}
+      - MYSQL_RANDOM_ROOT_PASSWORD=yes
+    volumes:
+      - wp2shell-db-data:/var/lib/mysql
+    networks: [soclab]
+
+  wp2shell:
+    image: wordpress:7.0.1-php8.3-apache
+    container_name: soc-wp2shell
+    restart: unless-stopped
+    profiles: ["wp2shell"]
+    depends_on: [wp2shell-db]
+    expose:
+      - "80"
+    environment:
+      - WORDPRESS_DB_HOST=wp2shell-db
+      - WORDPRESS_DB_NAME=wordpress
+      - WORDPRESS_DB_USER=wordpress
+      - WORDPRESS_DB_PASSWORD=${WP2SHELL_DB_PASSWORD}
+      # Hard-disable core auto-update. The real-world fix for this CVE pair
+      # shipped via WordPress's forced auto-update push, so leaving this at
+      # defaults would patch the target out from under the lab.
+      - WORDPRESS_CONFIG_EXTRA=define('WP_AUTO_UPDATE_CORE', false); define('AUTOMATIC_UPDATER_DISABLED', true); define('DISALLOW_FILE_MODS', true);
+    volumes:
+      - wp2shell-html:/var/www/html
+    networks: [soclab]
+    # No ports published -- reach it from soc-attacker as http://wp2shell,
+    # same no-host-exposure rule as every other intentionally-vulnerable
+    # target in this lab.
+
+  # One-shot wp-cli install: `wp core install` plus a second author and a
+  # few posts (talks to the shared volume + DB directly, no HTTP needed).
+  # Exits once done; restart: "no" so compose doesn't loop-restart it.
+  wp2shell-init:
+    image: wordpress:cli-php8.3
+    container_name: soc-wp2shell-init
+    profiles: ["wp2shell"]
+    restart: "no"
+    depends_on: [wp2shell, wp2shell-db]
+    entrypoint: ["/bin/sh", "/init.sh"]
+    environment:
+      # wp-config.php reads these itself (getenv_docker(...) calls baked into
+      # the file by the wp2shell container's entrypoint) -- wp-cli needs the
+      # same DB_* vars or it falls back to wp-config's own default host
+      # ('mysql', which doesn't exist on this network) instead of wp2shell-db.
+      - WORDPRESS_DB_HOST=wp2shell-db
+      - WORDPRESS_DB_NAME=wordpress
+      - WORDPRESS_DB_USER=wordpress
+      - WORDPRESS_DB_PASSWORD=${WP2SHELL_DB_PASSWORD}
+      - WP_ADMIN_USER=admin
+      - WP_ADMIN_PASSWORD=${WP2SHELL_ADMIN_PASSWORD}
+      - WP_ADMIN_EMAIL=admin@wp2shell.lab
+      - WP_SITE_URL=http://wp2shell
+      - WP_SITE_TITLE=wp2shell lab
+    volumes:
+      - wp2shell-html:/var/www/html
+      - ./wordpress-wp2shell/init.sh:/init.sh:ro
+    networks: [soclab]
+
+  # Defense in depth on top of the auto-update constants above: same
+  # egress-lock pattern as juiceshop-netlock in compose.hard.yml, applied to
+  # wp2shell's network namespace so it can't reach api.wordpress.org (or
+  # anything else off-subnet) even if the in-app disable were bypassed.
+  wp2shell-netlock:
+    image: alpine:latest
+    container_name: soc-wp2shell-netlock
+    profiles: ["wp2shell"]
+    network_mode: "container:soc-wp2shell"
+    cap_add: [NET_ADMIN, NET_RAW]
+    depends_on: [wp2shell]
+    restart: "no"
+    command: >
+      sh -c "
+      apk add --no-cache iptables ip6tables >/dev/null &&
+      iptables -F OUTPUT &&
+      iptables -A OUTPUT -o lo -j ACCEPT &&
+      iptables -A OUTPUT -d 10.211.0.0/24 -j ACCEPT &&
+      iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT &&
+      iptables -A OUTPUT -j DROP &&
+      ip6tables -F OUTPUT &&
+      ip6tables -A OUTPUT -o lo -j ACCEPT &&
+      ip6tables -A OUTPUT -j DROP &&
+      echo '[wp2shell-netlock] egress locked to 10.211.0.0/24' &&
+      sleep infinity
+      "
+
   # --- Network IDS. Watches the whole bridge; emits EVE JSON. ---
   suricata:
     image: jasonish/suricata:latest
@@ -182,3 +283,5 @@ networks:
 
 volumes:
   suricata-rules:
+  wp2shell-db-data:
+  wp2shell-html:
