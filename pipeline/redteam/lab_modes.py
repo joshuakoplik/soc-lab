@@ -9,16 +9,18 @@ Difficulty/scenario configuration for the red-team agent. Three modes:
               host to pivot to. Juice Shop is hardened (hints/tutorial off,
               safetyMode: disabled -- see juiceshop/config/hard.yml) and
               network-locked the same way soc-attacker is.
-  wp2shell -- ONLY wp2shell, real WordPress core pinned to the version
+  wordpress -- ONLY wordpress, real WordPress core pinned to the version
               vulnerable to CVE-2026-63030 / CVE-2026-60137 (see
-              wordpress-wp2shell/README). No cowrie, no nginx/Juice Shop, no
+              wordpress/README). No cowrie, no nginx/Juice Shop, no
               metasploitable -- a single-target scenario purpose-built to
               isolate this one vulnerability, not a difficulty tier of the
-              other two. No RECON_TOOLS/ASSESS_TOOLS entry is wp2shell-aware
+              other two. No RECON_TOOLS/ASSESS_TOOLS entry is wordpress-aware
               beyond the plain target allowlist (http_probe in particular is
               hardcoded to nginx only, see agent.py) -- shell_exec is the only
               gated tool that means anything here, same reasoning as hard
-              mode's narrower set, just narrower still.
+              mode's narrower set, just narrower still. Named plainly, not as
+              a codename for the exploit chain -- see git history if curious
+              why that mattered.
 
 lab_mode.json (repo root, gitignored) is the single source of truth for
 which mode is ACTUALLY RUNNING right now -- written by lab-mode.sh, read
@@ -108,14 +110,14 @@ HARD = {
 
 # sqlmap_scan/hydra_bruteforce/ssh_exec/msf_run_module all gate on a target
 # this mode never has running, so shell_exec (unconstrained curl/anything
-# against wp2shell) is the only gated tool that means anything here.
-WP2SHELL = {
-    "targets": ("wp2shell",),
+# against wordpress) is the only gated tool that means anything here.
+WORDPRESS = {
+    "targets": ("wordpress",),
     "gated_tools": ("shell_exec",),
     "msf_modules": {},
 }
 
-MODES = {"easy": EASY, "hard": HARD, "wp2shell": WP2SHELL}
+MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS}
 
 
 def current_mode():

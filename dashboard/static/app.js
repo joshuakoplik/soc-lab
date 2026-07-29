@@ -20,8 +20,16 @@ function toEpoch(ts) {
 }
 
 function fmtTime(ts) {
-  if (!ts) return "--:--:--";
-  return new Date(toEpoch(ts)).toLocaleTimeString("en-US", { hour12: false });
+  // Always UTC, always this exact shape -- every source (cowrie/nginx/
+  // suricata/wazuh containers, this dashboard's host) agrees on UTC, but
+  // toLocaleTimeString was rendering in the *viewer's* browser TZ, which is
+  // what actually made timestamps look like they didn't line up. DD/MM/YY
+  // HH:MM:SS.UUU UTC removes that ambiguity outright.
+  if (!ts) return "--/--/-- --:--:--.--- UTC";
+  const d = new Date(toEpoch(ts));
+  const pad = (n, len = 2) => String(n).padStart(len, "0");
+  return `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCFullYear() % 100)} ` +
+    `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)} UTC`;
 }
 
 function escapeHtml(s) {
@@ -40,22 +48,26 @@ function updateStat(id, value) {
   document.getElementById(id).textContent = value;
 }
 
-function isNearTop(el) {
-  return el.scrollTop < 60;
-}
-
-// Feeds render newest-first: new lines are prepended, and the oldest line is
-// trimmed off the bottom once a feed exceeds its cap.
-function appendLine(feedEl, innerHtml, statusClass, cap = 400) {
+function appendLine(feedEl, innerHtml, statusClass, cap = 400, ts = null) {
+  // Newest at the top, always -- inserted by actual timestamp rather than
+  // arrival order, because suricata and wazuh are independently-polled
+  // tailers with different latency, so "just arrived" and "actually most
+  // recent" aren't the same thing. Trimming (when capped) drops from the
+  // bottom, i.e. the oldest entries, which is now the opposite end from
+  // before.
   const placeholder = feedEl.querySelector(".empty");
   if (placeholder) placeholder.remove();
-  const wasNear = isNearTop(feedEl);
   const div = document.createElement("div");
   div.className = "line" + (statusClass ? " " + statusClass : "");
   div.innerHTML = innerHtml;
-  feedEl.insertBefore(div, feedEl.firstChild);
+  const epoch = ts != null ? toEpoch(ts) : Date.now();
+  div.dataset.epoch = epoch;
+
+  let ref = feedEl.firstChild;
+  while (ref && ref.dataset && Number(ref.dataset.epoch) > epoch) ref = ref.nextSibling;
+  feedEl.insertBefore(div, ref);
+
   while (feedEl.children.length > cap) feedEl.removeChild(feedEl.lastChild);
-  if (wasNear) feedEl.scrollTop = 0;
 }
 
 function buildEntry(ts, headHtml, bodyHtml) {
@@ -106,7 +118,7 @@ function renderEventLine(row) {
   const head = `<span class="tag src-${escapeHtml(row.source)}">${escapeHtml(row.source)}</span>` +
     `<span class="ctx">${escapeHtml(row.src_ip || "")}</span>` +
     `<span class="body"><span class="${bodyClass}">${escapeHtml(d.text)}</span>${d.extra ? ` <span class="ctx">${escapeHtml(d.extra)}</span>` : ""}</span>`;
-  appendLine(feedEvents, buildEntry(row.ts, head, null), null, 400);
+  appendLine(feedEvents, buildEntry(row.ts, head, null), null, 400, row.ts);
 }
 
 // ---------- Defender Log (triage / alerts / block actions) ----------
@@ -129,8 +141,18 @@ function renderDefenderRow(table, row) {
   } else if (table === "agent_alerts") {
     statusClass = severityStatusClass(row.severity);
     head = `<span class="action-icon">\u{1F514}</span><span class="tag ${statusClass}">alert \u00b7 ${escapeHtml(row.severity)}</span>` +
-      `<span class="ctx">${candidateCtx(row.candidate_id)} \u00b7 paging on-call</span>`;
+      `<span class="ctx">${candidateCtx(row.candidate_id)} \u00b7 raise_alert() \u2014 safe, no gate</span>`;
     body = escapeHtml(row.summary || "");
+    alertTimes.push(toEpoch(row.created));
+  } else if (table === "human_pages") {
+    // page_oncall() -- the loudest tool the agent has. Distinct from
+    // agent_alerts/raise_alert above: this is a test stand-in claiming a
+    // human would be woken up RIGHT NOW, not a queued/logged record. See
+    // tool_page_oncall's docstring in triage/agent.py.
+    statusClass = "st-critical";
+    head = `<span class="action-icon">\u{1F4DF}</span><span class="tag st-critical">PAGING ON-CALL</span>` +
+      `<span class="ctx">${candidateCtx(row.candidate_id)} \u00b7 page_oncall() \u2014 test stand-in, no real page sent</span>`;
+    body = escapeHtml(row.reason || "");
     alertTimes.push(toEpoch(row.created));
   } else if (table === "block_recommendations") {
     statusClass = "st-warning";
@@ -138,14 +160,20 @@ function renderDefenderRow(table, row) {
       `<span class="ctx">${escapeHtml(row.src_ip)} \u00b7 awaiting human approval</span>`;
     body = escapeHtml(row.reason || "");
   } else if (table === "block_ip_calls") {
-    statusClass = "st-critical";
-    head = `<span class="action-icon">\u26D4</span><span class="tag st-critical">block_ip() called</span>` +
-      `<span class="ctx">${escapeHtml(row.src_ip)} \u00b7 logged only, no real firewall change</span>`;
+    // REAL enforcement -- an actual iptables DROP rule, hard-fenced to the
+    // soclab bridge only (see block_enforcer.py). `executed` distinguishes
+    // that from a call the fencing rejected outright (src_ip outside the
+    // lab's own docker subnet) -- still logged, nothing blocked.
+    const executed = !!row.executed;
+    statusClass = executed ? "st-critical" : "st-muted";
+    head = `<span class="action-icon">${executed ? "\u26D4" : "\ud83d\udeab"}</span>` +
+      `<span class="tag ${statusClass}">${executed ? "IP BLOCKED (real)" : "block_ip rejected"}</span>` +
+      `<span class="ctx">${escapeHtml(row.src_ip)} \u00b7 ${executed ? "real firewall rule inserted" : "outside lab subnet -- nothing blocked"}</span>`;
     body = escapeHtml(row.reason || "");
   } else {
     return;
   }
-  appendLine(feedDefender, buildEntry(ts, head, body), statusClass, 400);
+  appendLine(feedDefender, buildEntry(ts, head, body), statusClass, 400, ts);
 }
 
 // ---------- Attacker Campaigns (redteam_sessions + children) ----------
@@ -190,13 +218,14 @@ function ensureCampaign(row) {
     feedAttacker.appendChild(card);
     appendLine(s.timelineEl, buildEntry(row.created,
       `<span class="tag badge-running">campaign started</span><span class="ctx">${escapeHtml(row.provider)}/${escapeHtml(row.model)}</span>`, null),
-      null, 80);
+      null, Infinity, row.created);
   } else {
     const old = s.row;
     if (old.stage !== row.stage || old.status !== row.status) {
-      appendLine(s.timelineEl, buildEntry(new Date().toISOString(),
+      const now = new Date().toISOString();
+      appendLine(s.timelineEl, buildEntry(now,
         `<span class="tag ${badgeClassForStatus(row.status)}">${escapeHtml(old.stage)}/${escapeHtml(old.status)} \u2192 ${escapeHtml(row.stage)}/${escapeHtml(row.status)}</span>`, null),
-        null, 80);
+        null, Infinity, now);
     }
     s.row = row;
     s.lastActivity = Date.now();
@@ -210,7 +239,7 @@ function onReconFinding(row) {
   s.recon.push(row);
   s.lastActivity = Date.now();
   const head = `<span class="tag detection">recon</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.finding_type)} \u00b7 ${escapeHtml(row.source_tool)}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.detail, 220))), null, 80);
+  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.detail, 220))), null, Infinity, row.created);
 }
 
 function onVulnFinding(row) {
@@ -220,7 +249,7 @@ function onVulnFinding(row) {
   s.lastActivity = Date.now();
   const cls = severityStatusClass(row.severity);
   const head = `<span class="tag ${cls}">vuln \u00b7 ${escapeHtml(row.severity)}</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.category)}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.description || "")), cls, 80);
+  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.description || "")), cls, Infinity, row.created);
 }
 
 function onPendingAction(row) {
@@ -233,7 +262,7 @@ function onPendingAction(row) {
   else { label = "proposed"; cls = "st-muted"; ts = row.created; }
   const approver = row.approved_by ? ` \u00b7 ${escapeHtml(row.approved_by)}` : "";
   const head = `<span class="tag ${cls}">${label}</span><span class="ctx">${escapeHtml(row.tool)} \u2192 ${escapeHtml(row.target)}${approver}</span>`;
-  appendLine(s.timelineEl, buildEntry(ts, head, escapeHtml(row.rationale || "")), cls, 80);
+  appendLine(s.timelineEl, buildEntry(ts, head, escapeHtml(row.rationale || "")), cls, Infinity, ts);
 }
 
 function onLoot(row) {
@@ -242,7 +271,7 @@ function onLoot(row) {
   s.loot.push(row);
   s.lastActivity = Date.now();
   const head = `<span class="tag detection">loot</span><span class="ctx">${escapeHtml(row.tool)} \u00b7 ${escapeHtml(row.target || "")} \u00b7 exit ${row.exit_code}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.summary, 220))), null, 80);
+  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.summary, 220))), null, Infinity, row.created);
 }
 
 function onCapturedFlag(row) {
@@ -252,7 +281,7 @@ function onCapturedFlag(row) {
   s.lastActivity = Date.now();
   flagsTotal++;
   const head = `<span class="tag st-critical">\u{1F6A9} flag captured</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.method || "")}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.flag_value || "")), "st-critical", 80);
+  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.flag_value || "")), "st-critical", Infinity, row.created);
   updateStat("stat-flags", flagsTotal);
 }
 
@@ -294,6 +323,7 @@ function handleMessage(msg) {
     case "candidates": onCandidate(row); break;
     case "triage": renderDefenderRow("triage", row); break;
     case "agent_alerts": renderDefenderRow("agent_alerts", row); break;
+    case "human_pages": renderDefenderRow("human_pages", row); break;
     case "block_recommendations": renderDefenderRow("block_recommendations", row); break;
     case "block_ip_calls": renderDefenderRow("block_ip_calls", row); break;
     case "redteam_sessions": ensureCampaign(row); break;
@@ -318,7 +348,7 @@ async function loadBootstrap() {
   for (const row of data.candidates.rows) handleMessage({ table: "candidates", row });
 
   const defenderRows = [];
-  for (const t of ["triage", "agent_alerts", "block_recommendations", "block_ip_calls"]) {
+  for (const t of ["triage", "agent_alerts", "human_pages", "block_recommendations", "block_ip_calls"]) {
     for (const row of data[t].rows) defenderRows.push({ table: t, row });
   }
   defenderRows.sort(byCreatedAsc);
@@ -375,10 +405,9 @@ function connectWS() {
 
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-    btn.classList.add("active");
-    document.getElementById("view-" + btn.dataset.view).classList.add("active");
+    const target = btn.dataset.tab;
+    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.tab === target));
   });
 });
 

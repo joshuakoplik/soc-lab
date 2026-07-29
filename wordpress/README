@@ -1,13 +1,17 @@
-# wp2shell target
+# wordpress target
 
-A real WordPress core install pinned to a version vulnerable to the
-"wp2shell" chain, publicly tracked as CVE-2026-63030 (a logic flaw in the
-core Batch REST API that lets an unauthenticated request reach an
-authenticated-only code path) and CVE-2026-60137 (SQL injection in
-`WP_Query` via the `author__not_in` parameter). Chained, the two give
-unauthenticated RCE. Both were added to CISA's KEV catalog; WordPress fixed
-them in 6.8.6 / 6.9.5 / 7.0.2, including via forced auto-update push to
-already-running sites.
+A real WordPress core install pinned to a version vulnerable to the chain
+publicly tracked as CVE-2026-63030 (a logic flaw in the core Batch REST API
+that lets an unauthenticated request reach an authenticated-only code path)
+and CVE-2026-60137 (SQL injection in `WP_Query` via the `author__not_in`
+parameter). Chained, the two give unauthenticated RCE. Both were added to
+CISA's KEV catalog; WordPress fixed them in 6.8.6 / 6.9.5 / 7.0.2, including
+via forced auto-update push to already-running sites.
+
+This target is named plainly ("wordpress"), not after the exploit chain --
+what CMS is running is obvious to any attacker who fingerprints it, but
+which specific CVE pair it's pinned to shouldn't be handed to the model
+(or a human skimming container names) for free.
 
 This is core WordPress, not a plugin (despite the "wp2shield" name
 sometimes used for it elsewhere) -- affected range is 6.9.0-6.9.4 and
@@ -18,7 +22,7 @@ image, the last build in the vulnerable 7.0.x line before the fix.
 
 WordPress's core auto-updater would otherwise patch this out from under the
 lab -- that's literally how the real-world fix propagated. `WORDPRESS_CONFIG_EXTRA`
-in the `wp2shell` service (see ../compose.yaml) hard-disables it:
+in the `wordpress` service (see ../compose.yaml) hard-disables it:
 
 ```php
 define('WP_AUTO_UPDATE_CORE', false);
@@ -26,7 +30,7 @@ define('AUTOMATIC_UPDATER_DISABLED', true);
 define('DISALLOW_FILE_MODS', true);
 ```
 
-`wp2shell-netlock` (compose.yaml) is defense in depth on top of that: same
+`wordpress-netlock` (compose.yaml) is defense in depth on top of that: same
 egress-lock pattern as `juiceshop-netlock` in compose.hard.yml, restricting
 the container to loopback + the lab subnet so it can't reach
 api.wordpress.org for a version check even if the constants above were
@@ -34,28 +38,28 @@ somehow bypassed.
 
 ## Topology
 
-- `wp2shell-db` -- MariaDB, internal only.
-- `wp2shell` -- the vulnerable WordPress core, `expose`d on 80 to the
+- `wordpress-db` -- MariaDB, internal only.
+- `wordpress` -- the vulnerable WordPress core, `expose`d on 80 to the
   `soclab` bridge only. No host port is published -- same rule as every
   other intentionally-vulnerable target in this lab (see top-level README).
-  Reach it from `soc-attacker` as `http://wp2shell`.
-- `wp2shell-init` -- one-shot wp-cli container. Runs `wp core install`
+  Reach it from `soc-attacker` as `http://wordpress`.
+- `wordpress-init` -- one-shot wp-cli container. Runs `wp core install`
   against the shared volume + DB directly (no HTTP needed), creates a second
   author and a handful of posts so there's more than one row for
   `author__not_in` to enumerate against, then exits.
-- `wp2shell-netlock` -- egress lock on the `wp2shell` container's network
+- `wordpress-netlock` -- egress lock on the `wordpress` container's network
   namespace, applied after it starts.
 
-All four are gated behind `profiles: ["wp2shell"]` in compose.yaml, same
+All four are gated behind `profiles: ["wordpress"]` in compose.yaml, same
 mechanism `cowrie`/`metasploitable` use for "easy" -- a plain
 `docker compose up -d` will not start this target; see the top-level
-`lab-mode.sh wp2shell` command.
+`lab-mode.sh wordpress` command.
 
 ## Credentials
 
 Admin user/password and the DB password are in `.env` (gitignored, not
-committed) as `WP2SHELL_ADMIN_PASSWORD` / `WP2SHELL_DB_PASSWORD`. Admin
-username is `admin`.
+committed) as `WORDPRESS_ADMIN_PASSWORD_SECRET` / `WORDPRESS_DB_PASSWORD_SECRET`.
+Admin username is `admin`.
 
 ## What this README deliberately does not contain
 

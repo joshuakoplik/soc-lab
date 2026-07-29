@@ -115,11 +115,22 @@ class ContextBudgetExceeded(ProviderError):
     iterations" ProviderError when a `token_budget` was given and this
     call's accumulated prompt tokens crossed it -- deliberately BEFORE
     max_iterations, so a caller doing chunked/chained turns (see
-    redteam/agent.py's run_recon_stage/run_assess_stage) can tell "this
-    chunk got too big, start a fresh one" apart from a real failure or
-    genuine iteration exhaustion. Still a ProviderError, so code that only
-    catches the base class (e.g. pipeline/triage/agent.py, which has no
-    concept of chunking) keeps working unchanged."""
+    redteam/agent.py's run_recon_stage/run_assess_stage, triage/agent.py's
+    chunked complete()) can tell "this chunk got too big, start a fresh
+    one" apart from a real failure or genuine iteration exhaustion. Still a
+    ProviderError, so code that only catches the base class keeps working
+    unchanged.
+
+    `usage`, when the raising call had real numbers to report (GMI/
+    Fireworks), carries the discarded chunk's own token spend -- a caller
+    tracking cumulative cost across restarts (a hard cap on top of chunking)
+    needs this: the chunk that hit the budget still cost real tokens even
+    though its own result is thrown away, so cumulative cost isn't just the
+    sum of successful chunks' usage."""
+
+    def __init__(self, message, usage=None):
+        super().__init__(message)
+        self.usage = usage
 
 
 class Provider(Protocol):
@@ -131,6 +142,9 @@ class Provider(Protocol):
         user: str,
         tools: "list[ToolSpec]",
         execute_tool: ToolExecutor,
+        token_budget: Optional[int] = None,
+        max_chunks: int = 1,
+        max_tokens_hard_cap: Optional[int] = None,
     ) -> Verdict: ...
 
 

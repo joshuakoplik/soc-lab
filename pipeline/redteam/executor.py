@@ -32,6 +32,7 @@ which containers happen to be up.
 
 import ipaddress
 import os
+import random
 import subprocess
 import sys
 import time
@@ -162,10 +163,125 @@ def run(argv, timeout_s=DEFAULT_TIMEOUT_S, max_output_chars=DEFAULT_MAX_OUTPUT_C
         )
 
 
-def attacker_ip():
-    """soc-attacker's own bridge IP this run -- the join key that lets a
-    later query correlate candidates.src_ip against this session."""
-    result = run(["hostname", "-i"], timeout_s=10)
-    if result.exit_code != 0:
-        return None
+def _primary_iface():
+    """soc-attacker's one non-loopback interface name (eth0, normally --
+    not hardcoded, since that's one guess away from silently doing nothing
+    on a differently-named interface)."""
+    result = run(
+        ["sh", "-c", "ip -o -4 addr show | awk '$2!=\"lo\"{print $2; exit}'"],
+        timeout_s=10,
+    )
     return result.stdout.strip() or None
+
+
+def attacker_ip():
+    """soc-attacker's own bridge IP right now -- the join key that lets a
+    later query correlate candidates.src_ip against this session. Reads
+    the live interface address (ip -4 addr show), deliberately NOT
+    `hostname -i`: confirmed live, Docker's own /etc/hosts entry for the
+    container's hostname reflects whatever IP it was assigned at container
+    creation and does NOT update when rotate_ip() changes the interface's
+    actual address -- hostname -i silently goes stale after a rotation,
+    which is exactly the case this function most needs to get right."""
+    iface = _primary_iface()
+    if not iface:
+        return None
+    result = run(["sh", "-c", f"ip -o -4 addr show dev {iface} | awk '{{print $4}}'"], timeout_s=10)
+    addr = result.stdout.strip()
+    return addr.split("/")[0] if addr else None
+
+
+DOCKER_NETWORK = "soc-lab_soclab"
+
+
+class RotateIPError(Exception):
+    """rotate_ip() failed. Never leaves soc-attacker without a working
+    address -- see rotate_ip()'s rollback-on-failure."""
+
+
+def _used_ips():
+    """Every IP currently assigned to a container on the soclab bridge, via
+    `docker network inspect` (run on the HOST, not through soc-attacker --
+    this is the one function in this module that doesn't go through run()).
+    rotate_ip() uses this to avoid colliding with a real container, not
+    just guessing an address and hoping."""
+    proc = subprocess.run(
+        ["docker", "network", "inspect", DOCKER_NETWORK,
+         "-f", "{{range .Containers}}{{.IPv4Address}} {{end}}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if proc.returncode != 0:
+        raise RotateIPError(f"docker network inspect failed: {proc.stderr.strip()}")
+    ips = set()
+    for tok in proc.stdout.split():
+        addr = tok.split("/")[0]
+        try:
+            ips.add(ipaddress.ip_address(addr))
+        except ValueError:
+            pass
+    return ips
+
+
+def rotate_ip():
+    """Give soc-attacker a fresh IP within the lab subnet, abandoning its
+    current one -- an evasion tactic against IP-based detection/blocking
+    (see triage/agent.py's block_ip). Never touches anything outside
+    ALLOWED_NETWORKS: the new address is always drawn from that subnet,
+    checked against docker's own live container list (_used_ips) so it
+    can't collide with a real target, and the swap runs entirely inside
+    soc-attacker's own network namespace via `ip addr` (it already has
+    NET_ADMIN -- see compose.yaml) -- nothing here reaches outside the
+    container it's rotating.
+
+    Returns {"old_ip", "new_ip"} on success. Raises RotateIPError on any
+    failure, and rolls back to the original address first if the swap left
+    the container in a half-changed state, so a failed rotation never
+    leaves soc-attacker unreachable."""
+    subnet = ALLOWED_NETWORKS[0]
+    old_ip = attacker_ip()
+    if not old_ip:
+        raise RotateIPError("could not determine soc-attacker's current IP")
+
+    reserved = _used_ips()
+    reserved.add(subnet.network_address)
+    reserved.add(subnet.broadcast_address)
+    reserved.add(ipaddress.ip_address(int(subnet.network_address) + 1))  # gateway, .1
+
+    candidates = [h for h in subnet.hosts() if h not in reserved]
+    if not candidates:
+        raise RotateIPError(f"no free address left in {subnet}")
+    new_ip = str(random.choice(candidates))
+
+    iface = _primary_iface()
+    if not iface:
+        raise RotateIPError("could not determine soc-attacker's network interface")
+
+    del_result = run(["ip", "addr", "del", f"{old_ip}/24", "dev", iface], timeout_s=10)
+    if del_result.exit_code != 0:
+        raise RotateIPError(
+            f"failed to remove old address {old_ip}: {del_result.stderr.strip()} "
+            "-- left unchanged, still on the original IP"
+        )
+
+    add_result = run(["ip", "addr", "add", f"{new_ip}/24", "dev", iface], timeout_s=10)
+    if add_result.exit_code != 0:
+        # Roll back rather than leave the container with no address at all.
+        restore = run(["ip", "addr", "add", f"{old_ip}/24", "dev", iface], timeout_s=10)
+        if restore.exit_code != 0:
+            raise RotateIPError(
+                f"failed to assign {new_ip} ({add_result.stderr.strip()}) AND "
+                f"failed to restore {old_ip} ({restore.stderr.strip()}) -- "
+                "soc-attacker may be unreachable, needs manual recovery"
+            )
+        raise RotateIPError(
+            f"failed to assign {new_ip}: {add_result.stderr.strip()} "
+            f"-- rolled back to {old_ip}"
+        )
+
+    confirm = attacker_ip()
+    if confirm != new_ip:
+        raise RotateIPError(
+            f"assigned {new_ip} but soc-attacker now reports {confirm!r} -- "
+            "verify manually, network-reset.sh does not cover this"
+        )
+    return {"old_ip": old_ip, "new_ip": new_ip}

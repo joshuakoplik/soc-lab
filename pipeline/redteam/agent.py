@@ -104,7 +104,7 @@ DEFAULT_MODEL = {
     "claude": "claude-sonnet-4-6",
     "local": "qwen3:8b",
     "gmi": "openai/gpt-4o-mini",
-    "fireworks": "accounts/fireworks/models/glm-5p1",
+    "fireworks": "accounts/fireworks/models/glm-5p2",
 }
 
 RECON_MAX_ITERATIONS = 20
@@ -296,6 +296,29 @@ ASSESS_TOOLS = [
             "required": ["tool", "target", "params", "rationale"],
         },
     },
+    {
+        "name": "rotate_ip",
+        "description": (
+            "Abandon your current IP and take a fresh one within the lab "
+            "subnet -- an evasion move against IP-based detection or "
+            "blocking, not a reconnaissance or exploitation action. Safe "
+            "and ungated: it only ever touches your own container's own "
+            "network identity, never a target, and the new address is "
+            "always drawn from this lab's own subnet. Costs you continuity, "
+            "though -- an in-progress reverse shell or session tied to your "
+            "old IP will not follow you to the new one, and anything "
+            "correlated by source IP (including your own prior findings, "
+            "if you're re-deriving them from raw traffic) resets. Use it "
+            "deliberately, not reflexively."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "description": "why you're rotating now"},
+            },
+            "required": ["reason"],
+        },
+    },
 ]
 
 # Both prompts below are built from _TARGETS/GATED_TOOLS/ALLOWED_MSF_MODULES
@@ -318,7 +341,7 @@ _TARGET_DESCRIPTIONS = {
         "container, IRC, and more). Unlike cowrie this is a genuine OS -- "
         "findings here are real, not emulated."
     ),
-    "wp2shell": (
+    "wordpress": (
         "a real WordPress installation, reached directly (no reverse proxy "
         "in front of it, unlike the nginx target elsewhere in this lab). A "
         "genuine CMS, not an emulated or scripted app -- findings here are real."
@@ -337,6 +360,16 @@ web content. This is a READ-ONLY reconnaissance phase: you cannot exploit,
 brute-force, or otherwise act on anything you find here -- that only happens
 later, in a separate phase, and only after a human approves it. Your job
 right now is purely to build an accurate picture of what's exposed.
+
+Assume this traffic is being watched in real time -- an IDS, a SIEM, and an
+LLM-driven triage agent are all live against it and correlate across
+sources. That's a reason to keep each probe purposeful, not a reason to
+under-scan: the guidance below about widening port ranges or guessing paths
+is about being thorough where it's likely to actually pay off, not about
+generating volume for its own sake. Don't repeat a scan or probe that
+already gave you an answer, and don't blanket a target with checks that
+aren't narrowing down what's actually there -- every probe should be
+building toward a specific answer, not just adding noise.
 
 Don't assume standard ports or a shallow set of paths are the whole story:
 - Services in a lab like this are often reachable on non-standard ports --
@@ -425,6 +458,32 @@ vulnerabilities and propose next steps. Every in-scope target is inside the
 lab's whitelisted network, which means calling propose_action against any of
 them runs immediately -- there is no human approval step for this
 engagement, so treat propose_action as "do it", not "ask to do it".
+
+Assume this is being watched in real time -- an IDS, a SIEM, and an
+LLM-driven triage agent are all live against this traffic and correlate
+across sources. That's context for HOW you act, not a reason to hold back:
+gaining access matters more than staying invisible, and you should go ahead
+and use whatever exploit you assess is actually likely to work. But loud,
+low-information techniques -- brute-forcing credentials, blasting a generic
+vulnerability scanner at a target, retrying the same failed approach over
+and over -- are exactly what that kind of monitoring exists to catch, and
+they usually aren't what actually gets you in either. Spend your effort
+identifying and confirming the SPECIFIC exploit path the evidence points
+to, then take it directly, rather than working through a checklist of noisy
+techniques "just in case" one works. If recon evidence already points at a
+particular vulnerability, act on that instead of casting a wider net first.
+
+Part of what's watching this traffic can act on it directly: the defender
+has a real, immediate block tool, not just an alert queue -- enough loud
+activity from one IP and that IP gets blacklisted mid-engagement, cutting
+off everything still routed through it. tool="rotate_ip" gives you a fresh
+IP within the lab whenever you judge it's warranted -- getting blocked
+doesn't have to end the engagement, and spreading noisy or repeated actions
+across more than one IP rather than hammering everything from a single
+address is a reasonable way to reduce how much any one source stands out.
+It costs continuity, though (an in-progress session or reverse shell tied
+to the old IP won't follow you), so use it deliberately when you judge the
+current IP is burned or about to be, not reflexively before every action.
 {_assess_msf_block}{_assess_shell_exec_block}
 Use get_recon_findings / get_loot / get_pending_actions to review what's
 already known. Call raise_vuln_finding for anything you assess as a real
@@ -735,6 +794,26 @@ def tool_raise_vuln_finding(conn, session_id, target, category, severity, descri
     return json.dumps({"ok": True}), False
 
 
+def tool_rotate_ip(conn, session_id, reason):
+    # redteam_exec.rotate_ip() does the actual work (pick a free lab
+    # address, swap it onto soc-attacker's interface, roll back on
+    # failure) and raises RotateIPError on anything that goes wrong --
+    # dispatch_assess_tool's generic except Exception turns that into a
+    # clean tool-error response, same as ScopeError elsewhere in this file.
+    result = redteam_exec.rotate_ip()
+    conn.execute(
+        "INSERT INTO session_ip_history (session_id, old_ip, new_ip, reason, created) "
+        "VALUES (?,?,?,?,?)",
+        (session_id, result["old_ip"], result["new_ip"], reason, now_iso()),
+    )
+    conn.execute(
+        "UPDATE redteam_sessions SET attacker_ip=? WHERE id=?",
+        (result["new_ip"], session_id),
+    )
+    conn.commit()
+    return json.dumps({"ok": True, **result}), False
+
+
 def tool_propose_action(conn, session_id, tool, target, params, rationale, based_on):
     if tool not in GATED_TOOLS:
         return json.dumps({"error": f"unknown gated tool: {tool!r}, must be one of {GATED_TOOLS}"}), True
@@ -817,6 +896,8 @@ def dispatch_assess_tool(conn, session_id, name, tool_input):
                 tool_input.get("params") or {}, tool_input.get("rationale"),
                 tool_input.get("based_on"),
             )
+        if name == "rotate_ip":
+            return tool_rotate_ip(conn, session_id, tool_input.get("reason"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True

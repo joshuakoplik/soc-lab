@@ -186,7 +186,14 @@ class LocalProvider:
             f"exceeded {max_iterations} tool-use iterations without a final turn"
         )
 
-    def complete(self, system, user, tools, execute_tool):
+    def complete(self, system, user, tools, execute_tool,
+                 token_budget=None, max_chunks=1, max_tokens_hard_cap=None):
+        # token_budget/max_chunks/max_tokens_hard_cap accepted for a uniform
+        # Provider.complete() interface but not acted on -- this provider's
+        # run_agentic_turn() already documents why: Ollama's /api/chat
+        # reports usage as prompt_eval_count/eval_count, not the shape
+        # AgenticResult.usage tracks, so there's nothing to chunk against.
+        #
         # Phase 1: unconstrained analysis. Tools are on the table and the
         # model is explicitly told NOT to give the final JSON yet -- just
         # investigate and build its case in prose. This is every candidate's

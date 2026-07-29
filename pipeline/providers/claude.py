@@ -95,7 +95,16 @@ class ClaudeProvider:
             f"exceeded {max_iterations} tool-use iterations without a final turn"
         )
 
-    def complete(self, system, user, tools, execute_tool):
+    def complete(self, system, user, tools, execute_tool,
+                 token_budget=None, max_chunks=1, max_tokens_hard_cap=None):
+        # token_budget/max_chunks/max_tokens_hard_cap accepted for a uniform
+        # Provider.complete() interface (triage/agent.py calls every
+        # provider the same way) but not acted on here -- Anthropic's
+        # Messages API usage isn't wired into run_agentic_turn's
+        # AgenticResult.usage yet (see base.py), so there are no real numbers
+        # to chunk against. Same "accepted, no-op" pattern as
+        # run_agentic_turn's own token_budget parameter already documents.
+        #
         # Anthropic tool_use turns require the full content array (including
         # tool_use blocks) echoed back verbatim as the assistant turn before
         # the matching tool_result -- see shared tool-use-concepts.

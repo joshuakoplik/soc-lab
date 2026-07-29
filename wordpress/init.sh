@@ -1,19 +1,19 @@
 #!/bin/sh
-# One-shot installer for the wp2shell target. Runs `wp core install` and seeds
+# One-shot installer for the wordpress target. Runs `wp core install` and seeds
 # a second author + a few posts so WP_Query has more than a single row to
 # enumerate against, then exits. wordpress:cli-* is wp-cli talking to the
 # shared /var/www/html volume and the DB directly (no HTTP round trip to the
-# wp2shell container), so this doesn't need the apache container reachable
+# wordpress container), so this doesn't need the apache container reachable
 # over the network -- only the shared volume and the DB.
 set -eu
 
 until [ -f /var/www/html/wp-load.php ]; do
-  echo "[wp2shell-init] waiting for WordPress core files..."
+  echo "[wordpress-init] waiting for WordPress core files..."
   sleep 2
 done
 
 if wp core is-installed --path=/var/www/html --allow-root; then
-  echo "[wp2shell-init] already installed"
+  echo "[wordpress-init] already installed"
 else
   # No separate DB-readiness probe: wp-cli's own `wp db check` shells out to
   # mariadb-check, whose default client behavior demands TLS this DB doesn't
@@ -30,14 +30,14 @@ else
     --admin_password="$WP_ADMIN_PASSWORD" \
     --admin_email="$WP_ADMIN_EMAIL" \
     --skip-email; do
-    echo "[wp2shell-init] install failed (DB probably not ready yet), retrying..."
+    echo "[wordpress-init] install failed (DB probably not ready yet), retrying..."
     sleep 3
   done
-  echo "[wp2shell-init] core installed"
+  echo "[wordpress-init] core installed"
 fi
 
-wp user create editor editor@wp2shell.lab --role=editor \
+wp user create editor editor@wordpress.lab --role=editor \
   --user_pass="$WP_ADMIN_PASSWORD" --path=/var/www/html --allow-root || true
 wp post generate --count=5 --path=/var/www/html --allow-root || true
 
-echo "[wp2shell-init] target ready"
+echo "[wordpress-init] target ready"

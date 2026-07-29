@@ -77,6 +77,6 @@ Step 2: tail both files, normalize into one ECS-flavored event schema, land it i
 Not reflected in the topology diagram above (metasploitable, wazuh, suricata,
 attacker were added later without a rewrite here):
 
-- `./lab-mode.sh wp2shell` -- isolates a single target, real WordPress core
-  pinned to the version vulnerable to CVE-2026-63030 / CVE-2026-60137
-  ("wp2shell"). See `wordpress-wp2shell/README`.
+- `./lab-mode.sh wordpress` -- isolates a single target, real WordPress core
+  pinned to the version vulnerable to CVE-2026-63030 / CVE-2026-60137. See
+  `wordpress/README`.

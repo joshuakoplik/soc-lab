@@ -11,8 +11,10 @@ CREATE TABLE IF NOT EXISTS redteam_sessions (
     ended          TEXT,
     provider       TEXT    NOT NULL,   -- 'claude' | 'local'
     model          TEXT    NOT NULL,
-    attacker_ip    TEXT,               -- soc-attacker's bridge IP this run --
-                                        -- join key against events.src_ip / candidates.src_ip
+    attacker_ip    TEXT,               -- soc-attacker's CURRENT bridge IP --
+                                        -- join key against events.src_ip / candidates.src_ip.
+                                        -- Updated in place by rotate_ip(); see
+                                        -- session_ip_history for the full trail.
     stage          TEXT    NOT NULL DEFAULT 'recon',   -- recon | assess | done
     status         TEXT    NOT NULL DEFAULT 'running', -- running | completed | error
     recon_summary  TEXT,
@@ -24,6 +26,27 @@ CREATE TABLE IF NOT EXISTS redteam_sessions (
                                         -- so --continue-assess picks up the same persona
                                         -- without the file having to be passed again.
     created        TEXT    NOT NULL
+);
+
+-- Every rotate_ip() call -- the attacker deliberately abandoning its current
+-- bridge IP for a fresh one mid-session, as an evasion tactic against
+-- IP-based detection/blocking (see triage/agent.py's block_ip). Deliberate
+-- consequence, not a bug: after a rotation, new traffic from the new IP no
+-- longer joins to this session via the simple `redteam_sessions.attacker_ip
+-- = candidates.src_ip` trick the comment at the top of this file describes
+-- -- that's realistic (IP rotation breaks naive IP-based correlation for a
+-- real defender too), which is exactly the behavior this lab exists to
+-- measure. `redteam_sessions.attacker_ip` always holds the CURRENT address
+-- so live views (the dashboard) don't need to know about rotation at all;
+-- this table is the full history for anyone reconstructing which IP a
+-- given candidate's traffic actually came from.
+CREATE TABLE IF NOT EXISTS session_ip_history (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    old_ip        TEXT,
+    new_ip        TEXT    NOT NULL,
+    reason        TEXT,
+    created       TEXT    NOT NULL
 );
 
 -- Written automatically by the recon tool_* functions themselves, not by a

@@ -98,7 +98,8 @@ class OpenAICompatibleProvider:
                 if token_budget and usage_totals["prompt_tokens"] >= token_budget:
                     raise ContextBudgetExceeded(
                         f"context budget exceeded: {usage_totals['prompt_tokens']} prompt "
-                        f"tokens >= {token_budget} (model still requesting tool calls)"
+                        f"tokens >= {token_budget} (model still requesting tool calls)",
+                        usage=dict(usage_totals),
                     )
                 messages.append(message)
                 for call in requested:
@@ -143,28 +144,86 @@ class OpenAICompatibleProvider:
             f"exceeded {max_iterations} tool-use iterations without a final turn"
         )
 
-    def complete(self, system, user, tools, execute_tool):
+    def complete(self, system, user, tools, execute_tool,
+                 token_budget=None, max_chunks=1, max_tokens_hard_cap=None):
         # Single-phase, like claude.py -- these catalogs are tool-capable,
         # instruction-following models that reliably follow "respond with
         # ONLY the JSON verdict" directly, unlike local.py's smaller models
         # which need the separate unconstrained-analysis-then-forced-JSON
         # split to reach the same reliability.
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        result = self.run_agentic_turn(messages, tools, execute_tool, MAX_TOOL_ITERATIONS)
-        parsed = parse_verdict_json(result.final_text)
-        return Verdict(
-            verdict=parsed["verdict"],
-            confidence=parsed["confidence"],
-            rationale=parsed["rationale"],
-            recommended_action=parsed["recommended_action"],
-            attack_technique=parsed.get("attack_technique"),
-            model=result.model or self.model,
-            tool_calls=result.tool_calls,
-            usage=result.usage,
+        #
+        # Chunking (token_budget/max_chunks) mirrors redteam/agent.py's
+        # _run_chained_stage -- added 2026-07-28 after a defender run against
+        # a candidate with heavily-correlated evidence produced a single tool
+        # result north of 130K tokens, ballooning one candidate's triage past
+        # 450K tokens and suspending the account. Same reasoning as
+        # redteam's: real usage numbers only exist for these
+        # OpenAI-compatible catalogs (see AgenticResult.usage), so this is
+        # where the actual enforcement lives -- claude.py/local.py accept
+        # the same parameters for a uniform Provider interface but can't act
+        # on token_budget without usage data, same as their
+        # run_agentic_turn()s already document.
+        #
+        # Restarting a chunk resends the ORIGINAL system+user turn (not a
+        # distinct continuation prompt the way redteam's recon/assess
+        # stages need one) -- the candidate's evidence bundle in `user` is
+        # cheap and exactly what the model should be looking at regardless
+        # of which chunk this is; what actually got expensive was the
+        # accumulated tool-call HISTORY within one long-running turn, and
+        # that's exactly what a restart discards. A short note appended to
+        # `user` on chunk 2+ tells the model why it's starting over and to
+        # wrap up rather than re-explore from scratch.
+        continuation_note = (
+            "\n\n---\nYour investigation of this candidate grew large enough "
+            "that we're restarting fresh rather than let it keep growing -- "
+            "any raise_alert/recommend_block/block_ip/page_oncall call you "
+            "already made is already recorded regardless of this restart. "
+            "Re-review the evidence above; if you already have enough to "
+            "decide, respond with your verdict JSON now. If you still need a "
+            "tool call, make only the essential one(s), then decide."
         )
+        cumulative = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        for chunk in range(1, max(1, max_chunks) + 1):
+            this_user = user if chunk == 1 else user + continuation_note
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": this_user},
+            ]
+            try:
+                result = self.run_agentic_turn(messages, tools, execute_tool,
+                                                 MAX_TOOL_ITERATIONS, token_budget=token_budget)
+            except ContextBudgetExceeded as e:
+                if e.usage:
+                    for k in cumulative:
+                        cumulative[k] += e.usage.get(k, 0)
+                print(f"    [triage chunk {chunk}/{max_chunks} hit context budget -- {e}]")
+                if max_tokens_hard_cap and cumulative["prompt_tokens"] >= max_tokens_hard_cap:
+                    raise ProviderError(
+                        f"hard token cap ({max_tokens_hard_cap}) reached across "
+                        f"{chunk} chunks without a final verdict"
+                    ) from e
+                continue
+
+            if result.usage:
+                for k in cumulative:
+                    cumulative[k] += result.usage.get(k, 0)
+            if chunk > 1:
+                print(f"    [triage concluded after {chunk} chunks, cumulative usage: "
+                      f"{cumulative['prompt_tokens']} prompt / {cumulative['completion_tokens']} "
+                      f"completion / {cumulative['total_tokens']} total]")
+            parsed = parse_verdict_json(result.final_text)
+            return Verdict(
+                verdict=parsed["verdict"],
+                confidence=parsed["confidence"],
+                rationale=parsed["rationale"],
+                recommended_action=parsed["recommended_action"],
+                attack_technique=parsed.get("attack_technique"),
+                model=result.model or self.model,
+                tool_calls=result.tool_calls,
+                usage=cumulative,
+            )
+
+        raise ProviderError(f"exceeded {max_chunks} chained chunks without a final verdict")
 
     def _call(self, api_key, messages, tools):
         body = {"model": self.model, "messages": messages}

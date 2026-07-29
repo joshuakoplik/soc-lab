@@ -21,13 +21,21 @@
   </div>
 </header>
 
-<nav class="tabs">
-  <button class="tab-btn active" data-view="monitoring">Monitoring</button>
-  <button class="tab-btn" data-view="telemetry">Live Telemetry</button>
-</nav>
+<main class="page">
+  <div class="tabs" role="tablist">
+    <button class="tab-btn active" data-tab="defense" role="tab" aria-selected="true">Defender &amp; Attacker</button>
+    <button class="tab-btn" data-tab="telemetry" role="tab" aria-selected="false">Live Telemetry</button>
+  </div>
 
-<main>
-  <div class="view columns active" id="view-monitoring">
+  <section class="panel tab-panel" id="panel-telemetry" data-tab="telemetry">
+    <div class="panel-head">
+      <h2>Live Telemetry</h2>
+      <span class="panel-sub">raw events, as ingested</span>
+    </div>
+    <div class="feed" id="feed-events"></div>
+  </section>
+
+  <div class="split-row tab-panel active" data-tab="defense">
     <section class="panel" id="panel-defender">
       <div class="panel-head">
         <h2>Defender Log</h2>
@@ -42,16 +50,6 @@
         <span class="panel-sub">red-team sessions against this lab</span>
       </div>
       <div class="feed" id="feed-attacker"></div>
-    </section>
-  </div>
-
-  <div class="view columns" id="view-telemetry">
-    <section class="panel" id="panel-telemetry">
-      <div class="panel-head">
-        <h2>Live Telemetry</h2>
-        <span class="panel-sub">raw events, as ingested</span>
-      </div>
-      <div class="feed" id="feed-events"></div>
     </section>
   </div>
 </main>

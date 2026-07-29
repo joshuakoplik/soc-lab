@@ -6,10 +6,10 @@
 #   ./lab-mode.sh hard     -- cowrie + metasploitable down, no leaked creds,
 #                             Juice Shop hardened + network-locked, nginx is
 #                             the only target
-#   ./lab-mode.sh wp2shell -- everything else down, only the wp2shell target
+#   ./lab-mode.sh wordpress -- everything else down, only the wordpress target
 #                             (WordPress core pinned to the CVE-2026-63030 /
 #                             CVE-2026-60137 chain) up -- see
-#                             wordpress-wp2shell/README. A single-target
+#                             wordpress/README. A single-target
 #                             scenario, not a rung on the easy/hard ladder.
 #   ./lab-mode.sh status   -- show the active mode and what's actually running
 #
@@ -43,13 +43,13 @@ case "$MODE" in
     write_state hard
     echo "[*] hard mode active: cowrie + metasploitable down, no leaked creds, Juice Shop hardened + network-locked, nginx is the only target"
     ;;
-  wp2shell)
-    echo "[*] switching to WP2SHELL mode"
+  wordpress)
+    echo "[*] switching to WORDPRESS mode"
     docker compose --profile easy rm -sf cowrie metasploitable
     docker compose rm -sf nginx juiceshop
-    docker compose --profile wp2shell up -d wp2shell-db wp2shell wp2shell-init wp2shell-netlock
-    write_state wp2shell
-    echo "[*] wp2shell mode active: only the wp2shell target is up -- reach it from soc-attacker as http://wp2shell. See wordpress-wp2shell/README."
+    docker compose --profile wordpress up -d wordpress-db wordpress wordpress-init wordpress-netlock
+    write_state wordpress
+    echo "[*] wordpress mode active: only the wordpress target is up -- reach it from soc-attacker as http://wordpress. See wordpress/README."
     ;;
   status)
     if [ -f "$STATE_FILE" ]; then
@@ -61,7 +61,7 @@ case "$MODE" in
     docker compose --profile easy ps --format "table {{.Name}}\t{{.Status}}"
     ;;
   *)
-    echo "usage: $0 {easy|hard|wp2shell|status}" >&2
+    echo "usage: $0 {easy|hard|wordpress|status}" >&2
     exit 1
     ;;
 esac

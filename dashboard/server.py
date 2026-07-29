@@ -25,7 +25,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 DB_PATH = Path(os.environ.get("SOC_DASHBOARD_DB", Path(__file__).resolve().parent.parent / "soc.db"))
@@ -42,6 +42,7 @@ TABLES = {
     "agent_alerts":          ("alert",                 100),
     "block_recommendations": ("block_recommendation",  100),
     "block_ip_calls":        ("block_ip_call",         100),
+    "human_pages":           ("human_page",            100),
     "redteam_sessions":      ("redteam_session",        60),
     "recon_findings":        ("recon_finding",         300),
     "vuln_findings":         ("vuln_finding",          150),
@@ -184,7 +185,16 @@ async def ws_endpoint(ws: WebSocket):
 
 @app.get("/")
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # Plain FileResponse left style.css/app.js on flat /static/... URLs with
+    # no cache-busting -- across a run of edits to this dashboard, browsers
+    # kept serving a stale mix of old CSS with new HTML (or vice versa) on a
+    # normal reload. Stamp each asset URL with its own mtime so any edit
+    # forces a fresh fetch of exactly that file.
+    html = (STATIC_DIR / "index.html").read_text()
+    for asset in ("style.css", "app.js"):
+        mtime = int((STATIC_DIR / asset).stat().st_mtime)
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={mtime}")
+    return HTMLResponse(html)
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

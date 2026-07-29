@@ -50,3 +50,38 @@ docker exec -it soc-attacker bash
 ## Loot
 
 `attacker/loot/` is bind-mounted, so nmap/hydra/sqlmap output lands on the host.
+
+## Egress lockdown
+
+soc-attacker's outbound traffic is locked to loopback + the lab subnet
+(10.211.0.0/24) via `iptables` rules applied *inside this container's own
+network namespace* -- not the host's, and not persisted anywhere (not a
+compose volume, not baked into the image). shell_exec (pipeline/redteam/agent.py)
+has no target allowlist at all; this lockdown is its only containment. See
+CLAUDE.md: **don't treat shell_exec as safe against an attacker container
+that hasn't had this reapplied.**
+
+That means it does NOT survive `docker compose up --force-recreate attacker`
+(or any rebuild) -- confirmed live 2026-07-28, recreating the container came
+back with a wide-open OUTPUT chain, on top of losing the whole provisioned
+toolkit (see provision.sh) too, since neither lives anywhere durable. After
+any recreation, in this order (reversed, apt-get can't reach anything once
+the lockdown is up):
+
+```bash
+docker exec -it soc-attacker /scripts/provision.sh   # needs the still-open egress first
+
+docker exec soc-attacker iptables -F OUTPUT
+docker exec soc-attacker iptables -A OUTPUT -o lo -j ACCEPT
+docker exec soc-attacker iptables -A OUTPUT -d 10.211.0.0/24 -j ACCEPT
+docker exec soc-attacker iptables -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+docker exec soc-attacker iptables -A OUTPUT -j DROP
+```
+
+Verify before trusting it:
+
+```bash
+docker exec soc-attacker iptables -S OUTPUT                                  # rules present
+docker exec soc-attacker curl -s -o /dev/null -w '%{http_code}\n' http://1.1.1.1/   # should hang/fail
+docker exec soc-attacker curl -s -o /dev/null -w '%{http_code}\n' http://wordpress/  # should 200
+```
