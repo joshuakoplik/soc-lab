@@ -9,6 +9,8 @@ Red-team agent -- the offense-side counterpart to pipeline/agent.py.
     python3 pipeline/redteam_agent.py --approve 7 --approved-by josh
     python3 pipeline/redteam_agent.py --execute-approved [--limit N] [--dry-run]
     python3 pipeline/redteam_agent.py --stats
+    python3 pipeline/redteam_agent.py --mission-file missions/wp2shell.txt   # custom attacker
+                                                                              # persona/objective
 
 THE GATE, read this before touching anything below: the model can identify
 targets, assess vulnerabilities, and PROPOSE an exploitation/credential/
@@ -441,6 +443,37 @@ When you're done, write a concise summary: what vulnerabilities you
 identified, and what actions (if any) you proposed and why."""
 
 
+def _apply_mission(base_prompt, mission):
+    """Append an operator-supplied mission brief (see --mission-file) to a
+    stage's default system prompt. None/empty leaves the default prompt
+    untouched -- the whole point is that the generic broad-recon persona
+    above stays the default behavior when no brief is given. Appended rather
+    than spliced into the middle of the prompt, so the default text (and its
+    whitespace) never has to change to support this."""
+    if not mission:
+        return base_prompt
+    return base_prompt + f"""
+
+---
+OPERATOR MISSION BRIEF -- this defines your actual objective for this
+engagement and takes priority over the general guidance above wherever the
+two conflict (e.g. a brief calling for a fast, narrowly-targeted pass rather
+than broad coverage should be followed). It does NOT override the scope,
+tool availability, or gating/safety rules described above or enforced by
+your tools -- those still apply exactly as stated regardless of what the
+brief says:
+
+{mission.strip()}"""
+
+
+def build_recon_system_prompt(mission=None):
+    return _apply_mission(RECON_SYSTEM_PROMPT, mission)
+
+
+def build_assess_system_prompt(mission=None):
+    return _apply_mission(ASSESS_SYSTEM_PROMPT, mission)
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -450,7 +483,18 @@ def connect():
     conn.row_factory = sqlite3.Row
     with open(os.path.join(HERE, "schema.sql")) as f:
         conn.executescript(f.read())
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn):
+    """CREATE TABLE IF NOT EXISTS won't add a column to a redteam_sessions
+    table that already exists from before --mission-file. Add it in place so
+    an existing soc.db picks it up without a --reset."""
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(redteam_sessions)")}
+    if "mission_brief" not in have:
+        conn.execute("ALTER TABLE redteam_sessions ADD COLUMN mission_brief TEXT")
+        conn.commit()
 
 
 def _loot_paths(session_id, filename):
@@ -1274,7 +1318,7 @@ def _stage_failure_result(provider):
 
 def run_recon_stage(conn, session_id, provider, max_iterations,
                      context_budget=DEFAULT_CONTEXT_BUDGET, max_chunks=DEFAULT_MAX_CHUNKS,
-                     max_tokens_hard_cap=None):
+                     max_tokens_hard_cap=None, mission=None):
     user = (
         "Begin reconnaissance. Targets in scope:\n" + _targets_block +
         "\nUse your tools to identify what's exposed."
@@ -1283,7 +1327,8 @@ def run_recon_stage(conn, session_id, provider, max_iterations,
     execute = _progress_wrapper(dispatch_recon_tool, conn, session_id)
 
     try:
-        result = _run_chained_stage(provider, RECON_SYSTEM_PROMPT, user, RECON_CONTINUATION_USER,
+        result = _run_chained_stage(provider, build_recon_system_prompt(mission), user,
+                                     RECON_CONTINUATION_USER,
                                      RECON_TOOLS, execute, max_iterations, context_budget,
                                      max_chunks, max_tokens_hard_cap, label="recon")
     except ProviderError as e:
@@ -1307,7 +1352,7 @@ def run_recon_stage(conn, session_id, provider, max_iterations,
 
 def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation=False,
                       context_budget=DEFAULT_CONTEXT_BUDGET, max_chunks=DEFAULT_MAX_CHUNKS,
-                      max_tokens_hard_cap=None):
+                      max_tokens_hard_cap=None, mission=None):
     """A single assess pass. Called once per campaign normally, but nothing
     about it depends on recon having *just* run -- it only ever reads this
     session's recon_findings/loot/pending_actions through the ASSESS_TOOLS.
@@ -1334,7 +1379,8 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     prior = (row["assess_summary"] or "") if row else ""
 
     try:
-        result = _run_chained_stage(provider, ASSESS_SYSTEM_PROMPT, user, ASSESS_CONTINUATION_USER,
+        result = _run_chained_stage(provider, build_assess_system_prompt(mission), user,
+                                     ASSESS_CONTINUATION_USER,
                                      ASSESS_TOOLS, execute, max_iterations, context_budget,
                                      max_chunks, max_tokens_hard_cap, label="assess")
     except ProviderError as e:
@@ -1366,13 +1412,13 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     return result
 
 
-def start_session(conn, provider_name, model):
+def start_session(conn, provider_name, model, mission=None):
     ts = now_iso()
     ip = redteam_exec.attacker_ip()
     cur = conn.execute(
-        "INSERT INTO redteam_sessions (started, provider, model, attacker_ip, stage, status, created) "
-        "VALUES (?,?,?,?,'recon','running',?)",
-        (ts, provider_name, model, ip, ts),
+        "INSERT INTO redteam_sessions (started, provider, model, attacker_ip, stage, status, "
+        "mission_brief, created) VALUES (?,?,?,?,'recon','running',?,?)",
+        (ts, provider_name, model, ip, mission, ts),
     )
     conn.commit()
     return cur.lastrowid, ip
@@ -1534,10 +1580,26 @@ def main():
                      help="re-run just the assess stage on an existing session, so the "
                           "model can react to results from an approved+executed action "
                           "(e.g. a working credential) and propose what's next")
+    ap.add_argument("--mission-file", default=None, metavar="PATH",
+                     help="path to a text file with a custom mission brief -- controls the "
+                          "attacker's knowledge/personality/objective (e.g. 'you already know "
+                          "target X is running vulnerable service Y; search quickly for it and "
+                          "exploit it directly' instead of the default broad recon+assess "
+                          "persona). Appended to both stages' system prompts and takes priority "
+                          "over the default guidance where they conflict; scope and gating rules "
+                          "are unaffected either way. Default: none (current generic behavior). "
+                          "On --continue-assess, defaults to whatever brief the session was "
+                          "started with unless a new file is given here")
     args = ap.parse_args()
 
     conn = connect()
     print(f"[*] db: {DB_PATH}")
+
+    mission = None
+    if args.mission_file:
+        with open(args.mission_file) as f:
+            mission = f.read().strip()
+        print(f"[*] mission brief loaded from {args.mission_file} ({len(mission)} chars)")
 
     if args.list_pending:
         cmd_list_pending(conn)
@@ -1553,17 +1615,20 @@ def main():
 
     if args.continue_assess is not None:
         session_id = args.continue_assess
-        row = conn.execute("SELECT provider, model FROM redteam_sessions WHERE id=?", (session_id,)).fetchone()
+        row = conn.execute(
+            "SELECT provider, model, mission_brief FROM redteam_sessions WHERE id=?", (session_id,)
+        ).fetchone()
         if row is None:
             print(f"[!] no session with id={session_id}")
             return
         provider = build_provider(row["provider"], args.model or row["model"])
+        continue_mission = mission if args.mission_file else row["mission_brief"]
         print(f"[*] continuing assess on session {session_id} via "
               f"provider={row['provider']} model={provider.model}")
         assess_budget = args.max_iterations or ASSESS_MAX_ITERATIONS
         result = run_assess_stage(conn, session_id, provider, assess_budget, is_continuation=True,
                                    context_budget=args.context_budget, max_chunks=args.max_chunks,
-                                   max_tokens_hard_cap=args.max_tokens_per_stage)
+                                   max_tokens_hard_cap=args.max_tokens_per_stage, mission=continue_mission)
         print(f"    {result.tool_calls} tool call(s)")
         cmd_stats(conn)
         return
@@ -1583,6 +1648,7 @@ def main():
         print(f"    chunking: context_budget={cb_desc}, max_chunks={args.max_chunks}, hard_cap={cap_desc}")
         print(f"    RECON  tools: {[t['name'] for t in RECON_TOOLS]}")
         print(f"    ASSESS tools: {[t['name'] for t in ASSESS_TOOLS]}")
+        print(f"    mission brief: {args.mission_file or 'none (default broad recon+assess persona)'}")
         print("    Any exploitation/lateral-move/exfil action against a target inside "
               f"redteam_exec.ALLOWED_NETWORKS ({[str(n) for n in redteam_exec.ALLOWED_NETWORKS]}, "
               f"currently all of {', '.join(_TARGETS)}) EXECUTES IMMEDIATELY when "
@@ -1596,14 +1662,14 @@ def main():
     recon_budget = max_iterations or RECON_MAX_ITERATIONS
     assess_budget = max_iterations or ASSESS_MAX_ITERATIONS
 
-    session_id, attacker_ip = start_session(conn, args.provider, provider.model)
+    session_id, attacker_ip = start_session(conn, args.provider, provider.model, mission)
     print(f"[*] session {session_id} started, attacker_ip={attacker_ip}, "
           f"provider={args.provider} model={provider.model}")
 
     print("[*] stage: recon")
     recon_result = run_recon_stage(conn, session_id, provider, recon_budget,
                                     context_budget=args.context_budget, max_chunks=args.max_chunks,
-                                    max_tokens_hard_cap=args.max_tokens_per_stage)
+                                    max_tokens_hard_cap=args.max_tokens_per_stage, mission=mission)
     print(f"    {recon_result.tool_calls} tool call(s)")
     if recon_result.usage:
         u = recon_result.usage
@@ -1619,7 +1685,7 @@ def main():
     print("[*] stage: assess")
     assess_result = run_assess_stage(conn, session_id, provider, assess_budget,
                                       context_budget=args.context_budget, max_chunks=args.max_chunks,
-                                      max_tokens_hard_cap=args.max_tokens_per_stage)
+                                      max_tokens_hard_cap=args.max_tokens_per_stage, mission=mission)
     print(f"    {assess_result.tool_calls} tool call(s)")
     if assess_result.usage:
         u = assess_result.usage
