@@ -387,9 +387,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true", help="re-run over all events")
     ap.add_argument("--stats", action="store_true", help="just show stats")
+    ap.add_argument("--db-path", default=None,
+                     help="run against this sqlite file instead of soc.db (e.g. a "
+                          "replay_session.py output, for repeatable defender testing)")
     args = ap.parse_args()
 
-    conn = connect()
+    conn = connect(args.db_path)
 
     if args.stats:
         stats(conn)

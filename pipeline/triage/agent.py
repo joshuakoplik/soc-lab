@@ -1156,10 +1156,13 @@ def main():
                      help="hard ceiling on cumulative tokens for one candidate across all its "
                           f"chunks; stops chaining immediately if crossed (default: "
                           f"{DEFAULT_MAX_TOKENS_PER_CANDIDATE}; 0 disables the hard cap)")
+    ap.add_argument("--db-path", default=None,
+                     help="triage against this sqlite file instead of soc.db (e.g. a "
+                          "replay_session.py output, for repeatable defender testing)")
     args = ap.parse_args()
 
-    conn = connect()
-    print(f"[*] db: {DB_PATH}")
+    conn = connect(args.db_path)
+    print(f"[*] db: {args.db_path or DB_PATH}")
 
     if args.seed_injection_test:
         seed_injection_test_candidate(conn)
