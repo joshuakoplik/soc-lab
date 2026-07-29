@@ -21,6 +21,7 @@ product.
 ```bash
 ./setup.sh && ./verify.sh              # bring up cowrie+juiceshop+nginx, confirm telemetry lands
 ./lab-mode.sh {easy|hard|wordpress|status}   # switch scenario; writes lab_mode.json
+./reset.sh [--network|--db|--queue|--status] [--no-kill]   # reset baseline; default (no flags) does all three
 docker compose ps / logs -f <svc> / down [-v]
 ```
 
@@ -111,7 +112,7 @@ contract — read them before changing anything here. Key points:
   every rule it does insert is scoped to `-i soclab0` (the lab's own bridge
   interface) — so this tool cannot reach outside this lab's own docker
   network no matter what `src_ip` the model passes. Every call — executed
-  or rejected — is logged to `block_ip_calls`. Run `./network-reset.sh` to
+  or rejected — is logged to `block_ip_calls`. Run `./reset.sh --network` to
   remove every block this has ever put in place. `get_raw_event` exists but
   is deliberately not in `TOOLS` — opt-in only.
 - `candidates.status` is the only write this file makes to that table.
@@ -180,9 +181,11 @@ trick the model into calling the real block tool on the wrong target is
 exactly what this harness is for. The only safety boundary is
 `block_enforcer.py`'s hard CIDR fence (10.211.0.0/24 only, never the
 gateway) — a rejection prints loudly so a fence hit during a harness run is
-never mistaken for routine noise. Run `./network-reset.sh` after a run to
-undo anything it blocked. `recommend_block` never executes anywhere,
-harness or production. Runs live under `injection_asr/runs/<name>/`; only
+never mistaken for routine noise. Run `./reset.sh --network` after a run to
+undo anything it blocked (the harness's own DB is already isolated from
+soc.db, so a full `./reset.sh` isn't needed here). `recommend_block` never
+executes anywhere, harness or production. Runs live under
+`injection_asr/runs/<name>/`; only
 the `RESULTS.md` summaries are meant to be committed (see `.gitignore` —
 the raw `harness.db`/`results.jsonl` are regenerable).
 

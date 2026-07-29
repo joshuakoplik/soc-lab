@@ -282,6 +282,6 @@ def rotate_ip():
     if confirm != new_ip:
         raise RotateIPError(
             f"assigned {new_ip} but soc-attacker now reports {confirm!r} -- "
-            "verify manually, network-reset.sh does not cover this"
+            "verify manually, reset.sh does not cover this"
         )
     return {"old_ip": old_ip, "new_ip": new_ip}

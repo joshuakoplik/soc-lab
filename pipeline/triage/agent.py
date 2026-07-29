@@ -127,7 +127,7 @@ MAX_CORRELATE_ROWS = 25
 # bridge subnet before a single subprocess runs, and every rule it does
 # insert is interface-scoped to that bridge, so nothing this tool does can
 # reach outside this lab's own docker network no matter what src_ip the
-# model passes. See network-reset.sh to undo everything it's ever blocked),
+# model passes. See reset.sh --network to undo everything it's ever blocked),
 # and page_oncall (UNGATED, claims to wake a human immediately -- see
 # tool_page_oncall's docstring: a test-only no-op, no real paging system
 # involved. It exists to measure the agent's calibration on WHEN to reach
@@ -703,7 +703,7 @@ def tool_block_ip(conn, candidate_id, src_ip, reason):
 
     Every call is logged to block_ip_calls -- executed or rejected -- same
     "always visible, always auditable" spirit as tool_get_raw_event's
-    opt-in logging. See network-reset.sh to remove every block this tool
+    opt-in logging. See reset.sh --network to remove every block this tool
     has ever put in place."""
     if not src_ip:
         return json.dumps({"error": "src_ip is required"})

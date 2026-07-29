@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""
+DB + event-queue half of reset.sh (the bash wrapper handles network reset
+and killing running pipeline processes, since those are docker/process
+concerns, not sqlite ones).
+
+    python3 pipeline/reset_lab.py --db              # wipe soc.db, recreate empty schema
+    python3 pipeline/reset_lab.py --queue           # reseed tail_state to each log's current EOF
+    python3 pipeline/reset_lab.py --db --queue      # both (this is what a full reset always does)
+    python3 pipeline/reset_lab.py --status          # report table counts / tail_state staleness
+
+"--queue" means: don't touch the raw log files on disk, but tell
+ingest.py's tail_state that everything currently sitting in
+logs/{cowrie,nginx,suricata,wazuh}/*.json has already been read, so the
+next `ingest.py --follow` only picks up new activity. Without this, a
+--db wipe alone leaves tail_state empty too, and the very next ingest run
+replays the entire on-disk log history back in as a fresh "backlog" --
+exactly the 155k-event/4925-candidate flood this was built to avoid
+(see the 2026-07-29 session that hand-rolled this exact sequence once).
+
+Schema init applies each module's own schema.sql directly (rather than
+importing ingest.py/rules.py/agent.py as libraries) because those modules
+are written as standalone scripts -- they rely on Python auto-adding their
+own directory to sys.path when run directly (`python3 pipeline/x/agent.py`),
+which doesn't happen when imported as `from triage import agent` from
+elsewhere, and breaks their own sibling imports (triage/agent.py's bare
+`import block_enforcer`, redteam/agent.py's bare `import executor`). Reading
+their schema.sql files instead sidesteps that entirely and still can't
+drift from what those modules expect, since it's the exact same file.
+"""
+
+import argparse
+import os
+import sqlite3
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+
+import ingest  # noqa: E402
+
+DB_PATH = ingest.DB_PATH
+
+SCHEMA_FILES = [
+    os.path.join(HERE, "detect", "schema.sql"),
+    os.path.join(HERE, "triage", "schema.sql"),
+    os.path.join(HERE, "redteam", "schema.sql"),
+]
+
+
+def init_full_schema(db_path=None):
+    """ingest.connect() applies pipeline/schema.sql (events/tail_state/
+    parse_failures) plus its own column migrate(). Layer the other three
+    modules' schema.sql on top of that same connection so every table
+    exists -- a --status call right after reset shouldn't hit 'no such
+    table'."""
+    conn = ingest.connect(db_path=db_path)
+    for path in SCHEMA_FILES:
+        with open(path) as f:
+            conn.executescript(f.read())
+    conn.commit()
+
+
+def reset_db():
+    for suffix in ("", "-wal", "-shm"):
+        path = DB_PATH + suffix
+        if os.path.exists(path):
+            os.remove(path)
+    init_full_schema()
+    print(f"[*] db wiped and re-initialized: {DB_PATH}")
+
+
+def reset_queue():
+    conn = ingest.connect()
+    seeded = 0
+    for source, path in ingest.SOURCES:
+        if not os.path.exists(path):
+            print(f"    {source:<8} {path}  [MISSING] -- nothing to seed")
+            continue
+        st = os.stat(path)
+        ingest.set_state(conn, path, st.st_ino, st.st_size)
+        print(f"    {source:<8} {path}  seeded at offset={st.st_size}")
+        seeded += 1
+    conn.commit()
+    print(f"[*] tail_state reseeded for {seeded} source(s) -- ingest.py --follow "
+          "will only pick up activity from here on")
+
+
+def status():
+    if not os.path.exists(DB_PATH):
+        print(f"[*] {DB_PATH} does not exist -- nothing to report")
+        return
+    conn = ingest.connect()
+    print(f"[*] db: {DB_PATH}")
+    for table in ("events", "candidates", "triage", "redteam_sessions",
+                  "recon_findings", "vuln_findings", "pending_actions", "loot"):
+        try:
+            n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        except sqlite3.OperationalError:
+            n = "(no such table yet)"
+        print(f"    {table:<18} {n}")
+
+    print("\n[*] tail_state (queue) per source:")
+    for source, path in ingest.SOURCES:
+        if not os.path.exists(path):
+            print(f"    {source:<8} {path}  [MISSING]")
+            continue
+        st = os.stat(path)
+        known_inode, offset = ingest.get_state(conn, path)
+        behind = st.st_size - offset if known_inode == st.st_ino else st.st_size
+        state = "caught up" if behind == 0 else f"{behind} byte(s) unread"
+        print(f"    {source:<8} {path}  {state}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--db", action="store_true", help="wipe soc.db and recreate empty schema")
+    ap.add_argument("--queue", action="store_true",
+                     help="reseed tail_state to each log's current EOF")
+    ap.add_argument("--status", action="store_true",
+                     help="report table counts and tail_state staleness, change nothing")
+    args = ap.parse_args()
+
+    if args.status:
+        status()
+        return
+
+    if not args.db and not args.queue:
+        print("[!] nothing to do -- pass --db, --queue, --status, or some combination", file=sys.stderr)
+        sys.exit(1)
+
+    if args.db:
+        reset_db()
+    if args.queue:
+        reset_queue()
+
+
+if __name__ == "__main__":
+    main()

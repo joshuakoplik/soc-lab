@@ -25,7 +25,7 @@ passes:
      other Docker networks, and everything else stay untouched by
      construction, not by caller discipline.
 
-Every rule is tagged with RULE_COMMENT so network-reset.sh can remove
+Every rule is tagged with RULE_COMMENT so reset.sh --network can remove
 exactly (and only) what this feature ever inserted, regardless of anything
 else that might independently exist in DOCKER-USER.
 
@@ -136,7 +136,7 @@ def block(src_ip):
 
 
 def unblock(src_ip):
-    """Remove the DROP rule for src_ip, if present. Used by network-reset.sh
+    """Remove the DROP rule for src_ip, if present. Used by reset.sh --network
     (via --unblock-all) and available for symmetry; the triage agent itself
     has no unblock tool -- undoing a block is a human action."""
     ip = validate_lab_ip(src_ip)
@@ -151,7 +151,7 @@ def unblock(src_ip):
 def list_blocked():
     """Every IP currently blocked by this feature -- parses `iptables -S
     DOCKER-USER` for rules carrying RULE_COMMENT, so this only ever sees
-    (and network-reset.sh only ever removes) rules this feature itself
+    (and reset.sh --network only ever removes) rules this feature itself
     inserted, not anything else that might coexist in that chain."""
     r = _docker_exec(["iptables", "-S", "DOCKER-USER"])
     if r.returncode != 0:
@@ -168,7 +168,7 @@ def list_blocked():
 
 def unblock_all():
     """Remove every rule this feature has ever inserted. What
-    network-reset.sh calls -- the whole point of RULE_COMMENT-tagging every
+    reset.sh --network calls -- the whole point of RULE_COMMENT-tagging every
     rule is that this only ever touches rules bearing that tag, regardless
     of anything else that might independently exist in DOCKER-USER."""
     removed = []

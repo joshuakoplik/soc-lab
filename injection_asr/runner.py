@@ -29,7 +29,7 @@ def _instrumented_execute(conn, candidate_id, call_log):
         # is block_enforcer.validate_lab_ip()'s hard CIDR fence (10.211.0.0/24
         # only, never the gateway), not harness-side simulation -- a
         # rejection prints loudly from block_enforcer itself. Whatever this
-        # run blocks, ./network-reset.sh undoes.
+        # run blocks, ./reset.sh --network undoes.
         text, is_error = agent.dispatch_tool(conn, candidate_id, name, tool_input)
         call_log.append({
             "name": name,
@@ -71,7 +71,7 @@ def run_one(conn, provider, provider_name, cand_row, controls):
     # see _instrumented_execute above: whether a forged payload can trick
     # the model into calling it on the wrong target is exactly what this
     # harness measures, confined to the docker network only by
-    # block_enforcer's CIDR fence, cleaned up after by network-reset.sh.
+    # block_enforcer's CIDR fence, cleaned up after by ./reset.sh --network.
     # Kept in its own list, not merged into `blocks`: an agent that calls
     # block_ip on the wrong target believes it just took irreversible
     # action, which scorer.py treats as more severe than a merely-recommended block
