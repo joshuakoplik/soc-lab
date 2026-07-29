@@ -7,6 +7,13 @@ const feedAttacker = document.getElementById("feed-attacker");
 
 const candidatesById = new Map();   // id -> candidate row
 const sessionsById = new Map();     // id -> {row, recon, vuln, loot, flags, cardEl, headerEl, timelineEl, lastActivity}
+const inflightById = new Map();     // llm_calls.id -> {row, cardEl}
+
+// Every row this client has seen, so a click on any rendered line can pull
+// up its full record -- keyed "table:id", populated centrally in
+// handleMessage rather than by each render function, so nothing that
+// renders a line has to remember to also register it.
+const detailStore = new Map();
 
 let eventTimes = [];   // epoch ms, trimmed to last 60s -- "events/min"
 let alertTimes = [];   // epoch ms, trimmed to last 60min -- "alerts (1h)"
@@ -48,7 +55,7 @@ function updateStat(id, value) {
   document.getElementById(id).textContent = value;
 }
 
-function appendLine(feedEl, innerHtml, statusClass, cap = 400, ts = null) {
+function appendLine(feedEl, innerHtml, statusClass, cap = 400, ts = null, detailKey = null) {
   // Newest at the top, always -- inserted by actual timestamp rather than
   // arrival order, because suricata and wazuh are independently-polled
   // tailers with different latency, so "just arrived" and "actually most
@@ -62,6 +69,10 @@ function appendLine(feedEl, innerHtml, statusClass, cap = 400, ts = null) {
   div.innerHTML = innerHtml;
   const epoch = ts != null ? toEpoch(ts) : Date.now();
   div.dataset.epoch = epoch;
+  if (detailKey) {
+    div.classList.add("clickable");
+    div.dataset.detailKey = detailKey;
+  }
 
   let ref = feedEl.firstChild;
   while (ref && ref.dataset && Number(ref.dataset.epoch) > epoch) ref = ref.nextSibling;
@@ -118,7 +129,7 @@ function renderEventLine(row) {
   const head = `<span class="tag src-${escapeHtml(row.source)}">${escapeHtml(row.source)}</span>` +
     `<span class="ctx">${escapeHtml(row.src_ip || "")}</span>` +
     `<span class="body"><span class="${bodyClass}">${escapeHtml(d.text)}</span>${d.extra ? ` <span class="ctx">${escapeHtml(d.extra)}</span>` : ""}</span>`;
-  appendLine(feedEvents, buildEntry(row.ts, head, null), null, 400, row.ts);
+  appendLine(feedEvents, buildEntry(row.ts, head, null), null, 400, row.ts, `events:${row.id}`);
 }
 
 // ---------- Defender Log (triage / alerts / block actions) ----------
@@ -173,7 +184,7 @@ function renderDefenderRow(table, row) {
   } else {
     return;
   }
-  appendLine(feedDefender, buildEntry(ts, head, body), statusClass, 400, ts);
+  appendLine(feedDefender, buildEntry(ts, head, body), statusClass, 400, ts, `${table}:${row.id}`);
 }
 
 // ---------- Attacker Campaigns (redteam_sessions + children) ----------
@@ -239,7 +250,7 @@ function onReconFinding(row) {
   s.recon.push(row);
   s.lastActivity = Date.now();
   const head = `<span class="tag detection">recon</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.finding_type)} \u00b7 ${escapeHtml(row.source_tool)}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.detail, 220))), null, Infinity, row.created);
+  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.detail, 220))), null, Infinity, row.created, `recon_findings:${row.id}`);
 }
 
 function onVulnFinding(row) {
@@ -249,7 +260,7 @@ function onVulnFinding(row) {
   s.lastActivity = Date.now();
   const cls = severityStatusClass(row.severity);
   const head = `<span class="tag ${cls}">vuln \u00b7 ${escapeHtml(row.severity)}</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.category)}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.description || "")), cls, Infinity, row.created);
+  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.description || "")), cls, Infinity, row.created, `vuln_findings:${row.id}`);
 }
 
 function onPendingAction(row) {
@@ -262,7 +273,7 @@ function onPendingAction(row) {
   else { label = "proposed"; cls = "st-muted"; ts = row.created; }
   const approver = row.approved_by ? ` \u00b7 ${escapeHtml(row.approved_by)}` : "";
   const head = `<span class="tag ${cls}">${label}</span><span class="ctx">${escapeHtml(row.tool)} \u2192 ${escapeHtml(row.target)}${approver}</span>`;
-  appendLine(s.timelineEl, buildEntry(ts, head, escapeHtml(row.rationale || "")), cls, Infinity, ts);
+  appendLine(s.timelineEl, buildEntry(ts, head, escapeHtml(row.rationale || "")), cls, Infinity, ts, `pending_actions:${row.id}`);
 }
 
 function onLoot(row) {
@@ -271,7 +282,7 @@ function onLoot(row) {
   s.loot.push(row);
   s.lastActivity = Date.now();
   const head = `<span class="tag detection">loot</span><span class="ctx">${escapeHtml(row.tool)} \u00b7 ${escapeHtml(row.target || "")} \u00b7 exit ${row.exit_code}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.summary, 220))), null, Infinity, row.created);
+  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.summary, 220))), null, Infinity, row.created, `loot:${row.id}`);
 }
 
 function onCapturedFlag(row) {
@@ -281,7 +292,7 @@ function onCapturedFlag(row) {
   s.lastActivity = Date.now();
   flagsTotal++;
   const head = `<span class="tag st-critical">\u{1F6A9} flag captured</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.method || "")}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.flag_value || "")), "st-critical", Infinity, row.created);
+  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.flag_value || "")), "st-critical", Infinity, row.created, `captured_flags:${row.id}`);
   updateStat("stat-flags", flagsTotal);
 }
 
@@ -295,6 +306,78 @@ function resortCampaigns() {
   });
   for (const s of arr) feedAttacker.appendChild(s.cardEl);
 }
+
+// ---------- In-Flight LLM Calls ----------
+// llm_calls rows come from pipeline/llm_call_tracker.py: 'running' the
+// instant a provider.complete()/run_stage_turn() call starts, flipped to
+// 'completed'/'error' the instant it returns. GMI/local-model calls have
+// been observed taking 10+ minutes with nothing else in the UI moving --
+// this bar exists so that wait is visible, with the exact prompt behind it
+// one click away, instead of looking indistinguishable from a hang.
+
+const inflightBar = document.getElementById("inflight-bar");
+const inflightCards = document.getElementById("inflight-cards");
+
+const STALE_AFTER_S = 1800; // 30min -- past this, flag as possibly orphaned
+                             // (e.g. the process that started it was killed)
+                             // rather than genuinely still working.
+
+function componentLabel(component) {
+  return { "triage": "Triage", "redteam-recon": "Red-team · Recon", "redteam-assess": "Red-team · Assess" }[component] || component;
+}
+
+function fmtElapsed(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m >= 60) return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return `${m}:${String(rem).padStart(2, "0")}`;
+}
+
+function renderInflightCard(entry) {
+  const { row, cardEl } = entry;
+  const elapsedS = (Date.now() - toEpoch(row.started)) / 1000;
+  const stale = elapsedS > STALE_AFTER_S;
+  cardEl.classList.toggle("inflight-stale", stale);
+  cardEl.innerHTML =
+    `<div class="inflight-card-top">` +
+    `<span class="inflight-dot"></span>` +
+    `<span class="inflight-component">${escapeHtml(componentLabel(row.component))}</span>` +
+    `<span class="inflight-elapsed">${fmtElapsed(elapsedS)}${stale ? " — stalled?" : ""}</span>` +
+    `</div>` +
+    `<div class="inflight-context">${escapeHtml(row.context_label)}</div>` +
+    `<div class="inflight-meta">${escapeHtml(row.provider)}/${escapeHtml(row.model)}</div>`;
+}
+
+function onLlmCall(row) {
+  if (row.status !== "running") {
+    const existing = inflightById.get(row.id);
+    if (existing) {
+      existing.cardEl.remove();
+      inflightById.delete(row.id);
+    }
+    inflightBar.classList.toggle("hidden", inflightById.size === 0);
+    return;
+  }
+  let entry = inflightById.get(row.id);
+  if (!entry) {
+    const cardEl = document.createElement("div");
+    cardEl.className = "inflight-card";
+    cardEl.dataset.detailKey = `llm_calls:${row.id}`;
+    cardEl.addEventListener("click", () => openDetailModal(cardEl.dataset.detailKey));
+    inflightCards.appendChild(cardEl);
+    entry = { row, cardEl };
+    inflightById.set(row.id, entry);
+  } else {
+    entry.row = row;
+  }
+  renderInflightCard(entry);
+  inflightBar.classList.remove("hidden");
+}
+
+setInterval(() => {
+  for (const entry of inflightById.values()) renderInflightCard(entry);
+}, 1000);
 
 // ---------- candidates (context lookup, not its own visual feed) ----------
 
@@ -318,6 +401,7 @@ function recomputeActiveCampaigns() {
 
 function handleMessage(msg) {
   const { table, row } = msg;
+  if (table !== "_error" && row && row.id != null) detailStore.set(`${table}:${row.id}`, { table, row });
   switch (table) {
     case "events": renderEventLine(row); eventTimes.push(toEpoch(row.ts)); break;
     case "candidates": onCandidate(row); break;
@@ -332,6 +416,7 @@ function handleMessage(msg) {
     case "pending_actions": onPendingAction(row); break;
     case "loot": onLoot(row); break;
     case "captured_flags": onCapturedFlag(row); break;
+    case "llm_calls": onLlmCall(row); break;
     case "_error": console.error("poll error:", row.detail); break;
   }
 }
@@ -362,6 +447,8 @@ async function loadBootstrap() {
   }
   campaignRows.sort(byCreatedAsc);
   campaignRows.forEach(handleMessage);
+
+  for (const row of data.llm_calls.rows) handleMessage({ table: "llm_calls", row });
 
   recomputeOpenCandidates();
   recomputeActiveCampaigns();
@@ -400,6 +487,72 @@ function connectWS() {
     try { handleMessage(JSON.parse(ev.data)); } catch (e) { console.error(e); }
   };
 }
+
+// ---------- detail modal (click any line to drill in) ----------
+// One generic renderer for every table: short scalar fields go in a
+// definition list, anything long or multi-line (raw event lines, JSON
+// blobs, LLM system/user prompts) gets its own <pre> block below it. Works
+// unmodified for every row shape in detailStore -- there's no per-table
+// special case because every table is just "a row of named fields," and
+// that's all this needs to show.
+
+const TABLE_LABELS = {
+  events: "Event", candidates: "Candidate", triage: "Triage Verdict", agent_alerts: "Alert",
+  human_pages: "Page On-Call", block_recommendations: "Block Recommendation",
+  block_ip_calls: "Block IP Call", redteam_sessions: "Campaign Session",
+  recon_findings: "Recon Finding", vuln_findings: "Vuln Finding", pending_actions: "Pending Action",
+  loot: "Loot", captured_flags: "Captured Flag", llm_calls: "In-Flight LLM Call",
+};
+
+function looksLikeJson(s) {
+  const t = s.trim();
+  return (t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"));
+}
+
+function renderDetailBody(row) {
+  const dlRows = [];
+  const blocks = [];
+  for (const [k, v] of Object.entries(row)) {
+    if (v === null || v === undefined || v === "") { dlRows.push([k, "—"]); continue; }
+    let sv = typeof v === "string" ? v : JSON.stringify(v);
+    if (typeof v === "string" && looksLikeJson(sv)) {
+      try { sv = JSON.stringify(JSON.parse(sv), null, 2); } catch (e) { /* not actually JSON, leave as-is */ }
+    }
+    if (sv.length > 160 || sv.includes("\n")) blocks.push([k, sv]);
+    else dlRows.push([k, sv]);
+  }
+  let html = "<dl>" + dlRows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join("") + "</dl>";
+  for (const [k, v] of blocks) html += `<h4>${escapeHtml(k)}</h4><pre>${escapeHtml(v)}</pre>`;
+  return html;
+}
+
+const detailModal = document.getElementById("detail-modal");
+const detailModalTitle = document.getElementById("modal-title");
+const detailModalBody = document.getElementById("modal-body");
+
+function closeDetailModal() {
+  detailModal.classList.add("hidden");
+}
+
+function openDetailModal(key) {
+  if (!key) return;
+  const entry = detailStore.get(key);
+  if (!entry) return;
+  const { table, row } = entry;
+  detailModalTitle.textContent = `${TABLE_LABELS[table] || table} #${row.id}`;
+  detailModalBody.innerHTML = renderDetailBody(row);
+  detailModal.classList.remove("hidden");
+}
+
+document.getElementById("modal-close").addEventListener("click", closeDetailModal);
+detailModal.addEventListener("click", (e) => { if (e.target === detailModal) closeDetailModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetailModal(); });
+
+document.body.addEventListener("click", (e) => {
+  const line = e.target.closest(".line.clickable");
+  if (!line) return;
+  openDetailModal(line.dataset.detailKey);
+});
 
 // ---------- tabs ----------
 

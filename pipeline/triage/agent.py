@@ -52,6 +52,7 @@ from providers.gmi import GMIProvider  # noqa: E402
 from providers.local import LocalProvider  # noqa: E402
 import block_enforcer  # noqa: E402
 import lab_modes  # noqa: E402 -- pipeline/redteam/lab_modes.py
+import llm_call_tracker  # noqa: E402
 
 DB_PATH = os.path.join(ROOT, "soc.db")
 
@@ -462,6 +463,7 @@ def connect(db_path=None):
     with open(os.path.join(HERE, "schema.sql")) as f:
         conn.executescript(f.read())
     migrate(conn)
+    llm_call_tracker.ensure_schema(conn)
     return conn
 
 
@@ -873,18 +875,26 @@ def triage_one(conn, provider, provider_name, cand, controls="on", execute=None,
         def execute(name, tool_input):
             return dispatch_tool(conn, cand["id"], name, tool_input)
 
+    call_id = llm_call_tracker.start_call(
+        conn, component="triage",
+        context_label=f"candidate #{cand['id']} ({cand['rule']}, {cand['severity']})",
+        provider=provider_name, model=provider.model,
+        system_prompt=system, user_prompt=user,
+    )
     t0 = time.monotonic()
     try:
         verdict = provider.complete(system, user, TOOLS, execute,
                                      token_budget=context_budget, max_chunks=max_chunks,
                                      max_tokens_hard_cap=max_tokens_hard_cap)
     except Exception as e:  # noqa: BLE001 - one candidate's failure must not kill the batch
+        llm_call_tracker.finish_call(conn, call_id, "error", error=str(e))
         elapsed_s = time.monotonic() - t0
         record_failure(
             conn, cand["id"], provider_name, provider.model, e, elapsed_s,
             thinking=getattr(e, "thinking", None),
         )
         return "error", elapsed_s, None
+    llm_call_tracker.finish_call(conn, call_id, "completed")
     elapsed_s = time.monotonic() - t0
 
     if verdict.verdict not in VALID_VERDICTS:

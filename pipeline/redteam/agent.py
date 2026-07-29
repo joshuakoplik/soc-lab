@@ -87,6 +87,7 @@ from providers.claude import ClaudeProvider  # noqa: E402
 from providers.fireworks import FireworksProvider  # noqa: E402
 from providers.gmi import GMIProvider  # noqa: E402
 from providers.local import LocalProvider  # noqa: E402
+import llm_call_tracker  # noqa: E402
 
 DB_PATH = os.path.join(ROOT, "soc.db")
 
@@ -570,6 +571,7 @@ def connect():
     conn.row_factory = sqlite3.Row
     with open(os.path.join(HERE, "schema.sql")) as f:
         conn.executescript(f.read())
+    llm_call_tracker.ensure_schema(conn)
     return conn
 
 
@@ -1405,8 +1407,9 @@ def run_stage_turn(provider, system, user, tools, execute_tool, max_iterations, 
                                       token_budget=token_budget)
 
 
-def _run_chained_stage(provider, system, first_user, continuation_user, tools, execute_tool,
-                        max_iterations, context_budget, max_chunks, max_tokens_hard_cap, label):
+def _run_chained_stage(conn, session_id, provider, system, first_user, continuation_user, tools,
+                        execute_tool, max_iterations, context_budget, max_chunks,
+                        max_tokens_hard_cap, label):
     """Runs up to `max_chunks` bounded calls to run_stage_turn, restarting
     with a fresh `continuation_user` prompt (the same re-orientation pattern
     --continue-assess already used manually, generalized here to also cover
@@ -1425,15 +1428,30 @@ def _run_chained_stage(provider, system, first_user, continuation_user, tools, e
     Any ProviderError OTHER than ContextBudgetExceeded propagates unchanged
     -- only a context-budget restart is treated as recoverable here; a real
     failure (bad key, network, rate limit) is still the caller's problem,
-    same as before this existed."""
+    same as before this existed.
+
+    conn/session_id are only used to log each chunk's call to llm_calls (see
+    llm_call_tracker) so the dashboard can show it while it's still blocking
+    -- no other behavior here depends on them."""
+    provider_row = conn.execute(
+        "SELECT provider FROM redteam_sessions WHERE id=?", (session_id,)
+    ).fetchone()
+    provider_name = provider_row["provider"] if provider_row else "unknown"
     cumulative = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     user = first_user
     for chunk in range(1, max_chunks + 1):
         budget = context_budget or None
+        call_id = llm_call_tracker.start_call(
+            conn, component=f"redteam-{label}",
+            context_label=f"session #{session_id} -- {label} chunk {chunk}/{max_chunks}",
+            provider=provider_name, model=provider.model,
+            system_prompt=system, user_prompt=user,
+        )
         try:
             result = run_stage_turn(provider, system, user, tools, execute_tool, max_iterations,
                                      token_budget=budget)
         except ContextBudgetExceeded as e:
+            llm_call_tracker.finish_call(conn, call_id, "error", error=f"context budget exceeded: {e}")
             print(f"    [{label} chunk {chunk}/{max_chunks} hit context budget -- {e}]")
             if max_tokens_hard_cap and cumulative["prompt_tokens"] >= max_tokens_hard_cap:
                 raise ProviderError(
@@ -1442,7 +1460,11 @@ def _run_chained_stage(provider, system, first_user, continuation_user, tools, e
                 ) from e
             user = continuation_user
             continue
+        except Exception as e:  # noqa: BLE001 - always record what killed the call before it propagates
+            llm_call_tracker.finish_call(conn, call_id, "error", error=str(e))
+            raise
 
+        llm_call_tracker.finish_call(conn, call_id, "completed")
         if result.usage:
             for k in cumulative:
                 cumulative[k] += result.usage.get(k, 0)
@@ -1481,9 +1503,9 @@ def run_recon_stage(conn, session_id, provider, max_iterations,
     execute = _progress_wrapper(dispatch_recon_tool, conn, session_id)
 
     try:
-        result = _run_chained_stage(provider, RECON_SYSTEM_PROMPT, user, RECON_CONTINUATION_USER,
-                                     RECON_TOOLS, execute, max_iterations, context_budget,
-                                     max_chunks, max_tokens_hard_cap, label="recon")
+        result = _run_chained_stage(conn, session_id, provider, RECON_SYSTEM_PROMPT, user,
+                                     RECON_CONTINUATION_USER, RECON_TOOLS, execute, max_iterations,
+                                     context_budget, max_chunks, max_tokens_hard_cap, label="recon")
     except ProviderError as e:
         note = f"[recon incomplete -- {e}]"
         print(f"    {note}")
@@ -1532,9 +1554,9 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     prior = (row["assess_summary"] or "") if row else ""
 
     try:
-        result = _run_chained_stage(provider, ASSESS_SYSTEM_PROMPT, user, ASSESS_CONTINUATION_USER,
-                                     ASSESS_TOOLS, execute, max_iterations, context_budget,
-                                     max_chunks, max_tokens_hard_cap, label="assess")
+        result = _run_chained_stage(conn, session_id, provider, ASSESS_SYSTEM_PROMPT, user,
+                                     ASSESS_CONTINUATION_USER, ASSESS_TOOLS, execute, max_iterations,
+                                     context_budget, max_chunks, max_tokens_hard_cap, label="assess")
     except ProviderError as e:
         note = f"[assess incomplete -- {e}]"
         print(f"    {note}")

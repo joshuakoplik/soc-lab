@@ -49,15 +49,17 @@ TABLES = {
     "pending_actions":       ("pending_action",        150),
     "loot":                  ("loot",                  150),
     "captured_flags":        ("captured_flag",          60),
+    "llm_calls":             ("llm_call",               40),
 }
 
-# These three get UPDATEd in place after insert (candidates.status flips
+# These get UPDATEd in place after insert (candidates.status flips
 # new->triaged; redteam_sessions.stage/status advances recon->assess->done;
-# pending_actions.approved/executed/result_json fill in later) -- an
-# id-cursor alone would miss those transitions. Diff a full snapshot instead.
-# The rest are insert-only per their own schema docstrings, so a cheap
-# id-cursor is correct for them.
-MUTABLE_TABLES = {"candidates", "redteam_sessions", "pending_actions"}
+# pending_actions.approved/executed/result_json fill in later; llm_calls.status
+# flips running->completed/error when the blocking provider call it represents
+# returns) -- an id-cursor alone would miss those transitions. Diff a full
+# snapshot instead. The rest are insert-only per their own schema docstrings,
+# so a cheap id-cursor is correct for them.
+MUTABLE_TABLES = {"candidates", "redteam_sessions", "pending_actions", "llm_calls"}
 
 
 def connect_ro() -> sqlite3.Connection:
