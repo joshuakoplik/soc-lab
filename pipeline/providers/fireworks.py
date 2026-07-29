@@ -23,6 +23,8 @@ class FireworksProvider(OpenAICompatibleProvider):
             base_url_env="FIREWORKS_OPENAPI_HOST",
             api_key_env="FIREWORKS_API_KEY",
             timeout_env="FIREWORKS_TIMEOUT_S",
-            default_timeout_s=120,
+            # 1200s, same reasoning as gmi.py: a long agentic turn crafting
+            # a real exploit can take minutes, not seconds.
+            default_timeout_s=1200,
             error_prefix="Fireworks API",
         )

@@ -1355,7 +1355,7 @@ def _progress_wrapper(dispatch_fn, conn, session_id):
 # max_iterations (which bounds one chunk) and from a hard token ceiling
 # (which bounds the whole chain, see --max-tokens-per-stage).
 DEFAULT_CONTEXT_BUDGET = 50_000
-DEFAULT_MAX_CHUNKS = 4
+DEFAULT_MAX_CHUNKS = 10
 
 RECON_CONTINUATION_USER = (
     "Continue reconnaissance for this session -- your last chunk ran long "

@@ -73,13 +73,16 @@ DEFAULT_MODEL = {
 # this and chunking should rarely if ever trigger -- it's the safety net
 # for whatever wasn't anticipated, not the primary fix.
 DEFAULT_CONTEXT_BUDGET = 40_000
-DEFAULT_MAX_CHUNKS = 3
+DEFAULT_MAX_CHUNKS = 10
 # Absolute circuit breaker on top of chunking: if a candidate would cost
 # more than this even after DEFAULT_MAX_CHUNKS restarts, stop spending on
-# it and record a failure rather than keep going. 100K tokens is still ~25x
-# a normal candidate's cost (see EVENT_SEVERITY_RANK_SQL comment above for
-# what an uncapped candidate looked like before this existed: 450K+).
-DEFAULT_MAX_TOKENS_PER_CANDIDATE = 100_000
+# it and record a failure rather than keep going. Sized to DEFAULT_MAX_CHUNKS
+# * DEFAULT_CONTEXT_BUDGET (400K) plus headroom, not shrunk back down --
+# a lower cap would just silently cut chunking off early. Still a real
+# circuit breaker, not a free pass: see EVENT_SEVERITY_RANK_SQL comment
+# above for what an uncapped candidate looked like before this existed
+# (450K+, a real account suspension) -- this is a wider net, not no net.
+DEFAULT_MAX_TOKENS_PER_CANDIDATE = 450_000
 
 SEVERITY_RANK_SQL = (
     "CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 "

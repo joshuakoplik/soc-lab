@@ -28,7 +28,11 @@ class GMIProvider(OpenAICompatibleProvider):
             # speeds (a small model vs. e.g. a 1M-context frontier model) --
             # overridable the same way local.py's OLLAMA_TIMEOUT_S is,
             # rather than assuming one constant fits every model in the
-            # catalog.
-            default_timeout_s=120,
+            # catalog. 1200s because a long agentic turn (writing out a full
+            # exploit, not just a triage verdict) can legitimately take
+            # minutes, and the old 120s cut that off mid-generation (see the
+            # 2026-07-29 session where this timed out a session right after
+            # it identified the real vuln chain and started crafting it).
+            default_timeout_s=1200,
             error_prefix="GMI API",
         )

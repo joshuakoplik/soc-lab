@@ -23,7 +23,11 @@ MAX_TOKENS = 4096
 # calling tools forever is a cost leak, not a triage decision -- cut it off
 # and record the failure rather than paying for an infinite loop.
 MAX_TOOL_ITERATIONS = 8
-TIMEOUT_S = 60
+# Overridable via ANTHROPIC_TIMEOUT_S, same pattern as OLLAMA_TIMEOUT_S /
+# GMI_TIMEOUT_S / FIREWORKS_TIMEOUT_S -- a long agentic turn (e.g. a
+# recon/assess stage writing out a full exploit) can take a lot longer than
+# a single triage verdict.
+TIMEOUT_S = int(os.environ.get("ANTHROPIC_TIMEOUT_S", "1200"))
 
 
 class ClaudeProvider:

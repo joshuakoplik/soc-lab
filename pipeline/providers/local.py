@@ -50,18 +50,24 @@ VERDICT_SCHEMA = {
 # a hardcoded cutoff that was fine for an 8b model can hard-fail a genuinely
 # bigger one mid-call (ProviderError, not just a slow response). Overridable
 # via OLLAMA_TIMEOUT_S rather than requiring a code edit per model swap.
-TIMEOUT_S = int(os.environ.get("OLLAMA_TIMEOUT_S", "600"))
+TIMEOUT_S = int(os.environ.get("OLLAMA_TIMEOUT_S", "1200"))
 # Reasoning models (qwen3 etc.) emit a <think>...</think> trace by default --
 # parse_verdict_json would choke on that prose instead of the JSON verdict.
 # num_ctx defaults to 4096 in Ollama, which silently truncates a
 # candidate-plus-evidence prompt (no error, just a verdict reasoned over a
 # clipped prompt) -- so we force it up rather than trust the server default.
-MIN_NUM_CTX = 8192
+# Overridable via OLLAMA_NUM_CTX: this is the model's REAL context window
+# (unlike triage/agent.py's context_budget/max_chunks, which are an
+# accounting threshold that this provider ignores entirely -- see
+# run_agentic_turn's docstring), so it needs to match whatever model is
+# actually configured, not just the smallest one this lab has used.
+MIN_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "32768"))
 # Ollama's default num_predict is also small (server-dependent, often ~128-
 # 2048) and is a single shared budget across the <think> trace AND the final
 # JSON -- with thinking on, the trace alone can eat the whole budget and cut
-# the verdict off mid-object. Give it real headroom.
-NUM_PREDICT = 4096
+# the verdict off mid-object. Give it real headroom. Overridable via
+# OLLAMA_NUM_PREDICT for the same reason as OLLAMA_NUM_CTX above.
+NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "8192"))
 
 
 class LocalProvider:
