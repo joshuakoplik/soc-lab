@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS redteam_sessions (
     status         TEXT    NOT NULL DEFAULT 'running', -- running | completed | error
     recon_summary  TEXT,
     assess_summary TEXT,
+    mission_brief  TEXT,               -- operator-supplied attacker persona/objective text
+                                        -- (see agent.py's --mission-file), appended to the
+                                        -- default recon/assess system prompts. NULL means the
+                                        -- default generic broad-recon persona was used. Stored
+                                        -- so --continue-assess picks up the same persona
+                                        -- without the file having to be passed again.
     created        TEXT    NOT NULL
 );
 
