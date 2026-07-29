@@ -27,8 +27,14 @@ in the `wordpress` service (see ../compose.yaml) hard-disables it:
 ```php
 define('WP_AUTO_UPDATE_CORE', false);
 define('AUTOMATIC_UPDATER_DISABLED', true);
-define('DISALLOW_FILE_MODS', true);
 ```
+
+`AUTOMATIC_UPDATER_DISABLED` alone kills WP's whole background updater (core,
+plugins, themes, translations), which is all that's needed here. Deliberately
+*not* also setting `DISALLOW_FILE_MODS` -- that constant blocks plugin
+installs/uploads entirely, which would take out the wp2shell chain's RCE step
+(authenticated admin plugin upload) as unintended collateral, on top of
+whatever it was meant to harden.
 
 `wordpress-netlock` (compose.yaml) is defense in depth on top of that: same
 egress-lock pattern as `juiceshop-netlock` in compose.hard.yml, restricting

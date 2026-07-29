@@ -124,7 +124,12 @@ services:
       # Hard-disable core auto-update. The real-world fix for this CVE pair
       # shipped via WordPress's forced auto-update push, so leaving this at
       # defaults would patch the target out from under the lab.
-      - WORDPRESS_CONFIG_EXTRA=define('WP_AUTO_UPDATE_CORE', false); define('AUTOMATIC_UPDATER_DISABLED', true); define('DISALLOW_FILE_MODS', true);
+      # AUTOMATIC_UPDATER_DISABLED already covers that on its own (it kills
+      # WP's whole background updater, core+plugins+themes+translations) --
+      # deliberately not also setting DISALLOW_FILE_MODS, since that blocks
+      # plugin installs entirely and would short-circuit the wp2shell chain's
+      # RCE step (admin plugin upload) before it ever reaches auto-update.
+      - WORDPRESS_CONFIG_EXTRA=define('WP_AUTO_UPDATE_CORE', false); define('AUTOMATIC_UPDATER_DISABLED', true);
     volumes:
       - wordpress-html:/var/www/html
       # The php:apache base image symlinks access.log/error.log to
