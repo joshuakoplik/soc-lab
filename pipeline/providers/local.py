@@ -205,14 +205,57 @@ class LocalProvider:
         # investigate and build its case in prose. This is every candidate's
         # path now, not a fallback: analysis quality shouldn't depend on
         # whether the first parse happened to fail.
+        #
+        # This prompt calls out that action tools (raise_alert/
+        # recommend_block/block_ip/page_oncall) are ONLY reachable here, in
+        # phase 1 -- confirmed empirically (2026-07-29) that without this,
+        # qwen3:30b-a3b reliably calls zero tools and goes straight to
+        # prose, even with an obvious block_ip-warranting candidate: the
+        # original wording ("investigate...you'll be asked for the verdict
+        # in a follow-up turn") reads as "the decision, and anything that
+        # follows from it, happens later" -- and later never comes, because
+        # phase 2 is JSON-schema-constrained with an empty tools list (see
+        # below for why that can't change: format+tools together makes this
+        # model silently skip tool_calls entirely).
+        #
+        # That alone wasn't enough, though: with the fix above but nothing
+        # more, the model would reason its way to "recommend_block is
+        # warranted" and then just WRITE that sentence into its analysis
+        # prose or recommended_action field instead of emitting a real tool
+        # call -- correctly deciding, then never acting. The blunt
+        # "get called out for pretending" framing below (confirmed 2/2 in
+        # testing, vs. 0/2 without it) is what actually closed that gap --
+        # softer phrasing ("please call the tool") didn't move it. Revisit
+        # if a future model doesn't need this or reacts badly to it.
         analysis_prompt = (
             user
             + "\n\nThis is a reasoning turn, not the final answer -- ignore "
             "the JSON-only output contract above for now. Investigate using "
-            "your tools as needed, then write out your full analysis in "
-            "prose: walk through the evidence, say what it means, and build "
-            "the case for the verdict you're leaning toward. You'll be "
-            "asked for the structured JSON verdict in a follow-up turn."
+            "your tools as needed. If your investigation concludes that an "
+            "action is warranted -- raise_alert, recommend_block, block_ip, "
+            "or page_oncall -- call it now, in THIS turn: the follow-up turn "
+            "that produces your JSON verdict is JSON-only and cannot call "
+            "any tool, so this is your only chance to act, not just "
+            "investigate.\n\n"
+            "IMPORTANT -- a tool call means an actual function call, not a "
+            "sentence. Deciding in your prose that 'recommend_block is "
+            "warranted' and then only describing that decision in your "
+            "analysis or in recommended_action is NOT the same as calling "
+            "recommend_block, and does not do anything -- no record is "
+            "created, nothing happens, and the decision is lost the moment "
+            "this turn ends. If you have decided an action is warranted, "
+            "you MUST emit it as a real tool call in this turn before you "
+            "write a single word of prose. Writing about the tool instead "
+            "of calling it is a failure to do your job, not a softer "
+            "version of doing it. A triage run that decides an action is "
+            "needed and then fails to actually call the tool is worse than "
+            "useless: it creates the appearance of a handled incident while "
+            "nothing was actually done. Models that narrate actions instead "
+            "of taking them are pulled from production.\n\n"
+            "Then write out your full analysis in prose: walk through the "
+            "evidence, say what it means, and build the case for the "
+            "verdict you're leaning toward. You'll be asked for the "
+            "structured JSON verdict in a follow-up turn."
         )
         messages = [
             {"role": "system", "content": system},
