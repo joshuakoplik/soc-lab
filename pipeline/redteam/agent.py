@@ -9,8 +9,6 @@ Red-team agent -- the offense-side counterpart to pipeline/agent.py.
     python3 pipeline/redteam_agent.py --approve 7 --approved-by josh
     python3 pipeline/redteam_agent.py --execute-approved [--limit N] [--dry-run]
     python3 pipeline/redteam_agent.py --stats
-    python3 pipeline/redteam_agent.py --mission-file missions/wp2shell.txt   # custom attacker
-                                                                              # persona/objective
 
 THE GATE, read this before touching anything below: the model can identify
 targets, assess vulnerabilities, and PROPOSE an exploitation/credential/
@@ -121,6 +119,16 @@ _TARGETS = list(_MODE_CFG["targets"])
 GATED_TOOLS = _MODE_CFG["gated_tools"]
 ALLOWED_MSF_MODULES = _MODE_CFG["msf_modules"]
 
+# http_probe only makes sense against a target with an HTTP surface --
+# cowrie/metasploitable are SSH-only. Was hardcoded to ["nginx"] (the only
+# web target easy/hard mode ever had), which silently made the tool
+# unusable in wordpress mode: every call got coerced/rejected before ever
+# reaching the target, so the whole session ran recon blind on the one
+# target that actually needed content discovery to find its seeded vuln.
+# Filtered against _TARGETS (not just a static list) so it's still empty,
+# not wrong, in a mode where neither web target is up.
+_HTTP_TARGETS = tuple(t for t in _TARGETS if t in ("nginx", "wordpress"))
+
 # shell_exec is deliberately unconstrained at the Python level -- no target
 # allowlist, no module allowlist, arbitrary shell string. That's only safe
 # because containment moved to a layer this file doesn't control: soc-attacker
@@ -148,6 +156,33 @@ JUICESHOP_HOST_URL = "http://localhost:8080"
 # same convention as pipeline/agent.py's TOOLS.
 # ---------------------------------------------------------------------------
 
+# Runs from the HOST, not through soc-attacker -- deliberately: the
+# container's own egress lockdown (loopback + 10.211.0.0/24 only, see
+# CLAUDE.md) means it can't reach the real internet at all, and there's no
+# principled reason this needs to look like attacker-container traffic --
+# it's the agent's own research step, same as a human pentester googling a
+# fingerprinted version on their own machine, not something executed
+# against a target. Shared between RECON_TOOLS and ASSESS_TOOLS since
+# nothing about it is stage-specific.
+WEB_SEARCH_TOOL = {
+    "name": "web_search",
+    "description": (
+        "Search the public web -- CVE details, vulnerability writeups, changelogs, "
+        "documentation for a fingerprinted software/version. Once you know a "
+        "target's exact software and version, searching for known vulnerabilities "
+        "against that specific version is worth doing before assuming you already "
+        "know what applies -- recent CVEs won't be in your training data. Read-only, "
+        "safe, runs from the host rather than through soc-attacker."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+        },
+        "required": ["query"],
+    },
+}
+
 RECON_TOOLS = [
     {
         "name": "nmap_scan",
@@ -164,11 +199,11 @@ RECON_TOOLS = [
     },
     {
         "name": "http_probe",
-        "description": "Fetch one or more paths from the web target through nginx and report status code plus a capped preview of the response body. Read-only content discovery.",
+        "description": "Fetch one or more paths from a web target and report status code plus a capped preview of the response body. Read-only content discovery.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "enum": ["nginx"]},
+                "target": {"type": "string", "enum": list(_HTTP_TARGETS)},
                 "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 25},
                 "method": {"type": "string", "enum": ["GET", "POST"], "default": "GET"},
             },
@@ -191,6 +226,7 @@ RECON_TOOLS = [
             "required": [],
         },
     },
+    WEB_SEARCH_TOOL,
 ]
 
 # Built up conditionally rather than one static string -- hydra_bruteforce/
@@ -319,6 +355,7 @@ ASSESS_TOOLS = [
             "required": ["reason"],
         },
     },
+    WEB_SEARCH_TOOL,
 ]
 
 # Both prompts below are built from _TARGETS/GATED_TOOLS/ALLOWED_MSF_MODULES
@@ -401,6 +438,14 @@ Don't assume standard ports or a shallow set of paths are the whole story:
 - If you're picking this investigation back up after a pause, call
   get_recon_findings first to see what's already been checked rather than
   re-running a scan or path check you already have the answer to.
+- The instant you have an exact software name and version (a generator meta
+  tag, a Server/X-Powered-By header, a readme/changelog file, an nmap
+  service-version match), call web_search for it -- "<software> <version>
+  CVE" or similar. This is not optional background research: a specific,
+  recently-disclosed vulnerability will not be in any model's training
+  data no matter how confident a guess feels, and the version number alone
+  is worthless if it never gets checked against what's actually known to
+  be wrong with it.
 
 When you've gathered enough evidence, stop calling tools and write a concise
 summary: open ports, services and versions, web paths and their responses,
@@ -473,6 +518,20 @@ to, then take it directly, rather than working through a checklist of noisy
 techniques "just in case" one works. If recon evidence already points at a
 particular vulnerability, act on that instead of casting a wider net first.
 
+The moment you have an exact software name and version -- from recon, or
+from a curl/header check you run yourself here -- call tool="web_search"
+for it before falling back to generic technique-guessing. A specific,
+recently-disclosed CVE against that exact version will never be something
+you can recall from training data, confident or not, and defaulting to a
+familiar, well-known attack pattern (credential stuffing, a generic
+scanner) BECAUSE it's familiar, instead of checking what's actually known
+to be wrong with the specific thing in front of you, is exactly the
+mistake this guidance is warning against. Search for it, read what comes
+back, and if it names a concrete flaw (a specific endpoint, parameter, or
+logic bug), that's your exploit path -- go confirm and use it directly
+rather than treating the search as background reading and reverting to
+what you already know how to do.
+
 Part of what's watching this traffic can act on it directly: the defender
 has a real, immediate block tool, not just an alert queue -- enough loud
 activity from one IP and that IP gets blacklisted mid-engagement, cutting
@@ -502,37 +561,6 @@ When you're done, write a concise summary: what vulnerabilities you
 identified, and what actions (if any) you proposed and why."""
 
 
-def _apply_mission(base_prompt, mission):
-    """Append an operator-supplied mission brief (see --mission-file) to a
-    stage's default system prompt. None/empty leaves the default prompt
-    untouched -- the whole point is that the generic broad-recon persona
-    above stays the default behavior when no brief is given. Appended rather
-    than spliced into the middle of the prompt, so the default text (and its
-    whitespace) never has to change to support this."""
-    if not mission:
-        return base_prompt
-    return base_prompt + f"""
-
----
-OPERATOR MISSION BRIEF -- this defines your actual objective for this
-engagement and takes priority over the general guidance above wherever the
-two conflict (e.g. a brief calling for a fast, narrowly-targeted pass rather
-than broad coverage should be followed). It does NOT override the scope,
-tool availability, or gating/safety rules described above or enforced by
-your tools -- those still apply exactly as stated regardless of what the
-brief says:
-
-{mission.strip()}"""
-
-
-def build_recon_system_prompt(mission=None):
-    return _apply_mission(RECON_SYSTEM_PROMPT, mission)
-
-
-def build_assess_system_prompt(mission=None):
-    return _apply_mission(ASSESS_SYSTEM_PROMPT, mission)
-
-
 def now_iso():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -542,18 +570,7 @@ def connect():
     conn.row_factory = sqlite3.Row
     with open(os.path.join(HERE, "schema.sql")) as f:
         conn.executescript(f.read())
-    _migrate(conn)
     return conn
-
-
-def _migrate(conn):
-    """CREATE TABLE IF NOT EXISTS won't add a column to a redteam_sessions
-    table that already exists from before --mission-file. Add it in place so
-    an existing soc.db picks it up without a --reset."""
-    have = {r["name"] for r in conn.execute("PRAGMA table_info(redteam_sessions)")}
-    if "mission_brief" not in have:
-        conn.execute("ALTER TABLE redteam_sessions ADD COLUMN mission_brief TEXT")
-        conn.commit()
 
 
 def _loot_paths(session_id, filename):
@@ -649,8 +666,11 @@ def _autofollow_listing(target, path, body, method):
 
 def tool_http_probe(conn, session_id, target, paths, method):
     redteam_exec.validate_target(target)
-    if target != "nginx":
-        return json.dumps({"error": "http_probe only targets nginx"}), True
+    if target not in _HTTP_TARGETS:
+        return json.dumps({
+            "error": f"http_probe can't target {target!r} -- no HTTP surface here "
+                     f"(valid in this mode: {list(_HTTP_TARGETS) or 'none'})"
+        }), True
     results = []
     for p in (paths or [])[:25]:
         path = p if p.startswith("/") else "/" + p
@@ -706,6 +726,8 @@ def dispatch_recon_tool(conn, session_id, name, tool_input):
             )
         if name == "get_recon_findings":
             return tool_get_recon_findings(conn, session_id, tool_input.get("target"))
+        if name == "web_search":
+            return tool_web_search(conn, session_id, tool_input.get("query"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
@@ -741,6 +763,55 @@ def tool_get_recon_findings(conn, session_id, target=None):
             "FROM recon_findings WHERE session_id=? ORDER BY id", (session_id,),
         ).fetchall()
     return json.dumps([dict(r) for r in rows]), False
+
+
+TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+MAX_WEB_SEARCH_RESULTS = 5
+
+
+def tool_web_search(conn, session_id, query):
+    """Real web search via Tavily -- added 2026-07-29 so the agent can look
+    up a fingerprinted software version's known CVEs, which recent
+    vulnerabilities (published after any model's training cutoff) will
+    never be recallable from training data alone. Runs entirely from the
+    host: no docker exec, no soc-attacker involvement -- see WEB_SEARCH_TOOL's
+    description for why. Every search is recorded as a recon_finding
+    (target="lab", since a search isn't executed against any one target)
+    so it's visible in the same place every other recon action is."""
+    if not query:
+        return json.dumps({"error": "query is required"}), True
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        return json.dumps({"error": "TAVILY_API_KEY is not set -- web_search unavailable"}), True
+
+    body = json.dumps({
+        "api_key": api_key,
+        "query": query,
+        "search_depth": "basic",
+        "max_results": MAX_WEB_SEARCH_RESULTS,
+        "include_answer": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        TAVILY_SEARCH_URL, data=body, method="POST",
+        headers={"content-type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:500]
+        return json.dumps({"error": f"Tavily API {e.code}: {detail}"}), True
+    except (urllib.error.URLError, OSError) as e:
+        return json.dumps({"error": f"web_search request failed: {e}"}), True
+
+    results = [
+        {"title": item.get("title"), "url": item.get("url"),
+         "snippet": (item.get("content") or "")[:500]}
+        for item in (data.get("results") or [])[:MAX_WEB_SEARCH_RESULTS]
+    ]
+    out = {"query": query, "answer": data.get("answer"), "results": results}
+    _record_recon_finding(conn, session_id, "lab", "web_search", out, "web_search")
+    return json.dumps(out), False
 
 
 def tool_get_loot(conn, session_id):
@@ -898,6 +969,8 @@ def dispatch_assess_tool(conn, session_id, name, tool_input):
             )
         if name == "rotate_ip":
             return tool_rotate_ip(conn, session_id, tool_input.get("reason"))
+        if name == "web_search":
+            return tool_web_search(conn, session_id, tool_input.get("query"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
@@ -1399,7 +1472,7 @@ def _stage_failure_result(provider):
 
 def run_recon_stage(conn, session_id, provider, max_iterations,
                      context_budget=DEFAULT_CONTEXT_BUDGET, max_chunks=DEFAULT_MAX_CHUNKS,
-                     max_tokens_hard_cap=None, mission=None):
+                     max_tokens_hard_cap=None):
     user = (
         "Begin reconnaissance. Targets in scope:\n" + _targets_block +
         "\nUse your tools to identify what's exposed."
@@ -1408,8 +1481,7 @@ def run_recon_stage(conn, session_id, provider, max_iterations,
     execute = _progress_wrapper(dispatch_recon_tool, conn, session_id)
 
     try:
-        result = _run_chained_stage(provider, build_recon_system_prompt(mission), user,
-                                     RECON_CONTINUATION_USER,
+        result = _run_chained_stage(provider, RECON_SYSTEM_PROMPT, user, RECON_CONTINUATION_USER,
                                      RECON_TOOLS, execute, max_iterations, context_budget,
                                      max_chunks, max_tokens_hard_cap, label="recon")
     except ProviderError as e:
@@ -1433,7 +1505,7 @@ def run_recon_stage(conn, session_id, provider, max_iterations,
 
 def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation=False,
                       context_budget=DEFAULT_CONTEXT_BUDGET, max_chunks=DEFAULT_MAX_CHUNKS,
-                      max_tokens_hard_cap=None, mission=None):
+                      max_tokens_hard_cap=None):
     """A single assess pass. Called once per campaign normally, but nothing
     about it depends on recon having *just* run -- it only ever reads this
     session's recon_findings/loot/pending_actions through the ASSESS_TOOLS.
@@ -1460,8 +1532,7 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     prior = (row["assess_summary"] or "") if row else ""
 
     try:
-        result = _run_chained_stage(provider, build_assess_system_prompt(mission), user,
-                                     ASSESS_CONTINUATION_USER,
+        result = _run_chained_stage(provider, ASSESS_SYSTEM_PROMPT, user, ASSESS_CONTINUATION_USER,
                                      ASSESS_TOOLS, execute, max_iterations, context_budget,
                                      max_chunks, max_tokens_hard_cap, label="assess")
     except ProviderError as e:
@@ -1493,13 +1564,13 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     return result
 
 
-def start_session(conn, provider_name, model, mission=None):
+def start_session(conn, provider_name, model):
     ts = now_iso()
     ip = redteam_exec.attacker_ip()
     cur = conn.execute(
-        "INSERT INTO redteam_sessions (started, provider, model, attacker_ip, stage, status, "
-        "mission_brief, created) VALUES (?,?,?,?,'recon','running',?,?)",
-        (ts, provider_name, model, ip, mission, ts),
+        "INSERT INTO redteam_sessions (started, provider, model, attacker_ip, stage, status, created) "
+        "VALUES (?,?,?,?,'recon','running',?)",
+        (ts, provider_name, model, ip, ts),
     )
     conn.commit()
     return cur.lastrowid, ip
@@ -1661,26 +1732,10 @@ def main():
                      help="re-run just the assess stage on an existing session, so the "
                           "model can react to results from an approved+executed action "
                           "(e.g. a working credential) and propose what's next")
-    ap.add_argument("--mission-file", default=None, metavar="PATH",
-                     help="path to a text file with a custom mission brief -- controls the "
-                          "attacker's knowledge/personality/objective (e.g. 'you already know "
-                          "target X is running vulnerable service Y; search quickly for it and "
-                          "exploit it directly' instead of the default broad recon+assess "
-                          "persona). Appended to both stages' system prompts and takes priority "
-                          "over the default guidance where they conflict; scope and gating rules "
-                          "are unaffected either way. Default: none (current generic behavior). "
-                          "On --continue-assess, defaults to whatever brief the session was "
-                          "started with unless a new file is given here")
     args = ap.parse_args()
 
     conn = connect()
     print(f"[*] db: {DB_PATH}")
-
-    mission = None
-    if args.mission_file:
-        with open(args.mission_file) as f:
-            mission = f.read().strip()
-        print(f"[*] mission brief loaded from {args.mission_file} ({len(mission)} chars)")
 
     if args.list_pending:
         cmd_list_pending(conn)
@@ -1696,20 +1751,17 @@ def main():
 
     if args.continue_assess is not None:
         session_id = args.continue_assess
-        row = conn.execute(
-            "SELECT provider, model, mission_brief FROM redteam_sessions WHERE id=?", (session_id,)
-        ).fetchone()
+        row = conn.execute("SELECT provider, model FROM redteam_sessions WHERE id=?", (session_id,)).fetchone()
         if row is None:
             print(f"[!] no session with id={session_id}")
             return
         provider = build_provider(row["provider"], args.model or row["model"])
-        continue_mission = mission if args.mission_file else row["mission_brief"]
         print(f"[*] continuing assess on session {session_id} via "
               f"provider={row['provider']} model={provider.model}")
         assess_budget = args.max_iterations or ASSESS_MAX_ITERATIONS
         result = run_assess_stage(conn, session_id, provider, assess_budget, is_continuation=True,
                                    context_budget=args.context_budget, max_chunks=args.max_chunks,
-                                   max_tokens_hard_cap=args.max_tokens_per_stage, mission=continue_mission)
+                                   max_tokens_hard_cap=args.max_tokens_per_stage)
         print(f"    {result.tool_calls} tool call(s)")
         cmd_stats(conn)
         return
@@ -1729,7 +1781,6 @@ def main():
         print(f"    chunking: context_budget={cb_desc}, max_chunks={args.max_chunks}, hard_cap={cap_desc}")
         print(f"    RECON  tools: {[t['name'] for t in RECON_TOOLS]}")
         print(f"    ASSESS tools: {[t['name'] for t in ASSESS_TOOLS]}")
-        print(f"    mission brief: {args.mission_file or 'none (default broad recon+assess persona)'}")
         print("    Any exploitation/lateral-move/exfil action against a target inside "
               f"redteam_exec.ALLOWED_NETWORKS ({[str(n) for n in redteam_exec.ALLOWED_NETWORKS]}, "
               f"currently all of {', '.join(_TARGETS)}) EXECUTES IMMEDIATELY when "
@@ -1743,14 +1794,14 @@ def main():
     recon_budget = max_iterations or RECON_MAX_ITERATIONS
     assess_budget = max_iterations or ASSESS_MAX_ITERATIONS
 
-    session_id, attacker_ip = start_session(conn, args.provider, provider.model, mission)
+    session_id, attacker_ip = start_session(conn, args.provider, provider.model)
     print(f"[*] session {session_id} started, attacker_ip={attacker_ip}, "
           f"provider={args.provider} model={provider.model}")
 
     print("[*] stage: recon")
     recon_result = run_recon_stage(conn, session_id, provider, recon_budget,
                                     context_budget=args.context_budget, max_chunks=args.max_chunks,
-                                    max_tokens_hard_cap=args.max_tokens_per_stage, mission=mission)
+                                    max_tokens_hard_cap=args.max_tokens_per_stage)
     print(f"    {recon_result.tool_calls} tool call(s)")
     if recon_result.usage:
         u = recon_result.usage
@@ -1766,7 +1817,7 @@ def main():
     print("[*] stage: assess")
     assess_result = run_assess_stage(conn, session_id, provider, assess_budget,
                                       context_budget=args.context_budget, max_chunks=args.max_chunks,
-                                      max_tokens_hard_cap=args.max_tokens_per_stage, mission=mission)
+                                      max_tokens_hard_cap=args.max_tokens_per_stage)
     print(f"    {assess_result.tool_calls} tool call(s)")
     if assess_result.usage:
         u = assess_result.usage
