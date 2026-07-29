@@ -64,13 +64,17 @@ before redteam_exec.run() is ever reached, same as an arbitrary target would be.
 import argparse
 import hashlib
 import hmac
+import html
+import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -184,6 +188,35 @@ WEB_SEARCH_TOOL = {
     },
 }
 
+# Companion to WEB_SEARCH_TOOL: search alone only ever returns short
+# snippets, which turned out to be a real blocker in practice -- observed
+# live, an assess-stage run burned several web_search calls re-querying
+# variations of the same question because no snippet ever contained the
+# actual exploit payload shape, and the run went "incomplete" without ever
+# attempting the exploit it had already correctly identified. Same
+# host-not-container placement and reasoning as WEB_SEARCH_TOOL above.
+FETCH_URL_TOOL = {
+    "name": "fetch_url",
+    "description": (
+        "Retrieve the actual text content of one web page -- typically a URL "
+        "from a web_search result. Use this when a search snippet isn't "
+        "enough detail, e.g. you need the exact request/response shape from "
+        "a PoC writeup or advisory rather than a one-line summary of it. "
+        "HTML is stripped down to plain text. Read-only, safe, runs from the "
+        "host like web_search. http/https only, and refuses URLs that "
+        "resolve to a non-public address (this runs on the host itself, not "
+        "the sandboxed attacker container, so it will not fetch anything on "
+        "the lab network, localhost, or other local/internal addresses)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+        },
+        "required": ["url"],
+    },
+}
+
 RECON_TOOLS = [
     {
         "name": "nmap_scan",
@@ -228,6 +261,7 @@ RECON_TOOLS = [
         },
     },
     WEB_SEARCH_TOOL,
+    FETCH_URL_TOOL,
 ]
 
 # Built up conditionally rather than one static string -- hydra_bruteforce/
@@ -357,6 +391,7 @@ ASSESS_TOOLS = [
         },
     },
     WEB_SEARCH_TOOL,
+    FETCH_URL_TOOL,
 ]
 
 # Both prompts below are built from _TARGETS/GATED_TOOLS/ALLOWED_MSF_MODULES
@@ -531,7 +566,12 @@ mistake this guidance is warning against. Search for it, read what comes
 back, and if it names a concrete flaw (a specific endpoint, parameter, or
 logic bug), that's your exploit path -- go confirm and use it directly
 rather than treating the search as background reading and reverting to
-what you already know how to do.
+what you already know how to do. web_search only returns short snippets --
+when a snippet references a PoC, advisory, or writeup but doesn't give you
+the exact detail you need (a request/response body shape, a specific
+payload), call tool="fetch_url" on that result's URL to read the actual
+page rather than re-querying web_search with slightly different wording
+hoping for a better snippet.
 
 Part of what's watching this traffic can act on it directly: the defender
 has a real, immediate block tool, not just an alert queue -- enough loud
@@ -730,6 +770,8 @@ def dispatch_recon_tool(conn, session_id, name, tool_input):
             return tool_get_recon_findings(conn, session_id, tool_input.get("target"))
         if name == "web_search":
             return tool_web_search(conn, session_id, tool_input.get("query"))
+        if name == "fetch_url":
+            return tool_fetch_url(conn, session_id, tool_input.get("url"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
@@ -813,6 +855,105 @@ def tool_web_search(conn, session_id, query):
     ]
     out = {"query": query, "answer": data.get("answer"), "results": results}
     _record_recon_finding(conn, session_id, "lab", "web_search", out, "web_search")
+    return json.dumps(out), False
+
+
+FETCH_URL_MAX_BYTES = 1_500_000   # cap what we even read off the wire
+FETCH_URL_MAX_CHARS = 8000        # cap what actually goes back to the model
+
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_BLOCK_BREAK_RE = re.compile(r"<(br|/p|/div|/li|/h[1-6]|/tr)\s*/?>", re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+_INLINE_WS_RE = re.compile(r"[ \t]+")
+_BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
+def _html_to_text(body):
+    """Plain-text approximation of an HTML page's body -- good enough to
+    read a CVE writeup or PoC's request/response examples, not a renderer.
+    Deliberately stdlib-only (re + html.unescape), matching this codebase's
+    stdlib-first policy for pipeline/agent code (see CLAUDE.md)."""
+    text = _SCRIPT_STYLE_RE.sub(" ", body)
+    text = _BLOCK_BREAK_RE.sub("\n", text)
+    text = _TAG_RE.sub(" ", text)
+    text = html.unescape(text)
+    lines = [_INLINE_WS_RE.sub(" ", line).strip() for line in text.splitlines()]
+    return _BLANK_LINES_RE.sub("\n\n", "\n".join(lines)).strip()
+
+
+def _cap_text(text, max_chars):
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars], True
+
+
+def _validate_fetch_url(url):
+    """fetch_url runs from the host for the same reason web_search does
+    (soc-attacker's egress lockdown can't reach the real internet at all --
+    see WEB_SEARCH_TOOL's comment) -- but unlike web_search, which only ever
+    calls one fixed, trusted API endpoint, fetch_url's target URL is the
+    model's own choice. Run unfenced, that's a straight SSRF primitive
+    against the host machine itself (other services listening locally,
+    cloud metadata endpoints, etc.), not the lab-network fencing this
+    codebase applies everywhere else -- same category of problem as
+    block_enforcer.py's validate_lab_ip(), just facing the opposite
+    direction (keep the fetch OUT of anything local/internal, rather than
+    confining a lab action INSIDE the lab). Only plain http(s) URLs
+    resolving to a public address are allowed."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"only http/https URLs are allowed, got scheme {parsed.scheme!r}")
+    if not parsed.hostname:
+        raise ValueError("URL has no host")
+    try:
+        addrs = {info[4][0] for info in socket.getaddrinfo(parsed.hostname, None)}
+    except socket.gaierror as e:
+        raise ValueError(f"could not resolve host {parsed.hostname!r}: {e}") from e
+    for addr in addrs:
+        ip = ipaddress.ip_address(addr)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            raise ValueError(f"{parsed.hostname!r} resolves to a non-public address ({addr}) -- refusing to fetch")
+
+
+def tool_fetch_url(conn, session_id, url):
+    """Retrieves the actual page behind a web_search result -- added
+    2026-07-29 alongside web_search, whose snippet-only results turned out
+    to be a real blocker in practice: an assess-stage run burned several
+    web_search calls re-querying variations of the same question because no
+    500-char Tavily snippet ever contained the actual exploit payload shape,
+    and the run went "incomplete" without ever attempting an exploit it had
+    already correctly identified. Same host-not-container placement as
+    tool_web_search, same recon_finding logging convention."""
+    if not url:
+        return json.dumps({"error": "url is required"}), True
+    try:
+        _validate_fetch_url(url)
+    except ValueError as e:
+        return json.dumps({"error": str(e)}), True
+
+    req = urllib.request.Request(
+        url, headers={"user-agent": "Mozilla/5.0 (compatible; soc-lab-redteam-research/1.0)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            content_type = r.headers.get_content_type()
+            charset = r.headers.get_content_charset() or "utf-8"
+            raw = r.read(FETCH_URL_MAX_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        return json.dumps({"error": f"HTTP {e.code} fetching {url}"}), True
+    except (urllib.error.URLError, OSError) as e:
+        return json.dumps({"error": f"fetch_url request failed: {e}"}), True
+
+    wire_truncated = len(raw) > FETCH_URL_MAX_BYTES
+    body = raw[:FETCH_URL_MAX_BYTES].decode(charset, errors="replace")
+    text = _html_to_text(body) if content_type == "text/html" else body
+    text, char_truncated = _cap_text(text, FETCH_URL_MAX_CHARS)
+
+    out = {
+        "url": url, "content_type": content_type, "text": text,
+        "truncated": wire_truncated or char_truncated,
+    }
+    _record_recon_finding(conn, session_id, "lab", "fetch_url", out, "fetch_url")
     return json.dumps(out), False
 
 
@@ -973,6 +1114,8 @@ def dispatch_assess_tool(conn, session_id, name, tool_input):
             return tool_rotate_ip(conn, session_id, tool_input.get("reason"))
         if name == "web_search":
             return tool_web_search(conn, session_id, tool_input.get("query"))
+        if name == "fetch_url":
+            return tool_fetch_url(conn, session_id, tool_input.get("url"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
