@@ -515,10 +515,32 @@ function setConn(up) {
   el.className = "conn-badge " + (up ? "conn-up" : "conn-down");
 }
 
+// Set once the very first connection succeeds, so a later reconnect can
+// tell itself apart from the initial page load -- the initial load already
+// gets a full bootstrap via the sequential loadBootstrap().finally(connectWS)
+// call below, so re-triggering one in onopen there too would just be a
+// redundant, wasted fetch. A RECONNECT is different: the socket was down
+// for some stretch of real time (a network blip, laptop sleep, a server
+// restart -- doesn't matter which) and this tab has no idea what it missed,
+// because nothing here previously re-synced on reconnect. New live pushes
+// resumed fine (this is a plain reconnect, not a "the db got replaced"
+// _reset scenario), so it LOOKED healthy -- "live" badge and all -- while
+// silently missing every row that arrived during the gap, forever, until
+// someone thought to hit refresh. Treating a reconnect like a lighter-weight
+// version of resetLocalState()'s resync closes that gap the same way.
+let wsConnectedOnce = false;
+
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onopen = () => setConn(true);
+  ws.onopen = () => {
+    setConn(true);
+    if (wsConnectedOnce) {
+      resetLocalState();
+      loadBootstrap().catch((e) => console.error("resync bootstrap failed", e));
+    }
+    wsConnectedOnce = true;
+  };
   ws.onclose = () => { setConn(false); setTimeout(connectWS, 2000); };
   ws.onerror = () => ws.close();
   ws.onmessage = (ev) => {
