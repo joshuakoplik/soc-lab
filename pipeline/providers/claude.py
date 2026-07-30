@@ -14,7 +14,7 @@ import os
 import urllib.error
 import urllib.request
 
-from .base import AgenticResult, Heartbeat, ProviderError, Verdict, parse_verdict_json
+from .base import AgenticResult, Heartbeat, IterationsExhausted, ProviderError, Verdict, parse_verdict_json
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
@@ -95,7 +95,7 @@ class ClaudeProvider:
                 model=resp.get("model", self.model),
             )
 
-        raise ProviderError(
+        raise IterationsExhausted(
             f"exceeded {max_iterations} tool-use iterations without a final turn"
         )
 

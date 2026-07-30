@@ -23,6 +23,7 @@ from .base import (
     AgenticResult,
     ContextBudgetExceeded,
     Heartbeat,
+    IterationsExhausted,
     ProviderError,
     Verdict,
     parse_verdict_json,
@@ -140,8 +141,9 @@ class OpenAICompatibleProvider:
                 usage=usage_totals,
             )
 
-        raise ProviderError(
-            f"exceeded {max_iterations} tool-use iterations without a final turn"
+        raise IterationsExhausted(
+            f"exceeded {max_iterations} tool-use iterations without a final turn",
+            usage=usage_totals,
         )
 
     def complete(self, system, user, tools, execute_tool,

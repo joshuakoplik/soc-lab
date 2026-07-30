@@ -133,6 +133,29 @@ class ContextBudgetExceeded(ProviderError):
         self.usage = usage
 
 
+class IterationsExhausted(ProviderError):
+    """Raised by run_agentic_turn() instead of the plain "exceeded N
+    iterations" ProviderError when max_iterations is hit without the model
+    producing a final (non-tool-call) turn -- distinct from
+    ContextBudgetExceeded (which fires on token growth, not call count) so
+    a caller doing chunked/chained turns can restart on EITHER exhaustion
+    signal the same way, without conflating "this chunk got too big" with
+    "this chunk ran out of narrowly-scoped steps." See redteam/agent.py's
+    _run_chained_stage, which now treats both identically: write a handoff
+    note, continue with a fresh chunk, rather than let either kill the
+    whole stage -- deliberately capping max_iterations low (see
+    RECON_MAX_ITERATIONS/ASSESS_MAX_ITERATIONS there) makes this the
+    NORMAL way a chunk ends, not a rare safety-valve.
+
+    `usage`, when available, follows the same convention as
+    ContextBudgetExceeded.usage -- the exhausted chunk's own token spend,
+    thrown away along with its result but still real cost."""
+
+    def __init__(self, message, usage=None):
+        super().__init__(message)
+        self.usage = usage
+
+
 class Provider(Protocol):
     model: str
 

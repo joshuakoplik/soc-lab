@@ -86,7 +86,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, PIPELINE)
 import executor as redteam_exec  # noqa: E402
 import lab_modes  # noqa: E402
-from providers.base import AgenticResult, ContextBudgetExceeded, ProviderError  # noqa: E402
+from providers.base import AgenticResult, ContextBudgetExceeded, IterationsExhausted, ProviderError  # noqa: E402
 from providers.claude import ClaudeProvider  # noqa: E402
 from providers.fireworks import FireworksProvider  # noqa: E402
 from providers.gmi import GMIProvider  # noqa: E402
@@ -110,8 +110,20 @@ DEFAULT_MODEL = {
     "fireworks": "accounts/fireworks/models/glm-5p2",
 }
 
-RECON_MAX_ITERATIONS = 20
-ASSESS_MAX_ITERATIONS = 15
+# Deliberately small -- a "few tool calls, not a whole campaign" per turn,
+# not a generous allowance. Hitting this cap without a final turn is now a
+# NORMAL way for a chunk to end (raises IterationsExhausted, which
+# _run_chained_stage treats exactly like ContextBudgetExceeded: write a
+# handoff note, restart fresh), not a rare safety-valve or a failure --
+# see IterationsExhausted's docstring in providers/base.py. Previously
+# 20/15: high enough that a turn could silently run for many minutes with
+# zero checkpoints in between -- observed live, a retry-and-wait spiral (a
+# target gone unresponsive, misread as needing more patience rather than a
+# fresh look) burned 7 straight iterations without ever handing off, and a
+# separate run exhausted 15 iterations of real, varied work in one
+# 40-minute turn with nothing persisted as a checkpoint along the way.
+RECON_MAX_ITERATIONS = 8
+ASSESS_MAX_ITERATIONS = 5
 
 # Everything mode-dependent -- which targets exist, which gated tools are
 # reachable, which msf modules are allowlisted -- comes from lab_modes.py,
@@ -505,6 +517,13 @@ Don't assume standard ports or a shallow set of paths are the whole story:
   is worthless if it never gets checked against what's actually known to
   be wrong with it.
 
+Each turn here is kept short by design -- a handful of tool calls, not the
+whole scan in one go (batching several independent checks into the same
+turn, per above, is still the right move within that). If you're still
+mid-investigation when a turn ends, that's expected, not a problem: the
+next turn picks up from a brief handoff note instead of starting over, so
+there's no need to rush everything into one turn.
+
 When you've gathered enough evidence, stop calling tools and write a concise
 summary: open ports, services and versions, web paths and their responses,
 and anything that looks worth following up on."""
@@ -545,8 +564,8 @@ searchsploit lookup). This tool has no training wheels: read msfconsole's
 own module options (`info <module>`, `show options`) rather than guessing
 RHOSTS/LHOST/payload names, and don't treat one failed attempt as final --
 a different payload, a different technique, or acting on what a session
-already gave you (creds, a foothold, a config file) are all fair game.
-Reason as long as you need to; there's no reward for stopping early.
+already gave you (creds, a foothold, a config file) are all fair game --
+across turns if it takes more than one, not necessarily this one.
 """) if "shell_exec" in GATED_TOOLS else ""
 
 _assess_credential_block = ("""
@@ -578,6 +597,17 @@ identifying and confirming the SPECIFIC exploit path the evidence points
 to, then take it directly, rather than working through a checklist of noisy
 techniques "just in case" one works. If recon evidence already points at a
 particular vulnerability, act on that instead of casting a wider net first.
+
+Each turn you get is deliberately short -- a handful of tool calls, not a
+full multi-step campaign. Pick ONE concrete thing to test or try this turn:
+one hypothesis, one exploit attempt, one diagnostic. If it doesn't pan out,
+or something in the environment stops responding, don't spend the rest of
+the turn retrying the same recovery over and over (a different IP, a longer
+wait, one more attempt at the same probe) -- note what you tried and what
+happened, and let the turn end there. The next turn starts fresh with your
+own handoff note in hand and can decide with clear eyes whether to keep
+pushing on it or try something else entirely; a turn that runs out of room
+mid-retry isn't a failure, that handoff IS how continuity works here.
 
 The moment you have an exact software name and version -- from recon, or
 from a curl/header check you run yourself here -- call tool="web_search"
@@ -1638,9 +1668,17 @@ def _progress_wrapper(dispatch_fn, conn, session_id, provider):
 # DEFAULT_MAX_CHUNKS bounds how many times a stage will restart before giving
 # up -- a backstop against the model never converging, distinct from
 # max_iterations (which bounds one chunk) and from a hard token ceiling
-# (which bounds the whole chain, see --max-tokens-per-stage).
+# (which bounds the whole chain, see --max-tokens-per-stage). Raised
+# alongside RECON_MAX_ITERATIONS/ASSESS_MAX_ITERATIONS dropping sharply
+# (20/15 -> 8/5): total capacity across a whole stage is
+# max_iterations * max_chunks, and narrowing each chunk without widening
+# this would have silently shrunk overall campaign capacity as a side
+# effect, not just made restarts more frequent -- 25 keeps the ceiling
+# roughly where it was (recon: 8*25=200, exactly the old 20*10; assess:
+# 5*25=125, close to the old 15*10=150) while still restarting far more
+# often along the way.
 DEFAULT_CONTEXT_BUDGET = 50_000
-DEFAULT_MAX_CHUNKS = 10
+DEFAULT_MAX_CHUNKS = 25
 
 RECON_CONTINUATION_USER = (
     "Continue reconnaissance for this session -- your last chunk ran long "
@@ -1845,9 +1883,17 @@ def _run_chained_stage(conn, session_id, provider, system, first_user, continuat
         try:
             result = run_stage_turn(provider, system, user, tools, execute_tool, max_iterations,
                                      token_budget=budget)
-        except ContextBudgetExceeded as e:
-            llm_call_tracker.finish_call(conn, call_id, "error", error=f"context budget exceeded: {e}")
-            print(f"    [{label} chunk {chunk}/{max_chunks} hit context budget -- {e}]")
+        except (ContextBudgetExceeded, IterationsExhausted) as e:
+            # Both mean "this chunk ended without a final turn" -- a token
+            # ceiling or an iteration ceiling, doesn't matter which for what
+            # happens next: write a handoff, restart fresh. Deliberately
+            # capping max_iterations low (see RECON_MAX_ITERATIONS/
+            # ASSESS_MAX_ITERATIONS) makes IterationsExhausted the common
+            # case now, not ContextBudgetExceeded -- most chunks should end
+            # this way, by design.
+            why = "hit context budget" if isinstance(e, ContextBudgetExceeded) else "exhausted its iteration cap"
+            llm_call_tracker.finish_call(conn, call_id, "error", error=f"{why}: {e}")
+            print(f"    [{label} chunk {chunk}/{max_chunks} {why} -- {e}]")
             if max_tokens_hard_cap and cumulative["prompt_tokens"] >= max_tokens_hard_cap:
                 raise ProviderError(
                     f"{label}: hard token cap ({max_tokens_hard_cap}) reached across "
