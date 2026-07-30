@@ -785,6 +785,36 @@ def dispatch_recon_tool(conn, session_id, name, tool_input):
 # call redteam_exec.run() for a gated tool.
 # ---------------------------------------------------------------------------
 
+RECON_FINDING_PREVIEW_CHARS = 400
+
+
+def _preview_finding_detail(detail_json):
+    """get_recon_findings is a recap layer ("review what's already known"),
+    not a full-text re-read -- the model already saw a finding's complete
+    content once, in the direct tool response of whatever call produced it
+    (http_probe/web_search/fetch_url). Returning that full text again on
+    every later get_recon_findings call is what made assess-stage context
+    grow chunk over chunk without bound: observed live on session 1, 7
+    fetch_url calls (up to ~8.7KB of page text each -- see tool_fetch_url)
+    plus web_search/http_path findings accumulated to 115KB+ in
+    recon_findings, and the system prompt explicitly tells the model to
+    call get_recon_findings to reorient, which it naturally does right
+    after every context-budget restart wipes its short-term memory. Prompt
+    tokens climbed 51K -> 55K -> 62K -> 70K -> 80K across five straight
+    restarts before the sixth finally died to a GMI 524 -- not
+    intermittent flakiness, a deterministic growth curve that lands on
+    roughly the same chunk every run given a similar exploration path.
+    Preview only; nothing is lost -- recon_findings.detail on disk (and
+    what get_raw's caller saw the first time) is untouched."""
+    if len(detail_json) <= RECON_FINDING_PREVIEW_CHARS:
+        return detail_json
+    return (
+        detail_json[:RECON_FINDING_PREVIEW_CHARS]
+        + f"... [truncated, {len(detail_json)} chars total -- already shown "
+          "in full in the tool result that first found this]"
+    )
+
+
 def tool_get_recon_findings(conn, session_id, target=None):
     # Observed live against qwen3:8b: with no target filter available, it
     # called this 3x in a row (once per target, each with a different target
@@ -806,7 +836,12 @@ def tool_get_recon_findings(conn, session_id, target=None):
             "SELECT id, target, finding_type, detail, source_tool, created "
             "FROM recon_findings WHERE session_id=? ORDER BY id", (session_id,),
         ).fetchall()
-    return json.dumps([dict(r) for r in rows]), False
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["detail"] = _preview_finding_detail(d["detail"])
+        out.append(d)
+    return json.dumps(out), False
 
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
