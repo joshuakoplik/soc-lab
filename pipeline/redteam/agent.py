@@ -1661,6 +1661,31 @@ ASSESS_CONTINUATION_USER = (
     "what's worth trying."
 )
 
+# Used instead of RECON_CONTINUATION_USER/ASSESS_CONTINUATION_USER
+# specifically when _write_handoff produced a note -- everywhere else
+# (the plain --continue-assess CLI path, or a restart where the handoff
+# call itself failed) still uses the plain ones above.
+RECON_HANDOFF_USER = (
+    "Continue reconnaissance for this session -- your last chunk ran long "
+    "enough that we're picking it back up fresh rather than let it keep "
+    "growing. Here's your own handoff note from just before the restart:\n\n"
+    "{handoff}\n\n"
+    "Act on it directly -- call get_recon_findings again only if you need "
+    "more detail than the note gives you. Keep going until you've "
+    "genuinely covered the in-scope target(s), then write the summary."
+)
+
+ASSESS_HANDOFF_USER = (
+    "Continue the assessment for this session. Here's your own handoff "
+    "note from just before the restart:\n\n{handoff}\n\n"
+    "Act on it directly -- call get_pending_actions/get_loot again only "
+    "if you need more detail than the note gives you. If a proposed "
+    "credential was tried and failed, that doesn't mean the approach is "
+    "wrong -- a real breach dump usually has several credentials in it. "
+    "Propose whatever's warranted next, or say clearly if you've "
+    "genuinely exhausted what's worth trying."
+)
+
 
 def run_stage_turn(provider, system, user, tools, execute_tool, max_iterations, token_budget=None):
     """Uniform call across providers despite their run_agentic_turn()
@@ -1677,6 +1702,93 @@ def run_stage_turn(provider, system, user, tools, execute_tool, max_iterations, 
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     return provider.run_agentic_turn(messages, tools, execute_tool, max_iterations,
                                       token_budget=token_budget)
+
+
+HANDOFF_STATE_PREVIEW_CHARS = 3000
+
+
+def _preview_text(text, max_chars=HANDOFF_STATE_PREVIEW_CHARS):
+    if not text or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"... [truncated, {len(text)} chars total]"
+
+
+HANDOFF_SYSTEM = (
+    "You are writing a concise handoff note between two turns of the same "
+    "ongoing security assessment against a lab you're authorized to test. "
+    "The next turn starts with a blank conversation -- no memory of "
+    "anything said or reasoned about in this one -- and only this note "
+    "(plus whatever it independently re-checks) to pick up from. Given the "
+    "state below, write a SHORT note: a few sentences to a short "
+    "paragraph, not a report. Cover what's confirmed, what's been tried "
+    "and its outcome, your current best hypothesis, and the SPECIFIC next "
+    "step to take. Keep exact technical details that would otherwise have "
+    "to be re-derived from scratch -- parameter names, payload shapes, "
+    "endpoints, credentials, why something failed -- and drop anything "
+    "generic or already obvious from the raw state. This is working "
+    "memory for yourself a moment from now, not a summary for a human."
+)
+
+
+def _gather_handoff_state(conn, session_id, label):
+    """Same data sources the continuation prompts already point the model
+    at (get_recon_findings for recon; get_pending_actions/get_loot for
+    assess -- see RECON_CONTINUATION_USER/ASSESS_CONTINUATION_USER), just
+    read directly here instead of via a model-issued tool call. loot and
+    pending_actions have no preview cap of their own (unlike
+    recon_findings' _preview_finding_detail) -- a single verbose extraction
+    script's stdout or a heredoc'd exploit source can run several KB, and
+    this handoff call is deliberately meant to stay small and fast (it's a
+    summarization step, not a decision -- see _write_handoff's docstring
+    for why that split matters), so cap each independently rather than
+    trust the aggregate to stay reasonable."""
+    if label == "recon":
+        findings, _ = tool_get_recon_findings(conn, session_id)
+        return f"Recon findings so far:\n{findings}"
+    pending, _ = tool_get_pending_actions(conn, session_id)
+    loot, _ = tool_get_loot(conn, session_id)
+    return (
+        f"Pending/executed actions:\n{_preview_text(pending)}\n\n"
+        f"Loot:\n{_preview_text(loot)}"
+    )
+
+
+def _write_handoff(conn, session_id, provider, label):
+    """Called from _run_chained_stage right after a chunk gets cut off by
+    ContextBudgetExceeded. That exception doesn't carry the discarded
+    conversation (see ContextBudgetExceeded's definition in providers/
+    base.py) -- the persisted db is the only durable record of what
+    happened in the chunk that just ended -- so this distills THAT into a
+    short note that seeds the next chunk's prompt, instead of the next
+    chunk cold-starting on a generic "go re-derive everything yourself"
+    instruction and then immediately having to make its next hard decision
+    in the very same breath.
+
+    That splitting is the actual point, not just a token-count nicety:
+    every restart chunk observed dying to a GMI 524 did so on one long
+    single generation immediately AFTER re-orienting (a few fast recap
+    tool calls, then total silence for ~600s) -- never during the
+    re-orientation itself, and not correlated with prompt size (one such
+    hang started from a conversation of only ~2,855 tokens). Re-deriving
+    state and deciding the next move are two different kinds of work
+    bundled into one turn; moving the "figure out where I am" half to a
+    separate, cheap, no-tools completion here means the chunk that follows
+    starts with a concise answer already in hand instead of having to
+    synthesize state AND decide AND express all of it in one shot.
+
+    One extra plain (no-tools) completion, same pattern as
+    _summarize_fetch. Falls back to None (caller uses the plain
+    continuation prompt, i.e. today's pre-handoff behavior) on any failure
+    here -- a hiccup in this one extra call should never block a restart
+    that would otherwise have worked."""
+    state = _gather_handoff_state(conn, session_id, label)
+    user = f"Stage: {label}\n\n{state}\n\nWrite the handoff note now."
+    try:
+        result = run_stage_turn(provider, HANDOFF_SYSTEM, user, [], _no_tools_execute, 1)
+    except ProviderError:
+        return None
+    text = (result.final_text or "").strip()
+    return text or None
 
 
 def _run_chained_stage(conn, session_id, provider, system, first_user, continuation_user, tools,
@@ -1730,7 +1842,13 @@ def _run_chained_stage(conn, session_id, provider, system, first_user, continuat
                     f"{label}: hard token cap ({max_tokens_hard_cap}) reached across "
                     f"{chunk} chunks without a final turn"
                 ) from e
-            user = continuation_user
+            handoff = _write_handoff(conn, session_id, provider, label)
+            if handoff:
+                template = RECON_HANDOFF_USER if label == "recon" else ASSESS_HANDOFF_USER
+                user = template.format(handoff=handoff)
+                print(f"    [{label} handoff: {_preview(handoff, 160)}]")
+            else:
+                user = continuation_user
             continue
         except Exception as e:  # noqa: BLE001 - always record what killed the call before it propagates
             llm_call_tracker.finish_call(conn, call_id, "error", error=str(e))
