@@ -24,6 +24,20 @@
 # redteam/agent.py are still running would race their open connections
 # against the file being removed out from under them, so any db-touching
 # reset kills those process patterns first, unless --no-kill is passed.
+#
+# dashboard/server.py is different from the four processes above: it's meant
+# to be left running continuously across many resets, not restarted by hand
+# each time -- but a --db wipe unlinks-and-recreates soc.db (see
+# pipeline/reset_lab.py's reset_db()), which strands its long-lived poll
+# loop's read connection on the old, now-detached file (dashboard/server.py's
+# _db_identity() is supposed to catch this and reconnect on its own, but a
+# process that's lived through many resets in a row has been observed to end
+# up in a state where that stops actually broadcasting new rows even though
+# _db_identity() itself isn't flapping -- root cause unresolved, a restart
+# reliably clears it). So --db kills and relaunches it too, if one was
+# already running, preserving whatever SOC_DASHBOARD_* env it was started
+# with (host/port/db path) by reading them straight out of /proc before
+# killing it, rather than guessing or dropping back to defaults.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -100,6 +114,18 @@ fi
 if [ "$DO_DB" = "1" ]; then
   echo "[reset] wiping soc.db..."
   "$PY" pipeline/reset_lab.py --db
+
+  DASH_PID="$(pgrep -f 'dashboard/server\.py' | head -1 || true)"
+  if [ -n "$DASH_PID" ]; then
+    echo "[reset] dashboard server is running (pid $DASH_PID) -- its live-push connection"
+    echo "        goes stale across a db wipe, restarting it with the same env it had..."
+    DASH_ENV="$(tr '\0' '\n' < "/proc/$DASH_PID/environ" 2>/dev/null | grep '^SOC_DASHBOARD_' || true)"
+    pkill -f 'dashboard/server\.py' 2>/dev/null && echo "    killed: dashboard/server.py" || true
+    sleep 1
+    env $DASH_ENV nohup "$PY" dashboard/server.py > /dev/null 2>&1 &
+    disown
+    echo "    dashboard server restarted (pid $!)"
+  fi
 fi
 
 if [ "$DO_QUEUE" = "1" ]; then
