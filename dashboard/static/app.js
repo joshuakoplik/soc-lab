@@ -316,7 +316,19 @@ function resortCampaigns() {
 // one click away, instead of looking indistinguishable from a hang.
 
 const inflightBar = document.getElementById("inflight-bar");
-const inflightCards = document.getElementById("inflight-cards");
+// Two columns, not one flat wrap -- laid out (see style.css) to land under
+// the exact same left/right split as Defender Log / Attacker Campaigns
+// below, so a card's column tells you which side it's blocking at a
+// glance, and the whole bar visually lines up with the columns it sits
+// above instead of wrapping cards independently of them.
+const inflightColsByComponent = {
+  triage: document.getElementById("inflight-cards-defender"),
+};
+const inflightDefaultCol = document.getElementById("inflight-cards-attacker"); // redteam-recon / redteam-assess
+
+function inflightColFor(component) {
+  return inflightColsByComponent[component] || inflightDefaultCol;
+}
 
 const STALE_AFTER_S = 1800; // 30min -- past this, flag as possibly orphaned
                              // (e.g. the process that started it was killed)
@@ -365,7 +377,7 @@ function onLlmCall(row) {
     cardEl.className = "inflight-card";
     cardEl.dataset.detailKey = `llm_calls:${row.id}`;
     cardEl.addEventListener("click", () => openDetailModal(cardEl.dataset.detailKey));
-    inflightCards.appendChild(cardEl);
+    inflightColFor(row.component).appendChild(cardEl);
     entry = { row, cardEl };
     inflightById.set(row.id, entry);
   } else {
@@ -399,8 +411,34 @@ function recomputeActiveCampaigns() {
 
 // ---------- message routing ----------
 
+// Server sends this when soc.db itself got replaced out from under it
+// (reset.sh's --db wipe unlinks and recreates the file rather than
+// clearing it in place -- see server.py's _db_identity docstring). Every
+// id in the new file starts back at 1, which WOULD collide with whatever
+// this tab already rendered from the pre-reset epoch, so the only correct
+// move is to wipe all local state and pull a fresh /api/bootstrap rather
+// than let old and new rows with the same id overwrite each other.
+function resetLocalState() {
+  feedEvents.innerHTML = "";
+  feedDefender.innerHTML = "";
+  feedAttacker.innerHTML = "";
+  candidatesById.clear();
+  sessionsById.clear();
+  inflightById.clear();
+  inflightColsByComponent.triage.innerHTML = "";
+  inflightDefaultCol.innerHTML = "";
+  inflightBar.classList.add("hidden");
+  detailStore.clear();
+  closeDetailModal();
+  eventTimes = [];
+  alertTimes = [];
+  flagsTotal = 0;
+  updateStat("stat-flags", 0);
+}
+
 function handleMessage(msg) {
   const { table, row } = msg;
+  if (table === "_reset") { resetLocalState(); loadBootstrap(); return; }
   if (table !== "_error" && row && row.id != null) detailStore.set(`${table}:${row.id}`, { table, row });
   switch (table) {
     case "events": renderEventLine(row); eventTimes.push(toEpoch(row.ts)); break;

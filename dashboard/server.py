@@ -68,6 +68,21 @@ def connect_ro() -> sqlite3.Connection:
     return conn
 
 
+def _db_identity():
+    """(dev, ino) of the on-disk db file right now. reset.sh's --db wipe
+    unlinks and recreates soc.db as a brand-new file (see reset_lab.py's
+    reset_db()) rather than clearing it in place -- a connection opened
+    before that swap keeps reading the old, now-detached inode forever:
+    every query still succeeds, just against data nothing will ever write
+    to again, with no error to signal it. Comparing this against what
+    poll_loop last saw is how it notices the swap and reconnects instead of
+    going silently stale (which looked, from the browser, like "only
+    /api/bootstrap ever shows new data, the live feed never updates" --
+    bootstrap opens a fresh connection every call, poll_loop didn't)."""
+    st = DB_PATH.stat()
+    return (st.st_dev, st.st_ino)
+
+
 class Broadcaster:
     def __init__(self):
         self.clients: set[WebSocket] = set()
@@ -121,13 +136,12 @@ def fetch_bootstrap() -> dict:
         conn.close()
 
 
-async def poll_loop():
-    conn = connect_ro()
-    append_only = [t for t in TABLES if t not in MUTABLE_TABLES]
-    mutable = [t for t in TABLES if t in MUTABLE_TABLES]
-
-    # Start from "now" -- only stream rows/changes from after this process
-    # came up. History is served separately via /api/bootstrap.
+def _fresh_cursors(conn, append_only, mutable):
+    # Start from "now" -- only stream rows/changes from after this baseline
+    # was taken. History is served separately via /api/bootstrap. Reused
+    # both at poll_loop startup and whenever a db-file swap is detected,
+    # since a freshly-reset db needs the exact same "now" treatment a
+    # freshly-started server does.
     last_id = {}
     for table in append_only:
         row = conn.execute(f"SELECT COALESCE(MAX(id), 0) AS m FROM {table}").fetchone()
@@ -137,9 +151,36 @@ async def poll_loop():
     for table in mutable:
         rows = conn.execute(f"SELECT * FROM {table}").fetchall()
         snapshots[table] = {r["id"]: dict(r) for r in rows}
+    return last_id, snapshots
+
+
+async def poll_loop():
+    conn = connect_ro()
+    db_identity = _db_identity()
+    append_only = [t for t in TABLES if t not in MUTABLE_TABLES]
+    mutable = [t for t in TABLES if t in MUTABLE_TABLES]
+    last_id, snapshots = _fresh_cursors(conn, append_only, mutable)
 
     while True:
         try:
+            identity = _db_identity()
+            if identity != db_identity:
+                # soc.db got unlinked-and-recreated out from under this
+                # connection (see _db_identity's docstring) -- reconnect to
+                # the new file and re-baseline exactly like a fresh start,
+                # rather than keep querying an inode nothing writes to
+                # anymore. Ids restart from scratch in the new file, so
+                # re-querying MAX(id)/snapshots here is correct, not just a
+                # patch-over. Tell connected clients too: their in-memory
+                # row maps are keyed by id, and post-reset ids WILL collide
+                # with pre-reset ones -- an unprompted bootstrap reload is
+                # the only way their local state stays consistent.
+                conn.close()
+                conn = connect_ro()
+                db_identity = identity
+                last_id, snapshots = _fresh_cursors(conn, append_only, mutable)
+                await broadcaster.send({"table": "_reset", "tag": "reset", "row": {}})
+
             for table in append_only:
                 tag = TABLES[table][0]
                 rows = conn.execute(
