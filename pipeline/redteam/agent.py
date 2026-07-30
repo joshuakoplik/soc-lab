@@ -312,9 +312,10 @@ if "shell_exec" in GATED_TOOLS:
         "tool=\"shell_exec\" runs ANY command inside the attacker box, no allowlist -- "
         "the full Kali toolset (msfconsole with any module, searchsploit, john, "
         "custom scripts, anything) via params={\"command\": \"<shell string>\", "
-        "\"timeout_s\": optional, default 180s/600s unrestricted, capped at 900s}. "
-        "Use target=\"lab\" for shell_exec calls not tied to one specific named "
-        "target (e.g. a searchsploit lookup)."
+        "\"timeout_s\": optional, capped at 30s regardless of what's requested -- "
+        "if something needs longer, break it into several calls rather than one "
+        "long-running command. Use target=\"lab\" for shell_exec calls not tied to "
+        "one specific named target (e.g. a searchsploit lookup)."
     )
 
 _PROPOSE_ACTION_DESCRIPTION = (
@@ -530,7 +531,10 @@ no module allowlist, no target restriction, the full Kali toolset --
 msfconsole with any module""" + (" (not just the ones above)" if ALLOWED_MSF_MODULES else "") + """,
 searchsploit, john, custom multi-step shell pipelines, anything you'd type
 in a real terminal. Use it via params={"command": "<shell string>",
-"timeout_s": optional}. You do not need to self-restrict which hosts a
+"timeout_s": optional} -- capped at 30s regardless of what's requested. If
+something would genuinely take longer (a multi-step extraction, a wait-and-
+retry loop), break it into several shell_exec calls across turns rather than
+one long-running command. You do not need to self-restrict which hosts a
 command touches for safety -- the attacker container is under a
 network-level lockdown (only the lab subnet is routable at all, everything
 else is physically unreachable from inside it) -- but you should still stay
@@ -1459,8 +1463,15 @@ def _exec_shell(session_id, target, params, unrestricted=False):
     command = params.get("command")
     if not command:
         raise ValueError("command is required")
-    requested = int(params.get("timeout_s") or (600 if unrestricted else 180))
-    timeout_s = min(requested, 900)
+    # Hard-capped at 30s regardless of what's requested or whether the
+    # target is whitelisted -- multi-step or long-running shell_exec calls
+    # (a bulk extraction script, a multi-minute wait-and-retry loop) are
+    # exactly the pattern that let one turn silently run for tens of
+    # minutes with no checkpoint in between. Anything that genuinely needs
+    # more than a few seconds should be broken into several shell_exec
+    # calls across turns instead, which is the point, not a workaround.
+    requested = int(params.get("timeout_s") or 30)
+    timeout_s = min(requested, 30)
 
     argv = ["bash", "-c", command]
     result = redteam_exec.run(argv, timeout_s=timeout_s, max_output_chars=24000)
