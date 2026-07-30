@@ -122,6 +122,24 @@ CREATE TABLE IF NOT EXISTS loot (
     created            TEXT    NOT NULL
 );
 
+-- Written by _write_handoff() in agent.py, right after each chunk restart
+-- (context budget or iteration cap hit) -- a short model-authored note
+-- distilling where things stand. Persisted, not just passed forward to the
+-- next chunk's prompt, so a LATER handoff can review the last several
+-- notes and notice a pattern a human reading the session afterward would:
+-- the same approach/hypothesis/blocked step being retried across several
+-- restarts without progress. Without this, that repetition was invisible
+-- to the mechanism meant to catch it -- each handoff only ever saw the
+-- current raw pending_actions/loot state, never its own prior conclusions.
+CREATE TABLE IF NOT EXISTS handoff_notes (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    stage         TEXT    NOT NULL,   -- 'recon' | 'assess'
+    chunk         INTEGER NOT NULL,   -- which chunk this note was written after
+    note          TEXT    NOT NULL,
+    created       TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS captured_flags (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id         INTEGER NOT NULL REFERENCES redteam_sessions(id),
@@ -138,3 +156,4 @@ CREATE INDEX IF NOT EXISTS idx_pending_session ON pending_actions(session_id);
 CREATE INDEX IF NOT EXISTS idx_pending_gate    ON pending_actions(approved, executed);
 CREATE INDEX IF NOT EXISTS idx_loot_session    ON loot(session_id);
 CREATE INDEX IF NOT EXISTS idx_flags_session   ON captured_flags(session_id);
+CREATE INDEX IF NOT EXISTS idx_handoff_session  ON handoff_notes(session_id, stage);

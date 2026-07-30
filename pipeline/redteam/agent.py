@@ -1753,13 +1753,41 @@ def run_stage_turn(provider, system, user, tools, execute_tool, max_iterations, 
                                       token_budget=token_budget)
 
 
-HANDOFF_STATE_PREVIEW_CHARS = 3000
+HANDOFF_FIELD_PREVIEW_CHARS = 500
+HANDOFF_HISTORY_LIMIT = 30  # naturally bounded by max_chunks already; this is just a backstop
 
 
-def _preview_text(text, max_chars=HANDOFF_STATE_PREVIEW_CHARS):
+def _preview_text(text, max_chars=HANDOFF_FIELD_PREVIEW_CHARS):
     if not text or len(text) <= max_chars:
         return text
     return text[:max_chars] + f"... [truncated, {len(text)} chars total]"
+
+
+def _preview_json_list(list_json, big_fields, max_field_chars=HANDOFF_FIELD_PREVIEW_CHARS):
+    """Caps specific big fields on EACH entry of a JSON-encoded list,
+    instead of truncating the whole list to one flat character budget --
+    the difference matters once the list is long. A flat cap on the whole
+    list silently drops every entry past whichever one blows the budget,
+    which hides exactly the kind of repetition a handoff is supposed to
+    surface: observed live, a session with 51 pending_actions spent ~30 of
+    them re-attempting minor variations of the same failed local-parsing
+    approach across a dozen+ restarts, and the flat-capped handoff state
+    (3000 chars for the WHOLE list) could only ever show the first several
+    actions -- nowhere near enough to reveal a pattern repeating that far
+    back. Every entry survives here; only its largest fields (raw command
+    output, full input) get shortened."""
+    try:
+        rows = json.loads(list_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return list_json
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for field in big_fields:
+            value = row.get(field)
+            if isinstance(value, str):
+                row[field] = _preview_text(value, max_field_chars)
+    return json.dumps(rows)
 
 
 HANDOFF_SYSTEM = (
@@ -1767,51 +1795,88 @@ HANDOFF_SYSTEM = (
     "ongoing security assessment against a lab you're authorized to test. "
     "The next turn starts with a blank conversation -- no memory of "
     "anything said or reasoned about in this one -- and only this note "
-    "(plus whatever it independently re-checks) to pick up from. Given the "
-    "state below, write a SHORT note: a few sentences to a short "
-    "paragraph, not a report. Cover what's confirmed, what's been tried "
-    "and its outcome, your current best hypothesis, and the SPECIFIC next "
-    "step to take. Keep exact technical details that would otherwise have "
-    "to be re-derived from scratch -- parameter names, payload shapes, "
-    "endpoints, credentials, why something failed -- and drop anything "
-    "generic or already obvious from the raw state. This is working "
-    "memory for yourself a moment from now, not a summary for a human."
+    "(plus whatever it independently re-checks) to pick up from. You may "
+    "also be shown your own last several handoff notes below, oldest "
+    "first -- if they show the same approach, hypothesis, or blocked step "
+    "being retried across multiple turns without real progress, SAY SO "
+    "EXPLICITLY and recommend a genuinely different next step, rather "
+    "than writing another note that just restates the same plan again. "
+    "Given the state below, write a SHORT note: a few sentences to a "
+    "short paragraph, not a report. Cover what's confirmed, what's been "
+    "tried and its outcome, your current best hypothesis, and the "
+    "SPECIFIC next step to take. Keep exact technical details that would "
+    "otherwise have to be re-derived from scratch -- parameter names, "
+    "payload shapes, endpoints, credentials, why something failed -- and "
+    "drop anything generic or already obvious from the raw state. This is "
+    "working memory for yourself a moment from now, not a summary for a "
+    "human."
 )
+
+
+def _recent_handoff_notes(conn, session_id, label):
+    """Previous handoff notes for this session+stage, oldest first, so the
+    model writing the NEXT note can see its own trail of prior conclusions
+    -- not just the current raw pending_actions/loot state -- and notice if
+    it's been reaching the same conclusion or proposing the same next step
+    repeatedly. Returns None if there's no history yet (chunk 1)."""
+    rows = conn.execute(
+        "SELECT chunk, note FROM handoff_notes WHERE session_id=? AND stage=? "
+        "ORDER BY id DESC LIMIT ?",
+        (session_id, label, HANDOFF_HISTORY_LIMIT),
+    ).fetchall()
+    if not rows:
+        return None
+    ordered = list(reversed(rows))
+    return "\n".join(f"[after chunk {r['chunk']}] {r['note']}" for r in ordered)
+
+
+def _record_handoff_note(conn, session_id, label, chunk, note):
+    conn.execute(
+        "INSERT INTO handoff_notes (session_id, stage, chunk, note, created) VALUES (?,?,?,?,?)",
+        (session_id, label, chunk, note, now_iso()),
+    )
+    conn.commit()
 
 
 def _gather_handoff_state(conn, session_id, label):
     """Same data sources the continuation prompts already point the model
     at (get_recon_findings for recon; get_pending_actions/get_loot for
     assess -- see RECON_CONTINUATION_USER/ASSESS_CONTINUATION_USER), just
-    read directly here instead of via a model-issued tool call. loot and
-    pending_actions have no preview cap of their own (unlike
-    recon_findings' _preview_finding_detail) -- a single verbose extraction
-    script's stdout or a heredoc'd exploit source can run several KB, and
-    this handoff call is deliberately meant to stay small and fast (it's a
-    summarization step, not a decision -- see _write_handoff's docstring
-    for why that split matters), so cap each independently rather than
-    trust the aggregate to stay reasonable."""
+    read directly here instead of via a model-issued tool call, plus this
+    session's own handoff-note trail (see _recent_handoff_notes) so
+    repetition is visible across restarts, not just within the current
+    state snapshot. loot and pending_actions have no preview cap of their
+    own (unlike recon_findings' _preview_finding_detail) -- capped
+    per-entry here via _preview_json_list rather than as one flat budget
+    for the whole list (see that function's docstring for why the
+    difference matters)."""
+    prior_notes = _recent_handoff_notes(conn, session_id, label)
+    prior_block = (
+        f"Your own last few handoff notes, oldest first:\n{prior_notes}\n\n" if prior_notes else ""
+    )
     if label == "recon":
         findings, _ = tool_get_recon_findings(conn, session_id)
-        return f"Recon findings so far:\n{findings}"
+        return f"{prior_block}Recon findings so far:\n{findings}"
     pending, _ = tool_get_pending_actions(conn, session_id)
     loot, _ = tool_get_loot(conn, session_id)
     return (
-        f"Pending/executed actions:\n{_preview_text(pending)}\n\n"
-        f"Loot:\n{_preview_text(loot)}"
+        f"{prior_block}Pending/executed actions:\n"
+        f"{_preview_json_list(pending, ('input_json', 'result_json'))}\n\n"
+        f"Loot:\n{_preview_json_list(loot, ('summary',))}"
     )
 
 
-def _write_handoff(conn, session_id, provider, label):
+def _write_handoff(conn, session_id, provider, label, chunk):
     """Called from _run_chained_stage right after a chunk gets cut off by
-    ContextBudgetExceeded. That exception doesn't carry the discarded
-    conversation (see ContextBudgetExceeded's definition in providers/
+    ContextBudgetExceeded/IterationsExhausted. Neither exception carries
+    the discarded conversation (see their definitions in providers/
     base.py) -- the persisted db is the only durable record of what
-    happened in the chunk that just ended -- so this distills THAT into a
-    short note that seeds the next chunk's prompt, instead of the next
-    chunk cold-starting on a generic "go re-derive everything yourself"
-    instruction and then immediately having to make its next hard decision
-    in the very same breath.
+    happened in the chunk that just ended -- so this distills THAT (plus
+    the session's own trail of prior handoff notes, see
+    _recent_handoff_notes) into a short note that seeds the next chunk's
+    prompt, instead of the next chunk cold-starting on a generic "go
+    re-derive everything yourself" instruction and then immediately having
+    to make its next hard decision in the very same breath.
 
     That splitting is the actual point, not just a token-count nicety:
     every restart chunk observed dying to a GMI 524 did so on one long
@@ -1825,11 +1890,21 @@ def _write_handoff(conn, session_id, provider, label):
     starts with a concise answer already in hand instead of having to
     synthesize state AND decide AND express all of it in one shot.
 
-    One extra plain (no-tools) completion, same pattern as
-    _summarize_fetch. Falls back to None (caller uses the plain
-    continuation prompt, i.e. today's pre-handoff behavior) on any failure
-    here -- a hiccup in this one extra call should never block a restart
-    that would otherwise have worked."""
+    Feeding this call a bigger prompt (per-entry-capped state, plus every
+    prior handoff note for the session) is a deliberate, acceptable
+    tradeoff, not a regression back to the original problem: it's still
+    exactly ONE cheap completion, not something that accumulates turn over
+    turn inside the actual agentic loop -- unlike that loop, a single
+    summarize-and-flag-repetition call can afford a largeish prompt
+    without the growth compounding across chunks the way
+    get_recon_findings's did.
+
+    Every produced note is persisted via _record_handoff_note so the NEXT
+    restart's _gather_handoff_state can see it -- one extra plain (no-tools)
+    completion, same pattern as _summarize_fetch. Falls back to None
+    (caller uses the plain continuation prompt, i.e. today's pre-handoff
+    behavior) on any failure here -- a hiccup in this one extra call
+    should never block a restart that would otherwise have worked."""
     state = _gather_handoff_state(conn, session_id, label)
     user = f"Stage: {label}\n\n{state}\n\nWrite the handoff note now."
     try:
@@ -1837,7 +1912,10 @@ def _write_handoff(conn, session_id, provider, label):
     except ProviderError:
         return None
     text = (result.final_text or "").strip()
-    return text or None
+    if not text:
+        return None
+    _record_handoff_note(conn, session_id, label, chunk, text)
+    return text
 
 
 def _run_chained_stage(conn, session_id, provider, system, first_user, continuation_user, tools,
@@ -1899,7 +1977,7 @@ def _run_chained_stage(conn, session_id, provider, system, first_user, continuat
                     f"{label}: hard token cap ({max_tokens_hard_cap}) reached across "
                     f"{chunk} chunks without a final turn"
                 ) from e
-            handoff = _write_handoff(conn, session_id, provider, label)
+            handoff = _write_handoff(conn, session_id, provider, label, chunk)
             if handoff:
                 template = RECON_HANDOFF_USER if label == "recon" else ASSESS_HANDOFF_USER
                 user = template.format(handoff=handoff)
