@@ -283,12 +283,17 @@ RECON_TOOLS = [
             "Review recon findings already recorded THIS session before scanning/probing "
             "further -- most useful right after picking a fresh investigation back up, so "
             "you don't repeat a scan or path check you already did. Pass `target` to fetch "
-            "just that target's findings; omit it for everything at once."
+            "just that target's findings; omit it for everything at once. Each finding here "
+            "is a short preview, not its full content -- pass `ids` (e.g. from a handoff "
+            "note pointing at a specific finding by number) to retrieve one or more findings "
+            "in FULL instead, e.g. the complete text of something fetch_url found earlier."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "target": {"type": "string", "enum": _TARGETS},
+                "ids": {"type": "array", "items": {"type": "integer"},
+                         "description": "specific finding ids to retrieve in full, bypassing the usual preview"},
             },
             "required": [],
         },
@@ -351,12 +356,17 @@ ASSESS_TOOLS = [
             "call with `target` omitted over one call per target, since each call returns "
             "the full findings payload for whatever it matches (all of them, if `target` "
             "is omitted) and repeating it per target only pays that cost multiple times "
-            "for the same information."
+            "for the same information. Each finding here is a short preview, not its full "
+            "content -- pass `ids` (e.g. from the recon findings index in your last handoff "
+            "note) to retrieve one or more specific findings in FULL instead, e.g. the "
+            "complete text of an exploit payload fetch_url found earlier."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "target": {"type": "string", "enum": _TARGETS},
+                "ids": {"type": "array", "items": {"type": "integer"},
+                         "description": "specific finding ids to retrieve in full, bypassing the usual preview"},
             },
             "required": [],
         },
@@ -825,7 +835,7 @@ def dispatch_recon_tool(conn, session_id, provider, name, tool_input):
                 tool_input.get("paths") or [], tool_input.get("method", "GET"),
             )
         if name == "get_recon_findings":
-            return tool_get_recon_findings(conn, session_id, tool_input.get("target"))
+            return tool_get_recon_findings(conn, session_id, tool_input.get("target"), tool_input.get("ids"))
         if name == "web_search":
             return tool_web_search(conn, session_id, tool_input.get("query"))
         if name == "fetch_url":
@@ -873,7 +883,7 @@ def _preview_finding_detail(detail_json):
     )
 
 
-def tool_get_recon_findings(conn, session_id, target=None):
+def tool_get_recon_findings(conn, session_id, target=None, ids=None):
     # Observed live against qwen3:8b: with no target filter available, it
     # called this 3x in a row (once per target, each with a different target
     # arg the old no-params schema silently ignored) and got the same ~4K-token
@@ -883,6 +893,26 @@ def tool_get_recon_findings(conn, session_id, target=None):
     # already trying to use fixes both: a real target actually shrinks the
     # payload, and the tool description now says to omit it for "everything"
     # rather than needing 3 calls to reconstruct that.
+    #
+    # ids is a different kind of filter, not just a narrower version of
+    # target: it's a targeted retrieval for a SPECIFIC finding the model
+    # already knows it wants -- typically because it saw it named in the
+    # recon findings index a handoff note surfaced (see
+    # _recon_findings_index/_gather_handoff_state), e.g. a fetch_url result
+    # holding an exploit payload shape that would otherwise have to be
+    # re-derived from scratch. That's exactly the case where the normal
+    # recap-layer truncation (_preview_finding_detail, see its own
+    # docstring) is the wrong call -- the model isn't skimming a list
+    # anymore, it's retrieving one specific thing it already identified as
+    # worth the full content of. Full detail, no cap, when ids is given.
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"SELECT id, target, finding_type, detail, source_tool, created "
+            f"FROM recon_findings WHERE session_id=? AND id IN ({placeholders}) ORDER BY id",
+            (session_id, *ids),
+        ).fetchall()
+        return json.dumps([dict(r) for r in rows]), False
     if target:
         rows = conn.execute(
             "SELECT id, target, finding_type, detail, source_tool, created "
@@ -1256,7 +1286,7 @@ def dispatch_assess_tool(conn, session_id, provider, name, tool_input):
     tool_input = tool_input or {}
     try:
         if name == "get_recon_findings":
-            return tool_get_recon_findings(conn, session_id, tool_input.get("target"))
+            return tool_get_recon_findings(conn, session_id, tool_input.get("target"), tool_input.get("ids"))
         if name == "get_loot":
             return tool_get_loot(conn, session_id)
         if name == "get_pending_actions":
@@ -1801,6 +1831,13 @@ HANDOFF_SYSTEM = (
     "being retried across multiple turns without real progress, SAY SO "
     "EXPLICITLY and recommend a genuinely different next step, rather "
     "than writing another note that just restates the same plan again. "
+    "You may also be shown an index of this session's recon findings -- "
+    "just an id and one-line description each, not their full content. If "
+    "one is clearly relevant to what you're about to recommend (e.g. a "
+    "past fetch_url already found the exact payload/answer needed), NAME "
+    "ITS ID EXPLICITLY in your note (e.g. \"see recon finding #47\") so the "
+    "next turn knows to retrieve it in full via get_recon_findings(ids=[47]) "
+    "instead of re-deriving it from scratch or guessing. "
     "Given the state below, write a SHORT note: a few sentences to a "
     "short paragraph, not a report. Cover what's confirmed, what's been "
     "tried and its outcome, your current best hypothesis, and the "
@@ -1838,6 +1875,54 @@ def _record_handoff_note(conn, session_id, label, chunk, note):
     conn.commit()
 
 
+def _recon_findings_index(conn, session_id):
+    """Id + one-line description for every recon finding this session, no
+    LLM call and no per-item content -- just enough for the handoff writer
+    to recognize "I already found the answer to this, recon #47 has it"
+    and name it explicitly, so the ACTING turn can make one targeted
+    get_recon_findings(ids=[47]) call instead of either re-deriving
+    something from scratch or drowning in every finding's full content up
+    front. Deliberately mechanical: fetch_url/web_search findings already
+    carry a human-authored one-liner in their own `reason`/`query` field
+    (the model wrote it when it made the call), so summarizing them again
+    here would just be a second LLM call spent re-describing something
+    already described. Added after a fetch_url finding holding the exact
+    working exploit payload shape (CVE-2026-63030's real request
+    structure) got fetched once, then was never seen again by later
+    assess-stage turns -- _gather_handoff_state didn't look at
+    recon_findings at all before this, only pending_actions/loot."""
+    rows = conn.execute(
+        "SELECT id, target, finding_type, detail FROM recon_findings WHERE session_id=? ORDER BY id",
+        (session_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    lines = []
+    for r in rows:
+        try:
+            detail = json.loads(r["detail"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detail = {}
+        if not isinstance(detail, dict):
+            detail = {}
+        ft = r["finding_type"]
+        if ft == "fetch_url":
+            tag = "found" if detail.get("found") else "not found"
+            desc = detail.get("reason") or detail.get("url") or ""
+            line = f"fetch_url ({tag}): {desc}"
+        elif ft == "web_search":
+            line = f"web_search: {detail.get('query') or ''}"
+        elif ft == "http_path":
+            status = detail.get("status", detail.get("status_code", "?"))
+            line = f"http_path: {detail.get('path') or detail.get('url') or ''} -> {status}"
+        elif ft == "port_scan":
+            line = f"port_scan on {r['target']}"
+        else:
+            line = f"{ft}: {json.dumps(detail)}"
+        lines.append(f"[{r['id']}] {_preview_text(line, 150)}")
+    return "\n".join(lines)
+
+
 def _gather_handoff_state(conn, session_id, label):
     """Same data sources the continuation prompts already point the model
     at (get_recon_findings for recon; get_pending_actions/get_loot for
@@ -1849,7 +1934,16 @@ def _gather_handoff_state(conn, session_id, label):
     own (unlike recon_findings' _preview_finding_detail) -- capped
     per-entry here via _preview_json_list rather than as one flat budget
     for the whole list (see that function's docstring for why the
-    difference matters)."""
+    difference matters).
+
+    The assess branch also includes _recon_findings_index -- a recon
+    finding (a fetch_url payload, say) discovered before the assess stage
+    even started was otherwise invisible to every later assess handoff,
+    since this function never looked at recon_findings at all for assess.
+    Just the index, not full findings: the point is letting the handoff
+    NOTE name a specific id worth retrieving in full via
+    get_recon_findings(ids=[...]), not re-inflating this call with
+    everything recon ever found."""
     prior_notes = _recent_handoff_notes(conn, session_id, label)
     prior_block = (
         f"Your own last few handoff notes, oldest first:\n{prior_notes}\n\n" if prior_notes else ""
@@ -1857,10 +1951,16 @@ def _gather_handoff_state(conn, session_id, label):
     if label == "recon":
         findings, _ = tool_get_recon_findings(conn, session_id)
         return f"{prior_block}Recon findings so far:\n{findings}"
+    recon_index = _recon_findings_index(conn, session_id)
+    recon_block = (
+        f"Recon findings index (id + one-liner only -- the acting turn can "
+        f"retrieve any of these in full via get_recon_findings(ids=[...])):\n"
+        f"{recon_index}\n\n" if recon_index else ""
+    )
     pending, _ = tool_get_pending_actions(conn, session_id)
     loot, _ = tool_get_loot(conn, session_id)
     return (
-        f"{prior_block}Pending/executed actions:\n"
+        f"{prior_block}{recon_block}Pending/executed actions:\n"
         f"{_preview_json_list(pending, ('input_json', 'result_json'))}\n\n"
         f"Loot:\n{_preview_json_list(loot, ('summary',))}"
     )
