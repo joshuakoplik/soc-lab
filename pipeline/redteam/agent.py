@@ -195,25 +195,46 @@ WEB_SEARCH_TOOL = {
 # actual exploit payload shape, and the run went "incomplete" without ever
 # attempting the exploit it had already correctly identified. Same
 # host-not-container placement and reasoning as WEB_SEARCH_TOOL above.
+#
+# `reason` is required, not optional -- the model always knows why it's
+# fetching a given URL (some prior snippet made it look relevant to a
+# specific question), and passing that through lets tool_fetch_url extract
+# just the part of the page that answers it instead of handing back the
+# whole thing. That distillation is what actually fixed fetch_url's
+# context-growth problem: storing the full page text in recon_findings and
+# re-reading it whole on every later get_recon_findings call (the model's
+# own "review what's already known" step) pushed one session's assess-stage
+# prompt from 51K to 80K+ tokens across five chunk restarts before a GMI 524
+# finally killed it -- see tool_fetch_url's docstring.
 FETCH_URL_TOOL = {
     "name": "fetch_url",
     "description": (
-        "Retrieve the actual text content of one web page -- typically a URL "
-        "from a web_search result. Use this when a search snippet isn't "
-        "enough detail, e.g. you need the exact request/response shape from "
-        "a PoC writeup or advisory rather than a one-line summary of it. "
-        "HTML is stripped down to plain text. Read-only, safe, runs from the "
-        "host like web_search. http/https only, and refuses URLs that "
-        "resolve to a non-public address (this runs on the host itself, not "
-        "the sandboxed attacker container, so it will not fetch anything on "
-        "the lab network, localhost, or other local/internal addresses)."
+        "Retrieve one web page and extract just the part that answers a "
+        "specific question -- typically a URL from a web_search result, "
+        "used when a search snippet isn't enough detail (e.g. you need the "
+        "exact request/response shape from a PoC writeup or advisory). "
+        "Pass `reason`: the specific thing you're trying to find out from "
+        "this page. The page is distilled down to just that -- exact "
+        "payloads, parameter names, code, verbatim where it matters, not a "
+        "summary of the whole page -- and if it turns out not to actually "
+        "answer your question, nothing is recorded and you're told so "
+        "directly rather than getting back irrelevant content. Read-only, "
+        "safe, runs from the host like web_search. http/https only, and "
+        "refuses URLs that resolve to a non-public address (this runs on "
+        "the host itself, not the sandboxed attacker container, so it will "
+        "not fetch anything on the lab network, localhost, or other "
+        "local/internal addresses)."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "url": {"type": "string"},
+            "reason": {
+                "type": "string",
+                "description": "the specific question you're trying to answer by fetching this page",
+            },
         },
-        "required": ["url"],
+        "required": ["url", "reason"],
     },
 }
 
@@ -569,9 +590,10 @@ rather than treating the search as background reading and reverting to
 what you already know how to do. web_search only returns short snippets --
 when a snippet references a PoC, advisory, or writeup but doesn't give you
 the exact detail you need (a request/response body shape, a specific
-payload), call tool="fetch_url" on that result's URL to read the actual
-page rather than re-querying web_search with slightly different wording
-hoping for a better snippet.
+payload), call tool="fetch_url" on that result's URL rather than
+re-querying web_search with slightly different wording hoping for a
+better snippet. Pass `reason` as the specific thing you're trying to find
+out -- fetch_url uses it to hand you back just that, not the whole page.
 
 Part of what's watching this traffic can act on it directly: the defender
 has a real, immediate block tool, not just an alert queue -- enough loud
@@ -750,10 +772,12 @@ def tool_http_probe(conn, session_id, target, paths, method):
     return json.dumps(results), False
 
 
-def dispatch_recon_tool(conn, session_id, name, tool_input):
+def dispatch_recon_tool(conn, session_id, provider, name, tool_input):
     """Never raises -- a bad/out-of-scope tool call is the model's problem to
     recover from, not a reason to fail the whole session. Same contract as
-    agent.py's dispatch_tool()."""
+    agent.py's dispatch_tool(). `provider` is only used by fetch_url, to
+    make its own extraction completion on the same model this campaign is
+    already using (see tool_fetch_url/_summarize_fetch)."""
     tool_input = tool_input or {}
     try:
         if name == "nmap_scan":
@@ -771,7 +795,7 @@ def dispatch_recon_tool(conn, session_id, name, tool_input):
         if name == "web_search":
             return tool_web_search(conn, session_id, tool_input.get("query"))
         if name == "fetch_url":
-            return tool_fetch_url(conn, session_id, tool_input.get("url"))
+            return tool_fetch_url(conn, session_id, provider, tool_input.get("url"), tool_input.get("reason"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
@@ -950,17 +974,79 @@ def _validate_fetch_url(url):
             raise ValueError(f"{parsed.hostname!r} resolves to a non-public address ({addr}) -- refusing to fetch")
 
 
-def tool_fetch_url(conn, session_id, url):
-    """Retrieves the actual page behind a web_search result -- added
+def _no_tools_execute(name, tool_input):
+    # run_stage_turn requires an execute_tool callable, but _summarize_fetch
+    # calls it with tools=[] -- the model has nothing to call, so this
+    # should be unreachable. Loud failure if that assumption ever breaks,
+    # rather than a silent wrong answer.
+    raise AssertionError(f"unexpected tool call {name!r} during a no-tools completion")
+
+
+FETCH_SUMMARIZE_SYSTEM = (
+    "You are extracting the answer to a specific question from one fetched "
+    "web page, during an authorized security assessment. You will be given "
+    "the question and the page's plain-text content. Extract ONLY the part "
+    "that answers the question -- verbatim technical detail where it "
+    "matters (exact request/response bodies, payload shapes, parameter "
+    "names, code), not a summary of the whole page. Discard navigation "
+    "text, ads, unrelated sections, and boilerplate entirely. If the page "
+    "does not actually answer the question, respond with exactly: "
+    "NOT_FOUND -- and nothing else."
+)
+
+
+def _summarize_fetch(provider, url, reason, text):
+    """Distills a fetched page down to just what answers the reason it was
+    fetched, via one extra plain (no-tools) completion on the SAME
+    provider/model already configured for this campaign -- not a new
+    dependency, just one more call through run_stage_turn.
+
+    This is the actual fix for fetch_url's context-growth problem (the
+    RECON_FINDING_PREVIEW_CHARS cap in get_recon_findings is a backstop
+    underneath it, not a substitute): a positional truncation at any fixed
+    length is exactly as likely to cut off the one payload detail
+    fetch_url exists to capture as it is to keep it, where a semantic
+    extraction keeps exactly the relevant part and drops everything else
+    -- including the whole page, if it doesn't answer the question at
+    all, rather than storing an irrelevant chunk of it regardless. This is
+    what's observed to have actually happened: session 1's assess-stage
+    prompt climbed 51K -> 55K -> 62K -> 70K -> 80K tokens across five chunk
+    restarts (each one re-reading the accumulated recon_findings ledger in
+    full via get_recon_findings, per ASSESS_SYSTEM_PROMPT's own guidance to
+    do that on reorientation) before a GMI 524 finally killed the sixth.
+
+    Falls back to the raw (already length-capped) text on any provider
+    failure here -- a hiccup in this one extra call should degrade to the
+    pre-extraction behavior, never silently drop content the caller might
+    actually need."""
+    user = f"Question: {reason}\n\nPage content ({url}):\n{text}"
+    try:
+        result = run_stage_turn(provider, FETCH_SUMMARIZE_SYSTEM, user, [], _no_tools_execute, 1)
+    except ProviderError:
+        return text
+    answer = (result.final_text or "").strip()
+    if not answer or answer.upper().startswith("NOT_FOUND"):
+        return None
+    return answer
+
+
+def tool_fetch_url(conn, session_id, provider, url, reason):
+    """Retrieves the page behind a web_search result and distills it down
+    to just the answer to `reason` via _summarize_fetch -- added
     2026-07-29 alongside web_search, whose snippet-only results turned out
     to be a real blocker in practice: an assess-stage run burned several
     web_search calls re-querying variations of the same question because no
-    500-char Tavily snippet ever contained the actual exploit payload shape,
-    and the run went "incomplete" without ever attempting an exploit it had
-    already correctly identified. Same host-not-container placement as
-    tool_web_search, same recon_finding logging convention."""
+    500-char Tavily snippet ever contained the actual exploit payload shape.
+    The initial version returned the whole fetched page instead of just the
+    relevant part, which fixed that problem and immediately created a worse
+    one -- see _summarize_fetch's docstring. Same host-not-container
+    placement as tool_web_search, same recon_finding logging convention,
+    except a fetch that doesn't answer `reason` is deliberately NOT
+    recorded at all rather than stored as noise."""
     if not url:
         return json.dumps({"error": "url is required"}), True
+    if not reason:
+        return json.dumps({"error": "reason is required -- say what you're trying to find out from this page"}), True
     try:
         _validate_fetch_url(url)
     except ValueError as e:
@@ -984,9 +1070,17 @@ def tool_fetch_url(conn, session_id, url):
     text = _html_to_text(body) if content_type == "text/html" else body
     text, char_truncated = _cap_text(text, FETCH_URL_MAX_CHARS)
 
+    extracted = _summarize_fetch(provider, url, reason, text)
+    if extracted is None:
+        return json.dumps({
+            "url": url, "reason": reason, "found": False,
+            "note": "fetched, but this page did not answer the question -- "
+                    "discarded, not recorded as a finding",
+        }), False
+
     out = {
-        "url": url, "content_type": content_type, "text": text,
-        "truncated": wire_truncated or char_truncated,
+        "url": url, "reason": reason, "found": True, "content_type": content_type,
+        "text": extracted, "truncated": wire_truncated or char_truncated,
     }
     _record_recon_finding(conn, session_id, "lab", "fetch_url", out, "fetch_url")
     return json.dumps(out), False
@@ -1124,7 +1218,7 @@ def tool_propose_action(conn, session_id, tool, target, params, rationale, based
     }), bool(result.get("error"))
 
 
-def dispatch_assess_tool(conn, session_id, name, tool_input):
+def dispatch_assess_tool(conn, session_id, provider, name, tool_input):
     tool_input = tool_input or {}
     try:
         if name == "get_recon_findings":
@@ -1150,7 +1244,7 @@ def dispatch_assess_tool(conn, session_id, name, tool_input):
         if name == "web_search":
             return tool_web_search(conn, session_id, tool_input.get("query"))
         if name == "fetch_url":
-            return tool_fetch_url(conn, session_id, tool_input.get("url"))
+            return tool_fetch_url(conn, session_id, provider, tool_input.get("url"), tool_input.get("reason"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
@@ -1508,7 +1602,7 @@ def _preview(value, n=120):
     return s if len(s) <= n else s[:n] + "..."
 
 
-def _progress_wrapper(dispatch_fn, conn, session_id):
+def _progress_wrapper(dispatch_fn, conn, session_id, provider):
     """Wraps a dispatch_*_tool function so every tool call the model makes
     prints to stdout as it happens -- this is the actual unit of "progress"
     in a stage that can otherwise sit silent for a long time waiting on a
@@ -1516,7 +1610,7 @@ def _progress_wrapper(dispatch_fn, conn, session_id):
     def execute(name, tool_input):
         print(f"    -> {name}({_preview(tool_input, 100)})")
         t0 = time.monotonic()
-        result_text, is_error = dispatch_fn(conn, session_id, name, tool_input)
+        result_text, is_error = dispatch_fn(conn, session_id, provider, name, tool_input)
         elapsed = time.monotonic() - t0
         status = "ERROR" if is_error else "ok"
         print(f"       {status} in {elapsed:.1f}s: {_preview(result_text, 140)}")
@@ -1678,7 +1772,7 @@ def run_recon_stage(conn, session_id, provider, max_iterations,
         "\nUse your tools to identify what's exposed."
     )
     print("    waiting on model (first call can take a while on local models)...")
-    execute = _progress_wrapper(dispatch_recon_tool, conn, session_id)
+    execute = _progress_wrapper(dispatch_recon_tool, conn, session_id, provider)
 
     try:
         result = _run_chained_stage(conn, session_id, provider, RECON_SYSTEM_PROMPT, user,
@@ -1726,7 +1820,7 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
         "believe are warranted."
     )
     print("    waiting on model...")
-    execute = _progress_wrapper(dispatch_assess_tool, conn, session_id)
+    execute = _progress_wrapper(dispatch_assess_tool, conn, session_id, provider)
 
     row = conn.execute("SELECT assess_summary FROM redteam_sessions WHERE id=?", (session_id,)).fetchone()
     prior = (row["assess_summary"] or "") if row else ""
