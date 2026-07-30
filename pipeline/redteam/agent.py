@@ -1995,8 +1995,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                      help="print what would happen, call no API, run no docker exec")
-    ap.add_argument("--provider", choices=["claude", "local", "gmi", "fireworks"], default=DEFAULT_PROVIDER,
-                     help=f"default: {DEFAULT_PROVIDER} (cheapest to smoke-test)")
+    ap.add_argument("--provider", choices=["claude", "local", "gmi", "fireworks"], default=None,
+                     help=f"default: {DEFAULT_PROVIDER} (cheapest to smoke-test) for a fresh campaign; "
+                          "for --continue-assess, defaults to that session's original provider instead "
+                          "-- pass explicitly to switch providers mid-campaign (e.g. after the original "
+                          "one's infra started timing out)")
     ap.add_argument("--model", default=None, help="override the provider's default model")
     ap.add_argument("--max-iterations", type=int, default=None,
                      help="override both stages' tool-call budget (default: "
@@ -2049,9 +2052,21 @@ def main():
         if row is None:
             print(f"[!] no session with id={session_id}")
             return
-        provider = build_provider(row["provider"], args.model or row["model"])
+        provider_name = args.provider or row["provider"]
+        # row["model"] only makes sense as a fallback when staying on the
+        # session's original provider -- reusing e.g. "moonshotai/kimi-k3"
+        # as a Claude model string on a switched-provider continuation
+        # would just fail outright. Fall back to the NEW provider's own
+        # default instead when switching (--model still wins either way).
+        if args.model:
+            resolved_model = args.model
+        elif provider_name == row["provider"]:
+            resolved_model = row["model"]
+        else:
+            resolved_model = DEFAULT_MODEL[provider_name]
+        provider = build_provider(provider_name, resolved_model)
         print(f"[*] continuing assess on session {session_id} via "
-              f"provider={row['provider']} model={provider.model}")
+              f"provider={provider_name} model={provider.model}")
         assess_budget = args.max_iterations or ASSESS_MAX_ITERATIONS
         result = run_assess_stage(conn, session_id, provider, assess_budget, is_continuation=True,
                                    context_budget=args.context_budget, max_chunks=args.max_chunks,
@@ -2064,10 +2079,15 @@ def main():
         cmd_stats(conn)
         return
 
+    # Only --continue-assess (above) can take its provider default from
+    # somewhere other than DEFAULT_PROVIDER -- everything below here starts
+    # a brand-new campaign, so this is the one place that fallback belongs.
+    provider_name = args.provider or DEFAULT_PROVIDER
+
     if args.dry_run:
-        resolved = args.model or DEFAULT_MODEL[args.provider]
+        resolved = args.model or DEFAULT_MODEL[provider_name]
         print(f"[*] --dry-run: would run a recon+assess campaign via "
-              f"provider={args.provider} model={resolved}")
+              f"provider={provider_name} model={resolved}")
         print(f"    lab mode: {lab_modes.current_mode()!r} (targets: {_TARGETS}, "
               f"gated tools: {list(GATED_TOOLS)})")
         cb_desc = "disabled (single call per stage)" if not args.context_budget else f"{args.context_budget} prompt tokens/chunk"
@@ -2083,14 +2103,14 @@ def main():
         print("\n[*] nothing written -- this is the plan only. No API call, no docker exec.")
         return
 
-    provider = build_provider(args.provider, args.model)
+    provider = build_provider(provider_name, args.model)
     max_iterations = args.max_iterations  # None is fine; stages fall back to their own defaults
     recon_budget = max_iterations or RECON_MAX_ITERATIONS
     assess_budget = max_iterations or ASSESS_MAX_ITERATIONS
 
-    session_id, attacker_ip = start_session(conn, args.provider, provider.model)
+    session_id, attacker_ip = start_session(conn, provider_name, provider.model)
     print(f"[*] session {session_id} started, attacker_ip={attacker_ip}, "
-          f"provider={args.provider} model={provider.model}")
+          f"provider={provider_name} model={provider.model}")
 
     print("[*] stage: recon")
     recon_result = run_recon_stage(conn, session_id, provider, recon_budget,
