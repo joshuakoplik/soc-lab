@@ -2152,6 +2152,29 @@ def _preview(value, n=120):
 # max_output_chars, are already close to this ballpark).
 TOOL_RESULT_MAX_CHARS = 20_000
 
+# get_recon_findings(ids=[...]) is a deliberate exception to the blanket cap
+# above, not an oversight -- tool_get_recon_findings's own docstring already
+# promised "Full detail, no cap, when ids is given" before this cap existed.
+# Unlike nmap/sqlmap/curl output (unpredictable size, the model doesn't
+# control it), each finding here is already capped at CREATION time (e.g.
+# fetch_url's own FETCH_URL_MAX_CHARS), and the model explicitly chooses how
+# many ids to ask for in one call, so it can self-moderate. Applying
+# TOOL_RESULT_MAX_CHARS here anyway silently broke that contract: observed
+# live, a session requesting 5 already-capped findings together (30,481
+# combined chars) got re-truncated to ~20K on every restart with no signal
+# that "full" wasn't actually full, and stalled for 4 consecutive restarts
+# re-requesting the identical ids, never getting further. Give this one case
+# a much higher ceiling instead of none at all, so a genuinely pathological
+# request (hundreds of ids at once) still can't blow the whole context
+# budget in a single call.
+FULL_RETRIEVAL_MAX_CHARS = 100_000
+
+
+def _tool_result_cap_for(name, tool_input):
+    if name == "get_recon_findings" and (tool_input or {}).get("ids"):
+        return FULL_RETRIEVAL_MAX_CHARS
+    return TOOL_RESULT_MAX_CHARS
+
 
 def _cap_tool_result(text, max_chars=TOOL_RESULT_MAX_CHARS):
     """Head+tail truncation, never a positional cut -- see
@@ -2189,12 +2212,12 @@ def _progress_wrapper(dispatch_fn, conn, session_id, provider):
         print(f"    -> {name}({_preview(tool_input, 100)})")
         t0 = time.monotonic()
         result_text, is_error = dispatch_fn(conn, session_id, provider, name, tool_input)
-        result_text, was_capped = _cap_tool_result(result_text)
+        cap = _tool_result_cap_for(name, tool_input)
+        result_text, was_capped = _cap_tool_result(result_text, cap)
         elapsed = time.monotonic() - t0
         status = "ERROR" if is_error else "ok"
         if was_capped:
-            print(f"       [ToolResultTooLarge: {name} result capped to "
-                  f"{TOOL_RESULT_MAX_CHARS} chars]")
+            print(f"       [ToolResultTooLarge: {name} result capped to {cap} chars]")
         print(f"       {status} in {elapsed:.1f}s: {_preview(result_text, 140)}")
         return result_text, is_error
     return execute
