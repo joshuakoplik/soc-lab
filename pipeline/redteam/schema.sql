@@ -140,6 +140,29 @@ CREATE TABLE IF NOT EXISTS handoff_notes (
     created       TEXT    NOT NULL
 );
 
+-- Written by record_win() -- a durable, session-wide fact worth never
+-- losing track of: a working credential, a confirmed-working exploit
+-- primitive, real leverage gained, or a recognized strategic opening (e.g.
+-- "RCE looks reachable through this specific vuln, here's how"). Distinct
+-- from vuln_findings (a judgment about what's WRONG with the target) and
+-- from recon_findings/loot (raw data) -- wins are the model's own curated
+-- "don't forget this" list, deliberately free-text and NOT stage-scoped:
+-- shown in every turn for the rest of the session (not just at a restart,
+-- and not just within the stage that recorded it), unlike handoff_notes
+-- which are per-stage. No structured evidence_ref column on purpose -- a
+-- win can reference specific recon_findings/loot/vuln_findings/
+-- pending_actions ids directly in its own text ("see recon finding #47")
+-- the same way handoff notes already do, which sidesteps the ambiguity a
+-- bare id list would have across four differently-shaped tables. The
+-- point is the observation, not a structured pointer -- ids are optional
+-- color, not the mechanism.
+CREATE TABLE IF NOT EXISTS wins (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    description   TEXT    NOT NULL,
+    created       TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS captured_flags (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id         INTEGER NOT NULL REFERENCES redteam_sessions(id),
@@ -157,3 +180,4 @@ CREATE INDEX IF NOT EXISTS idx_pending_gate    ON pending_actions(approved, exec
 CREATE INDEX IF NOT EXISTS idx_loot_session    ON loot(session_id);
 CREATE INDEX IF NOT EXISTS idx_flags_session   ON captured_flags(session_id);
 CREATE INDEX IF NOT EXISTS idx_handoff_session  ON handoff_notes(session_id, stage);
+CREATE INDEX IF NOT EXISTS idx_wins_session      ON wins(session_id);

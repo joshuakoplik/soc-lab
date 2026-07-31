@@ -250,6 +250,44 @@ FETCH_URL_TOOL = {
     },
 }
 
+# Shared between RECON_TOOLS and ASSESS_TOOLS, like WEB_SEARCH_TOOL/
+# FETCH_URL_TOOL above -- a genuine win (exposed credentials, say) is just
+# as likely to surface during read-only recon as during assess, and unlike
+# handoff_notes (per-stage) or recon_findings/vuln_findings (shown only at
+# a restart, or not surfaced in the handoff state at all), wins are
+# session-wide and shown in EVERY chunk's opening prompt for the rest of
+# the session -- see _wins_block. Free text, no structured evidence_ref
+# column: a win can name specific recon_findings/loot/vuln_findings/
+# pending_actions ids directly in its own text ("see recon finding #47")
+# the same way handoff notes already do, which sidesteps the ambiguity a
+# bare id list would have across four differently-shaped tables -- the
+# observation is the point, ids are optional color, not the mechanism.
+RECORD_WIN_TOOL = {
+    "name": "record_win",
+    "description": (
+        "Record a durable, session-wide fact worth never losing track of -- "
+        "a working credential, a confirmed-working exploit primitive, or a "
+        "recognized strategic opening (e.g. \"RCE looks reachable through "
+        "this specific vuln, here's the path\"), not just concrete leverage "
+        "already in hand. Free text is the point -- write it the way you'd "
+        "want to be reminded of it later, not a structured record. Mention "
+        "specific ids inline if it's useful (e.g. \"the exploit code is in "
+        "recon finding #47\"), but that's optional color, not required. "
+        "Unlike recon findings or vuln judgments, wins are shown in EVERY "
+        "future turn for the rest of this session, not just this stage and "
+        "not just after a restart -- so reserve this for things that would "
+        "actually change what you do next if you forgot them, not "
+        "everything you've confirmed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "description": {"type": "string"},
+        },
+        "required": ["description"],
+    },
+}
+
 RECON_TOOLS = [
     {
         "name": "nmap_scan",
@@ -300,6 +338,7 @@ RECON_TOOLS = [
     },
     WEB_SEARCH_TOOL,
     FETCH_URL_TOOL,
+    RECORD_WIN_TOOL,
 ]
 
 # Built up conditionally rather than one static string -- hydra_bruteforce/
@@ -436,6 +475,7 @@ ASSESS_TOOLS = [
     },
     WEB_SEARCH_TOOL,
     FETCH_URL_TOOL,
+    RECORD_WIN_TOOL,
 ]
 
 # Both prompts below are built from _TARGETS/GATED_TOOLS/ALLOWED_MSF_MODULES
@@ -840,6 +880,8 @@ def dispatch_recon_tool(conn, session_id, provider, name, tool_input):
             return tool_web_search(conn, session_id, tool_input.get("query"))
         if name == "fetch_url":
             return tool_fetch_url(conn, session_id, provider, tool_input.get("url"), tool_input.get("reason"))
+        if name == "record_win":
+            return tool_record_win(conn, session_id, tool_input.get("description"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
@@ -1201,6 +1243,17 @@ def tool_raise_vuln_finding(conn, session_id, target, category, severity, descri
     return json.dumps({"ok": True}), False
 
 
+def tool_record_win(conn, session_id, description):
+    if not description:
+        raise ValueError("description is required -- record_win needs the observation itself")
+    conn.execute(
+        "INSERT INTO wins (session_id, description, created) VALUES (?,?,?)",
+        (session_id, description, now_iso()),
+    )
+    conn.commit()
+    return json.dumps({"ok": True}), False
+
+
 def tool_rotate_ip(conn, session_id, reason):
     # redteam_exec.rotate_ip() does the actual work (pick a free lab
     # address, swap it onto soc-attacker's interface, roll back on
@@ -1309,6 +1362,8 @@ def dispatch_assess_tool(conn, session_id, provider, name, tool_input):
             return tool_web_search(conn, session_id, tool_input.get("query"))
         if name == "fetch_url":
             return tool_fetch_url(conn, session_id, provider, tool_input.get("url"), tool_input.get("reason"))
+        if name == "record_win":
+            return tool_record_win(conn, session_id, tool_input.get("description"))
         return json.dumps({"error": f"unknown tool: {name}"}), True
     except redteam_exec.ScopeError as e:
         return json.dumps({"error": str(e)}), True
@@ -1850,6 +1905,73 @@ HANDOFF_SYSTEM = (
 )
 
 
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _vuln_findings_summary(conn, session_id, limit=10):
+    """Top `limit` vuln_findings, most severe first (ties broken by most
+    recent), one line each -- id, category, severity. Deterministic, no
+    model call, same spirit as _recon_findings_index: a compact standing
+    summary of confirmed judgments that stays visible across restarts even
+    as a session accumulates far more than fits in one prompt. Not
+    surfaced anywhere before this -- a critical vuln_finding recorded in
+    chunk 1 was previously invisible to every later handoff, indistinguishable
+    from having never been raised at all once enough chunks passed."""
+    rows = conn.execute(
+        "SELECT id, category, severity FROM vuln_findings WHERE session_id=? ORDER BY id",
+        (session_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    ranked = sorted(rows, key=lambda r: (_SEVERITY_ORDER.get(r["severity"], 99), -r["id"]))
+    lines = [f"[{r['id']}] {r['category']} ({r['severity']})" for r in ranked[:limit]]
+    if len(ranked) > limit:
+        lines.append(f"... and {len(ranked) - limit} more, lower severity, not shown here")
+    return "\n".join(lines)
+
+
+def _wins_block(conn, session_id):
+    """All wins recorded so far this session (see record_win/the wins
+    table), oldest first -- shown in EVERY chunk's opening prompt, not
+    just at a restart, and not scoped to one stage the way handoff_notes
+    are. Deliberately uncapped: wins are meant to stay sparse by design
+    (record_win's own description reserves them for things that would
+    actually change the next move, not routine progress) -- if this ever
+    needs a cap, that's a sign of prompt guidance drifting, not a reason
+    to silently truncate the one list explicitly meant to never lose
+    anything."""
+    rows = conn.execute(
+        "SELECT id, description FROM wins WHERE session_id=? ORDER BY id",
+        (session_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    return "\n".join(f"[{r['id']}] {r['description']}" for r in rows)
+
+
+def _persistent_context_block(conn, session_id):
+    """Wins + top vuln findings: the standing, session-wide context that
+    belongs in EVERY chunk's opening prompt -- recon's very first chunk and
+    assess's fresh (non-continuation) start previously got no curated
+    context at all, not even what _gather_handoff_state assembles for a
+    restart. Returns '' (not None) so callers can concatenate it in
+    unconditionally."""
+    parts = []
+    wins = _wins_block(conn, session_id)
+    if wins:
+        parts.append(
+            "Wins recorded so far this session (durable facts -- credentials, "
+            "confirmed exploit primitives, strategic openings -- see record_win):\n"
+            + wins
+        )
+    vulns = _vuln_findings_summary(conn, session_id)
+    if vulns:
+        parts.append("Top confirmed vulnerabilities so far, by severity:\n" + vulns)
+    if not parts:
+        return ""
+    return "\n\n".join(parts) + "\n\n"
+
+
 def _recent_handoff_notes(conn, session_id, label):
     """Previous handoff notes for this session+stage, oldest first, so the
     model writing the NEXT note can see its own trail of prior conclusions
@@ -1943,14 +2065,19 @@ def _gather_handoff_state(conn, session_id, label):
     Just the index, not full findings: the point is letting the handoff
     NOTE name a specific id worth retrieving in full via
     get_recon_findings(ids=[...]), not re-inflating this call with
-    everything recon ever found."""
+    everything recon ever found.
+
+    Both branches lead with _persistent_context_block (wins + top vuln
+    findings) -- session-wide, not stage-scoped, unlike everything else
+    here."""
+    persistent = _persistent_context_block(conn, session_id)
     prior_notes = _recent_handoff_notes(conn, session_id, label)
     prior_block = (
         f"Your own last few handoff notes, oldest first:\n{prior_notes}\n\n" if prior_notes else ""
     )
     if label == "recon":
         findings, _ = tool_get_recon_findings(conn, session_id)
-        return f"{prior_block}Recon findings so far:\n{findings}"
+        return f"{persistent}{prior_block}Recon findings so far:\n{findings}"
     recon_index = _recon_findings_index(conn, session_id)
     recon_block = (
         f"Recon findings index (id + one-liner only -- the acting turn can "
@@ -1960,7 +2087,7 @@ def _gather_handoff_state(conn, session_id, label):
     pending, _ = tool_get_pending_actions(conn, session_id)
     loot, _ = tool_get_loot(conn, session_id)
     return (
-        f"{prior_block}{recon_block}Pending/executed actions:\n"
+        f"{persistent}{prior_block}{recon_block}Pending/executed actions:\n"
         f"{_preview_json_list(pending, ('input_json', 'result_json'))}\n\n"
         f"Loot:\n{_preview_json_list(loot, ('summary',))}"
     )
@@ -2121,6 +2248,7 @@ def run_recon_stage(conn, session_id, provider, max_iterations,
                      context_budget=DEFAULT_CONTEXT_BUDGET, max_chunks=DEFAULT_MAX_CHUNKS,
                      max_tokens_hard_cap=None):
     user = (
+        _persistent_context_block(conn, session_id) +
         "Begin reconnaissance. Targets in scope:\n" + _targets_block +
         "\nUse your tools to identify what's exposed."
     )
@@ -2167,10 +2295,12 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     prompt, ASSESS_CONTINUATION_USER -- "review what's new via the read
     tools, then keep going" reads the same whether a human triggered the
     resume or a context-budget restart did."""
-    user = ASSESS_CONTINUATION_USER if is_continuation else (
-        "Review the recon findings from this session and assess what's worth "
-        "acting on. Record vulnerability findings and propose any actions you "
-        "believe are warranted."
+    user = _persistent_context_block(conn, session_id) + (
+        ASSESS_CONTINUATION_USER if is_continuation else (
+            "Review the recon findings from this session and assess what's worth "
+            "acting on. Record vulnerability findings and propose any actions you "
+            "believe are warranted."
+        )
     )
     print("    waiting on model...")
     execute = _progress_wrapper(dispatch_assess_tool, conn, session_id, provider)
