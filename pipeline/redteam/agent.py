@@ -1233,20 +1233,38 @@ def tool_web_search(conn, session_id, query):
 FETCH_URL_MAX_BYTES = 1_500_000   # cap what we even read off the wire
 # Cap on the RAW page text handed to _summarize_fetch -- NOT a cap on what
 # goes back to the model (that's _summarize_fetch's own distilled output,
-# already small by construction). Raised 8000 -> 40000 after a live
-# failure: fetching a multi-class exploit.py PoC, the raw text got cut at
-# 8000 chars mid-class, and _summarize_fetch was extracting from that
-# truncated text -- it can't distill a class that was never in its input,
-# no matter how good the extraction prompt is. The model spent an hour-plus
-# hunting alternate sources for the missing class before working around it.
-# Safe to raise generously: _summarize_fetch is its own standalone,
-# no-tools, one-shot completion (see its docstring) -- NOT appended to the
-# main assess-stage conversation -- so a bigger raw input only costs more
-# tokens on that one throwaway call, never the parent turn's context budget.
-# 40000 chars comfortably fits a full single-file PoC/exploit script (the
-# case that motivated this) while staying a small fraction of
-# FETCH_URL_MAX_BYTES above.
-FETCH_URL_MAX_CHARS = 40_000
+# already small by construction). Originally 8000; raised to 40000, then
+# 150000, after a live failure: fetching a multi-class exploit.py PoC, the
+# raw text got cut mid-class, and _summarize_fetch was extracting from
+# already-truncated text -- it can't distill a class that was never in its
+# input, no matter how good the extraction prompt is. The model spent an
+# hour-plus hunting alternate sources for the missing class before working
+# around it by hand.
+#
+# Safe to raise well past what a positional cap on the MAIN conversation
+# would tolerate: _summarize_fetch is its own standalone, no-tools,
+# one-shot completion (see its own docstring), never appended to the
+# assess-stage conversation, so a bigger raw input only costs more tokens
+# on that one throwaway call, never the parent turn's context budget. Note
+# for HTML pages specifically, this cap barely matters either way --
+# _html_to_text already strips <script>/<style>/<noscript> and all markup
+# BEFORE this cap applies, so a noisy ad-and-JS-heavy page's actual junk is
+# already gone by the time the char budget is spent; this cap's real job is
+# bounding raw source/plaintext fetches (raw.githubusercontent.com and
+# similar), which is exactly the case that motivated raising it.
+#
+# NOT raised to "unbounded" despite that, for two reasons that survive the
+# "it's just a throwaway call" argument: (1) it's still a SYNCHRONOUS call
+# inside the live turn -- the model waits on it, so a much bigger prompt
+# means more wall-clock/iteration-budget cost, not just more tokens, even
+# though it doesn't touch the context budget; (2) DEFAULT_CONTEXT_BUDGET
+# (redteam/agent.py's own token budget) is calibrated to ~40% of the
+# model's real context window, implying a real ceiling around 250K tokens
+# (roughly 900K-1M chars) -- a "cheap one-shot" call shouldn't be brushing
+# up against that. 150000 chars comfortably fits any realistic single
+# source file or reference document while staying a small fraction of both
+# that real ceiling and FETCH_URL_MAX_BYTES above.
+FETCH_URL_MAX_CHARS = 150_000
 
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _BLOCK_BREAK_RE = re.compile(r"<(br|/p|/div|/li|/h[1-6]|/tr)\s*/?>", re.IGNORECASE)
