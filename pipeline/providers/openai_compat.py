@@ -14,12 +14,16 @@ key read from the configured env var at call time so --dry-run/--stats work
 with no key configured at all.
 """
 
+import http.client
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
 from .base import (
+    MAX_CALL_ATTEMPTS,
+    RETRYABLE_HTTP_CODES,
     AgenticResult,
     ContextBudgetExceeded,
     Heartbeat,
@@ -27,9 +31,14 @@ from .base import (
     ProviderError,
     Verdict,
     parse_verdict_json,
+    retry_backoff_s,
 )
 
 MAX_TOOL_ITERATIONS = 8
+
+
+def _now_ts():
+    return time.strftime("%H:%M:%S")
 
 
 class OpenAICompatibleProvider:
@@ -103,6 +112,16 @@ class OpenAICompatibleProvider:
                         usage=dict(usage_totals),
                     )
                 messages.append(message)
+                # By this point _call()'s `with urllib.request.urlopen(...)`
+                # block has already exited -- the connection this response
+                # arrived on is fully closed before any execute_tool() call
+                # below runs. Logged explicitly (not just true by
+                # construction) so a transcript can show it: request ->
+                # response -> close -> dispatch tools -> new request, never
+                # a tool executing while a connection to the provider is
+                # still open.
+                print(f"    [{_now_ts()}] provider connection closed; "
+                      f"dispatching {len(requested)} tool call(s)")
                 for call in requested:
                     tool_calls += 1
                     fn = call.get("function", {})
@@ -228,35 +247,166 @@ class OpenAICompatibleProvider:
         raise ProviderError(f"exceeded {max_chunks} chained chunks without a final verdict")
 
     def _call(self, api_key, messages, tools):
-        body = {"model": self.model, "messages": messages}
+        # Streamed (SSE), not a single blocking POST -- a non-streaming
+        # request against a reasoning model with a large prompt has nothing
+        # come back over the wire until generation finishes, so total
+        # generation time has to fit inside Cloudflare's ~600s origin
+        # timeout on GMI's end. That was the steady state, not an outlier,
+        # once prompts grew into the tens of thousands of tokens (see
+        # DEFAULT_CONTEXT_BUDGET in redteam/agent.py) -- a 4h16m session
+        # died to exactly this (GMI 524) after 21 of 22 chunks had already
+        # been cut short by budget/iteration limits, on the one chunk that
+        # finally would have run to completion. Streaming means bytes flow
+        # continuously from the first token, so neither Cloudflare's origin
+        # timer nor our own socket-read timeout (which resets on every
+        # read, not the request as a whole) ever sees a silent gap long
+        # enough to fire, even though total wall-clock for one call can
+        # still run well past 600s.
+        #
+        # `_assemble_stream` reassembles the SSE chunks into the exact same
+        # {"choices": [{"message": {...}}], "usage": {...}, "model": ...}
+        # shape the old non-streaming response had, so run_agentic_turn()
+        # below needs no changes at all.
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         if tools:
             body["tools"] = tools
         body = json.dumps(body).encode("utf-8")
 
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=body,
-            method="POST",
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {api_key}",
-                # urllib's default User-Agent ("Python-urllib/x.y") is a
-                # known bot signature -- at least one of these hosted-model
-                # WAFs (GMI's Cloudflare) blocks it outright with a 403
-                # before the request ever reaches the API, distinct from
-                # and easy to confuse with an actual auth/API failure. Any
-                # non-default UA clears it, so set one everywhere on
-                # principle rather than waiting to hit it per-host.
-                "user-agent": "soc-lab-agent/1.0",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="replace")[:500]
-            raise ProviderError(f"{self.error_prefix} {e.code}: {detail}") from e
-        except urllib.error.URLError as e:
-            raise ProviderError(f"{self.error_prefix} unreachable: {e.reason}") from e
-        except (TimeoutError, OSError) as e:
-            raise ProviderError(f"{self.error_prefix} request failed: {e}") from e
+        for attempt in range(MAX_CALL_ATTEMPTS):
+            req = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=body,
+                method="POST",
+                headers={
+                    "content-type": "application/json",
+                    "authorization": f"Bearer {api_key}",
+                    # urllib's default User-Agent ("Python-urllib/x.y") is a
+                    # known bot signature -- at least one of these hosted-model
+                    # WAFs (GMI's Cloudflare) blocks it outright with a 403
+                    # before the request ever reaches the API, distinct from
+                    # and easy to confuse with an actual auth/API failure. Any
+                    # non-default UA clears it, so set one everywhere on
+                    # principle rather than waiting to hit it per-host.
+                    "user-agent": "soc-lab-agent/1.0",
+                    "accept": "text/event-stream",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+                    return self._assemble_stream(r)
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode("utf-8", errors="replace")[:500]
+                if e.code in RETRYABLE_HTTP_CODES and attempt < MAX_CALL_ATTEMPTS - 1:
+                    delay = retry_backoff_s(attempt)
+                    print(f"    [{self.error_prefix} {e.code} -- retrying in {delay:.1f}s "
+                          f"(attempt {attempt + 2}/{MAX_CALL_ATTEMPTS})]")
+                    time.sleep(delay)
+                    continue
+                raise ProviderError(f"{self.error_prefix} {e.code}: {detail}") from e
+            except urllib.error.URLError as e:
+                if attempt < MAX_CALL_ATTEMPTS - 1:
+                    delay = retry_backoff_s(attempt)
+                    print(f"    [{self.error_prefix} unreachable ({e.reason}) -- retrying in "
+                          f"{delay:.1f}s (attempt {attempt + 2}/{MAX_CALL_ATTEMPTS})]")
+                    time.sleep(delay)
+                    continue
+                raise ProviderError(f"{self.error_prefix} unreachable: {e.reason}") from e
+            except (TimeoutError, OSError, http.client.HTTPException) as e:
+                # Covers a read timeout/connection reset mid-stream too, not
+                # just at connect time -- iterating the response below can
+                # raise any of these once bytes stop arriving. Nothing has
+                # been returned to the caller yet at that point (this method
+                # hasn't returned, so run_agentic_turn() hasn't dispatched
+                # any tool calls from this attempt), so retrying here and
+                # resending the identical `messages` is safe: there is
+                # nothing from this attempt to duplicate.
+                if attempt < MAX_CALL_ATTEMPTS - 1:
+                    delay = retry_backoff_s(attempt)
+                    print(f"    [{self.error_prefix} request failed ({e}) -- retrying in "
+                          f"{delay:.1f}s (attempt {attempt + 2}/{MAX_CALL_ATTEMPTS})]")
+                    time.sleep(delay)
+                    continue
+                raise ProviderError(f"{self.error_prefix} request failed: {e}") from e
+
+    def _assemble_stream(self, response):
+        """Reassemble an OpenAI-compatible SSE stream into the same response
+        shape _call() used to hand back directly from json.loads() on a
+        non-streaming body. Tool-call deltas arrive fragmented across many
+        events, keyed by `index` (one stream can interleave deltas for
+        several parallel tool calls) -- accumulate by index and only treat
+        a tool call as complete once the stream itself ends, never dispatch
+        from a partial fragment."""
+        role = None
+        content_parts = []
+        reasoning_parts = []
+        tool_calls_by_index = {}
+        finish_reason = None
+        usage = None
+        model = self.model
+
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            if event.get("model"):
+                model = event["model"]
+            if event.get("usage"):
+                # The final event on most OpenAI-compatible catalogs (with
+                # stream_options.include_usage set above) carries usage with
+                # an EMPTY choices list -- captured here, before the
+                # `if not choices` check below, so it isn't skipped.
+                usage = event["usage"]
+
+            choices = event.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+            delta = choice.get("delta") or {}
+            if delta.get("role"):
+                role = delta["role"]
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            if delta.get("reasoning_content"):
+                reasoning_parts.append(delta["reasoning_content"])
+            for tc_delta in delta.get("tool_calls") or []:
+                idx = tc_delta.get("index", 0)
+                entry = tool_calls_by_index.setdefault(idx, {
+                    "id": None, "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                })
+                if tc_delta.get("id"):
+                    entry["id"] = tc_delta["id"]
+                if tc_delta.get("type"):
+                    entry["type"] = tc_delta["type"]
+                fn_delta = tc_delta.get("function") or {}
+                if fn_delta.get("name"):
+                    entry["function"]["name"] += fn_delta["name"]
+                if fn_delta.get("arguments"):
+                    entry["function"]["arguments"] += fn_delta["arguments"]
+
+        message = {"role": role or "assistant", "content": "".join(content_parts) or None}
+        if reasoning_parts:
+            message["reasoning_content"] = "".join(reasoning_parts)
+        if tool_calls_by_index:
+            message["tool_calls"] = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
+
+        return {
+            "choices": [{"message": message, "finish_reason": finish_reason}],
+            "usage": usage or {},
+            "model": model,
+        }

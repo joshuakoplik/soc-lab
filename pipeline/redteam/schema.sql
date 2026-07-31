@@ -163,6 +163,27 @@ CREATE TABLE IF NOT EXISTS wins (
     created       TEXT    NOT NULL
 );
 
+-- Written by tool_checkpoint() -- the model's OWN choice to persist state
+-- mid-turn, via the checkpoint(note) tool, rather than only ever having
+-- state captured when a chunk gets forcibly cut off by ContextBudgetExceeded
+-- / IterationsExhausted (see _write_handoff, which makes an extra model call
+-- to write a note ONLY at that point). A checkpoint recorded during the
+-- current chunk lets _run_chained_stage skip that extra call entirely and
+-- hand the model's own words straight to the next chunk -- see
+-- _run_chained_stage's use of _latest_checkpoint_since(). Distinct table
+-- from handoff_notes on purpose: handoff_notes are always
+-- harness-triggered-and-model-authored-on-demand; checkpoints are always
+-- model-initiated, and conflating the two would make it impossible to tell
+-- afterward which restarts the model saw coming and which caught it by
+-- surprise.
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    stage         TEXT    NOT NULL,   -- 'recon' | 'assess'
+    note          TEXT    NOT NULL,
+    created       TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS captured_flags (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id         INTEGER NOT NULL REFERENCES redteam_sessions(id),

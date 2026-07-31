@@ -9,12 +9,24 @@ and is read at call time, not at construction -- so `--dry-run` and
 `--provider claude --stats` work on a box with no key configured at all.
 """
 
+import http.client
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
-from .base import AgenticResult, Heartbeat, IterationsExhausted, ProviderError, Verdict, parse_verdict_json
+from .base import (
+    MAX_CALL_ATTEMPTS,
+    RETRYABLE_HTTP_CODES,
+    AgenticResult,
+    Heartbeat,
+    IterationsExhausted,
+    ProviderError,
+    Verdict,
+    parse_verdict_json,
+    retry_backoff_s,
+)
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
@@ -155,25 +167,45 @@ class ClaudeProvider:
             "tools": tools,
         }).encode("utf-8")
 
-        req = urllib.request.Request(
-            API_URL,
-            data=body,
-            method="POST",
-            headers={
-                "content-type": "application/json",
-                "x-api-key": api_key,
-                "anthropic-version": API_VERSION,
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            # Body carries the API's error message -- worth surfacing. The key
-            # never appears in it; this reads the request headers, not the key.
-            detail = e.read().decode("utf-8", errors="replace")[:500]
-            raise ProviderError(f"Anthropic API {e.code}: {detail}") from e
-        except urllib.error.URLError as e:
-            raise ProviderError(f"Anthropic API unreachable: {e.reason}") from e
-        except (TimeoutError, OSError) as e:
-            raise ProviderError(f"Anthropic API request failed: {e}") from e
+        for attempt in range(MAX_CALL_ATTEMPTS):
+            req = urllib.request.Request(
+                API_URL,
+                data=body,
+                method="POST",
+                headers={
+                    "content-type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": API_VERSION,
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+                    return json.loads(r.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                # Body carries the API's error message -- worth surfacing. The
+                # key never appears in it; this reads the request headers, not
+                # the key.
+                detail = e.read().decode("utf-8", errors="replace")[:500]
+                if e.code in RETRYABLE_HTTP_CODES and attempt < MAX_CALL_ATTEMPTS - 1:
+                    delay = retry_backoff_s(attempt)
+                    print(f"    [Anthropic API {e.code} -- retrying in {delay:.1f}s "
+                          f"(attempt {attempt + 2}/{MAX_CALL_ATTEMPTS})]")
+                    time.sleep(delay)
+                    continue
+                raise ProviderError(f"Anthropic API {e.code}: {detail}") from e
+            except urllib.error.URLError as e:
+                if attempt < MAX_CALL_ATTEMPTS - 1:
+                    delay = retry_backoff_s(attempt)
+                    print(f"    [Anthropic API unreachable ({e.reason}) -- retrying in "
+                          f"{delay:.1f}s (attempt {attempt + 2}/{MAX_CALL_ATTEMPTS})]")
+                    time.sleep(delay)
+                    continue
+                raise ProviderError(f"Anthropic API unreachable: {e.reason}") from e
+            except (TimeoutError, OSError, http.client.HTTPException) as e:
+                if attempt < MAX_CALL_ATTEMPTS - 1:
+                    delay = retry_backoff_s(attempt)
+                    print(f"    [Anthropic API request failed ({e}) -- retrying in "
+                          f"{delay:.1f}s (attempt {attempt + 2}/{MAX_CALL_ATTEMPTS})]")
+                    time.sleep(delay)
+                    continue
+                raise ProviderError(f"Anthropic API request failed: {e}") from e

@@ -10,6 +10,7 @@ second one is what verifies the first one's abstraction was honest.
 """
 
 import json
+import random
 import re
 import threading
 import time
@@ -17,6 +18,28 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
 
 VALID_VERDICTS = ("benign", "suspicious", "malicious", "needs_human")
+
+# Shared retry policy for every HTTP-backed provider (claude.py, openai_compat.py).
+# 524 is Cloudflare's own "origin took too long to respond" -- the exact
+# failure a 4h16m red-team session died to, unhandled, right after
+# identifying the real vuln chain. 5xx is the backend having a bad moment,
+# 429 is a rate limit usually gone by the next attempt. 4xx other than 429
+# (bad request, auth) is deliberately NOT here: retrying a malformed request
+# just fails the same way five times slower.
+RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+# 1 initial attempt + this many retries. "3-5 attempts" -- 5 total (4
+# retries) errs toward not losing a multi-hour campaign to one transient
+# blip, same reasoning as this codebase's long per-call timeouts.
+MAX_CALL_ATTEMPTS = 5
+
+
+def retry_backoff_s(attempt):
+    """Exponential with jitter, capped at 20s. `attempt` is 0-indexed (the
+    attempt that just failed): attempt=0 -> ~1-2s, attempt=3 -> ~8-9s.
+    Capped rather than left to grow unbounded -- past a few attempts the
+    question isn't "did we wait long enough" so much as "is this actually
+    transient at all," and MAX_CALL_ATTEMPTS is what answers that."""
+    return min(2 ** attempt, 20) + random.uniform(0, 1)
 
 # The vendor-neutral tool shape: name, description, JSON schema for input.
 # Anthropic's tool format IS this shape, so ClaudeProvider passes it through
