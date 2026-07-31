@@ -1231,7 +1231,22 @@ def tool_web_search(conn, session_id, query):
 
 
 FETCH_URL_MAX_BYTES = 1_500_000   # cap what we even read off the wire
-FETCH_URL_MAX_CHARS = 8000        # cap what actually goes back to the model
+# Cap on the RAW page text handed to _summarize_fetch -- NOT a cap on what
+# goes back to the model (that's _summarize_fetch's own distilled output,
+# already small by construction). Raised 8000 -> 40000 after a live
+# failure: fetching a multi-class exploit.py PoC, the raw text got cut at
+# 8000 chars mid-class, and _summarize_fetch was extracting from that
+# truncated text -- it can't distill a class that was never in its input,
+# no matter how good the extraction prompt is. The model spent an hour-plus
+# hunting alternate sources for the missing class before working around it.
+# Safe to raise generously: _summarize_fetch is its own standalone,
+# no-tools, one-shot completion (see its docstring) -- NOT appended to the
+# main assess-stage conversation -- so a bigger raw input only costs more
+# tokens on that one throwaway call, never the parent turn's context budget.
+# 40000 chars comfortably fits a full single-file PoC/exploit script (the
+# case that motivated this) while staying a small fraction of
+# FETCH_URL_MAX_BYTES above.
+FETCH_URL_MAX_CHARS = 40_000
 
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _BLOCK_BREAK_RE = re.compile(r"<(br|/p|/div|/li|/h[1-6]|/tr)\s*/?>", re.IGNORECASE)
