@@ -3035,6 +3035,20 @@ def run_assess_stage(conn, session_id, provider, max_iterations, is_continuation
     prompt, ASSESS_CONTINUATION_USER -- "review what's new via the read
     tools, then keep going" reads the same whether a human triggered the
     resume or a context-budget restart did."""
+    # Flip status/ended back to "actively running" up front, before any
+    # model call -- a fresh campaign already has status='running' from
+    # start_session(), but --continue-assess reuses a session row whose
+    # status/ended are still whatever the PREVIOUS assess round left them
+    # (completed/incomplete, with a real ended timestamp), and neither
+    # gets touched again until this round's own success/failure branch
+    # below. Observed live: a continuation ran for 2+ hours showing
+    # status='completed'/ended=<the prior round's timestamp> the entire
+    # time -- correct history, but indistinguishable from "this session
+    # is done" to anything reading the row live (the dashboard, in
+    # particular) while a real chunk was actively in flight.
+    conn.execute("UPDATE redteam_sessions SET status='running', ended=NULL WHERE id=?", (session_id,))
+    conn.commit()
+
     user = _persistent_context_block(conn, session_id) + (
         ASSESS_CONTINUATION_USER if is_continuation else (
             "Review the recon findings from this session and assess what's worth "
