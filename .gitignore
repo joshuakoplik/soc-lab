@@ -28,3 +28,9 @@ results/redteam/**/*.log
 results/triage/**/*.json
 results/triage/**/*.log
 results/backups/
+
+# Attacker loot -- nmap/hydra/sqlmap/shell output written per redteam
+# session (see pipeline/redteam/agent.py's _loot_paths). Regenerable by
+# re-running a campaign; CLAUDE.md already documents this as generated,
+# not source -- this entry was just missing.
+attacker/loot/
