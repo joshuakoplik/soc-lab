@@ -39,6 +39,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 import ingest  # noqa: E402
+import llm_call_tracker  # noqa: E402
 
 DB_PATH = ingest.DB_PATH
 
@@ -54,11 +55,22 @@ def init_full_schema(db_path=None):
     parse_failures) plus its own column migrate(). Layer the other three
     modules' schema.sql on top of that same connection so every table
     exists -- a --status call right after reset shouldn't hit 'no such
-    table'."""
+    table'.
+
+    llm_call_tracker's schema isn't one of those three modules' own
+    schema.sql files -- it's a cross-cutting table triage/agent.py's and
+    redteam/agent.py's own connect() each create lazily on first call, not
+    something owned by detect/triage/redteam individually -- so it was
+    missing here even though this function's whole point is "every table
+    exists after a reset." Observed live: dashboard/server.py restarting
+    immediately after a --db wipe (see reset.sh) queried llm_calls before
+    any agent process had run since the wipe to lazily create it, and hit
+    a bare 'no such table: llm_calls' 500."""
     conn = ingest.connect(db_path=db_path)
     for path in SCHEMA_FILES:
         with open(path) as f:
             conn.executescript(f.read())
+    llm_call_tracker.ensure_schema(conn)
     conn.commit()
 
 

@@ -63,6 +63,26 @@ class ClaudeProvider:
             stop_reason = resp.get("stop_reason")
             content = resp.get("content", [])
 
+            if stop_reason == "refusal":
+                # Anthropic's dedicated stop_reason for "the model declined
+                # to respond at all" -- content is empty ([]), no text, no
+                # tool_use. Left unhandled, this fell through to the
+                # generic final-turn branch below and got recorded as a
+                # normal, successful completion with an empty final_text:
+                # observed live, a full recon+assess campaign against
+                # claude-opus-5 "completed" in 8 seconds with zero tool
+                # calls, zero findings, and no error anywhere, because a
+                # silent refusal looks identical to "the model finished and
+                # had nothing to add" once stop_reason is discarded.
+                # Surface it as what it actually is -- a real failure this
+                # model isn't going to retry its way out of, same posture
+                # as any other ProviderError -- instead of a quiet no-op.
+                raise ProviderError(
+                    f"{self.model} refused to respond (stop_reason=refusal) -- "
+                    "the model declined the request outright, not a tool-use "
+                    "or iteration-budget issue"
+                )
+
             if stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": content})
                 results = []
