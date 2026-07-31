@@ -184,6 +184,96 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     created       TEXT    NOT NULL
 );
 
+-- Typed, queryable, session-wide state -- the "externalized state" tier
+-- 2.1 asks for. Populated as a deterministic side effect of dispatch
+-- (same pattern as recon_findings/loot/captured_flags: no model tool call
+-- required to populate these, so the agent never spends a turn manually
+-- recording something a parser can extract for free), and surfaced in
+-- EVERY chunk's opening prompt via _state_block() (see
+-- _persistent_context_block) instead of requiring a get_recon_findings /
+-- get_loot re-read to reconstruct the same facts turn after turn.
+--
+-- state_services: parsed from tool_nmap_scan's own -oN output
+-- (_record_state_services_from_nmap). UNIQUE(session_id, target, port,
+-- proto) so a later re-scan updates the same row (fresher version string,
+-- say) instead of accumulating duplicates -- a host's open-port set is a
+-- fact that gets refreshed, not appended to.
+CREATE TABLE IF NOT EXISTS state_services (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    target        TEXT    NOT NULL,
+    port          INTEGER NOT NULL,
+    proto         TEXT    NOT NULL,
+    service       TEXT,
+    version       TEXT,
+    source        TEXT    NOT NULL,   -- always 'nmap_scan' today, kept generic
+    provenance_id INTEGER,            -- recon_findings.id this came from
+    created       TEXT    NOT NULL,
+    UNIQUE(session_id, target, port, proto)
+);
+
+-- state_credentials: parsed from execute_pending_action's own result_json
+-- (_extract_typed_state_from_execution) -- a hydra success line, or a
+-- 0-exit ssh_exec with the username/password it was given. status
+-- distinguishes a credential CONFIRMED working from one recorded but not
+-- (yet) proven -- deliberately never deduped against a prior row: the
+-- history of "this exact login was tried and what happened" is itself
+-- useful (see branches, which counts failures the same way), not just the
+-- latest status.
+CREATE TABLE IF NOT EXISTS state_credentials (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    target        TEXT    NOT NULL,
+    username      TEXT    NOT NULL,
+    password      TEXT    NOT NULL,
+    status        TEXT    NOT NULL,   -- confirmed | failed
+    source        TEXT    NOT NULL,   -- hydra_bruteforce | ssh_exec
+    provenance_id INTEGER,            -- pending_actions.id
+    created       TEXT    NOT NULL
+);
+
+-- state_footholds: recorded only for REAL, currently-or-formerly-live
+-- access -- a successful ssh_exec, or an msf module that opened a session
+-- -- never for a merely-confirmed credential alone (hydra proving a login
+-- works doesn't leave anything open; that's state_credentials' job, not
+-- this table's). privilege is a best-effort guess (uid=0 in the command
+-- output) so a milestone check (see audit_session in Tier 3) can tell a
+-- root foothold from a plain user one without re-reading raw output.
+CREATE TABLE IF NOT EXISTS state_footholds (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    target        TEXT    NOT NULL,
+    method        TEXT    NOT NULL,   -- ssh_exec | msf_run_module:<module>
+    privilege     TEXT,               -- 'root' | 'user' | NULL (unknown)
+    source        TEXT    NOT NULL,
+    provenance_id INTEGER,            -- pending_actions.id
+    created       TEXT    NOT NULL
+);
+
+-- branches: tier 2.6's "track and prune branches" -- one row per distinct
+-- (tool, target) approach this session has tried via propose_action.
+-- Updated as a side effect of execute_pending_action (_update_branch),
+-- never by the model directly -- same "the harness decides, not a tool
+-- the model can lie to" posture as GATED_EXECUTORS itself. status flips to
+-- 'abandoned' after 3 consecutive failures with no new supporting evidence
+-- (see _update_branch/_state_block) and back to 'reactivated' if a later
+-- state_credentials/vuln_findings row for the same target shows up after
+-- the abandonment -- the model should stop retrying a dead approach, but
+-- new evidence deserves a fresh look, not a permanent ban.
+CREATE TABLE IF NOT EXISTS branches (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    tool           TEXT    NOT NULL,
+    target         TEXT    NOT NULL,
+    status         TEXT    NOT NULL DEFAULT 'active',  -- active | abandoned | reactivated
+    attempt_count  INTEGER NOT NULL DEFAULT 0,
+    fail_count     INTEGER NOT NULL DEFAULT 0,
+    last_note      TEXT,
+    created        TEXT    NOT NULL,
+    updated        TEXT    NOT NULL,
+    UNIQUE(session_id, tool, target)
+);
+
 CREATE TABLE IF NOT EXISTS captured_flags (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id         INTEGER NOT NULL REFERENCES redteam_sessions(id),
@@ -202,3 +292,7 @@ CREATE INDEX IF NOT EXISTS idx_loot_session    ON loot(session_id);
 CREATE INDEX IF NOT EXISTS idx_flags_session   ON captured_flags(session_id);
 CREATE INDEX IF NOT EXISTS idx_handoff_session  ON handoff_notes(session_id, stage);
 CREATE INDEX IF NOT EXISTS idx_wins_session      ON wins(session_id);
+CREATE INDEX IF NOT EXISTS idx_state_services_session     ON state_services(session_id);
+CREATE INDEX IF NOT EXISTS idx_state_credentials_session  ON state_credentials(session_id);
+CREATE INDEX IF NOT EXISTS idx_state_footholds_session    ON state_footholds(session_id);
+CREATE INDEX IF NOT EXISTS idx_branches_session           ON branches(session_id);
