@@ -284,6 +284,30 @@ CREATE TABLE IF NOT EXISTS captured_flags (
     created            TEXT    NOT NULL
 );
 
+-- staged_artifacts: the harness-side (not attacker-container-side) fetch
+-- bridge -- stage_artifact() downloads a GitHub repo tarball on the HOST,
+-- where real internet access exists, and extracts it under
+-- attacker/loot/session-<N>/staged/<name>/, which the (deliberately
+-- air-gapped) soc-attacker container can already read via its /loot mount.
+-- Every external artifact entering the lab this way is logged here with
+-- its resolved commit SHA and timestamp regardless of outcome -- ok and
+-- every rejection path alike -- both as an audit trail for the purple-team
+-- writeup and so a run that used staged code can be told apart from one
+-- that reconstructed an exploit unaided (see the module docstring's
+-- "artifact-transport limit, not a reasoning failure" finding that this
+-- table exists to stop from recurring silently).
+CREATE TABLE IF NOT EXISTS staged_artifacts (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    requested_url  TEXT    NOT NULL,
+    resolved_sha   TEXT,
+    dest_path      TEXT,
+    file_count     INTEGER,
+    bytes          INTEGER,
+    fetched_at     TEXT    NOT NULL,
+    status         TEXT    NOT NULL   -- ok | rejected_domain | too_large | fetch_failed
+);
+
 CREATE INDEX IF NOT EXISTS idx_recon_session   ON recon_findings(session_id);
 CREATE INDEX IF NOT EXISTS idx_vuln_session    ON vuln_findings(session_id);
 CREATE INDEX IF NOT EXISTS idx_pending_session ON pending_actions(session_id);
@@ -296,3 +320,4 @@ CREATE INDEX IF NOT EXISTS idx_state_services_session     ON state_services(sess
 CREATE INDEX IF NOT EXISTS idx_state_credentials_session  ON state_credentials(session_id);
 CREATE INDEX IF NOT EXISTS idx_state_footholds_session    ON state_footholds(session_id);
 CREATE INDEX IF NOT EXISTS idx_branches_session           ON branches(session_id);
+CREATE INDEX IF NOT EXISTS idx_staged_artifacts_session    ON staged_artifacts(session_id);
