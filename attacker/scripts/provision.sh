@@ -4,7 +4,8 @@
 set -e
 
 if command -v nmap >/dev/null 2>&1 && command -v sqlmap >/dev/null 2>&1 \
-   && command -v hydra >/dev/null 2>&1 && command -v msfconsole >/dev/null 2>&1; then
+   && command -v hydra >/dev/null 2>&1 && command -v msfconsole >/dev/null 2>&1 \
+   && python3 -m pip --version >/dev/null 2>&1; then
   echo "[provision] toolkit already present"
 else
   echo "[provision] installing attack toolkit (first run, a few minutes)..."
@@ -32,7 +33,7 @@ else
   apt-get install -y --no-install-recommends \
     nmap hydra sqlmap metasploit-framework lsof \
     curl jq hping3 netcat-traditional seclists sshpass ca-certificates \
-    python3 bc
+    python3 python3-pip bc
 
   echo "[provision] done: $(nmap --version | head -1)"
 fi
