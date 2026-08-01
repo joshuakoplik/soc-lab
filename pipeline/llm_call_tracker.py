@@ -39,36 +39,75 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 CREATE INDEX IF NOT EXISTS idx_llm_calls_status ON llm_calls(status);
 """
 
+# New columns on a table that already existed before this set of changes --
+# CREATE TABLE IF NOT EXISTS above only helps a table that doesn't exist
+# yet. session_id (redteam only; NULL for triage rows, which have no
+# session concept) is what lets redteam/agent.py's --loop sum a session's
+# TRUE cumulative token spend across every chunk of every round, including
+# past --continue-assess invocations -- before this, usage only ever lived
+# in an in-memory dict inside one process's own _run_chained_stage call,
+# printed once and gone. prompt/completion/total_tokens mirror
+# AgenticResult.usage's own shape (real API-reported numbers where the
+# provider has them, NULL otherwise -- never estimated, same convention as
+# everywhere else usage is threaded through this codebase).
+_MIGRATIONS = {
+    "session_id": "INTEGER",
+    "prompt_tokens": "INTEGER",
+    "completion_tokens": "INTEGER",
+    "total_tokens": "INTEGER",
+}
+
 
 def _now_iso():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def ensure_schema(conn):
-    conn.executescript(SCHEMA)
+def _migrate_schema(conn):
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(llm_calls)").fetchall()}
+    for column, col_type in _MIGRATIONS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE llm_calls ADD COLUMN {column} {col_type}")
     conn.commit()
 
 
-def start_call(conn, component, context_label, provider, model, system_prompt, user_prompt):
+def ensure_schema(conn):
+    conn.executescript(SCHEMA)
+    _migrate_schema(conn)
+    conn.commit()
+
+
+def start_call(conn, component, context_label, provider, model, system_prompt, user_prompt, session_id=None):
     ts = _now_iso()
     cur = conn.execute(
         "INSERT INTO llm_calls (component, context_label, provider, model, "
-        "system_prompt, user_prompt, status, started) VALUES (?,?,?,?,?,?,'running',?)",
-        (component, context_label, provider, model, system_prompt, user_prompt, ts),
+        "system_prompt, user_prompt, status, started, session_id) VALUES (?,?,?,?,?,?,'running',?,?)",
+        (component, context_label, provider, model, system_prompt, user_prompt, ts, session_id),
     )
     conn.commit()
     return cur.lastrowid
 
 
-def finish_call(conn, call_id, status, error=None):
+def finish_call(conn, call_id, status, error=None, usage=None):
     """status is 'completed' or 'error'. Always called from a try/except
     around the same call start_call() was paired with -- see triage/agent.py's
     triage_one() and redteam/agent.py's _run_chained_stage() for the two
-    call sites."""
+    call sites.
+
+    usage, when given, is THIS call's own {prompt_tokens, completion_tokens,
+    total_tokens} (not a running cumulative total -- redteam/agent.py's
+    session_token_total() sums across rows itself, so storing a per-row
+    cumulative here would double-count). None for providers that don't
+    report real usage (local/claude) or when the call errored before any
+    usage was returned -- left NULL, not zero, so a SUM() over a session
+    doesn't silently under-report by treating "unknown" as "none spent"."""
     ts = _now_iso()
+    usage = usage or {}
     conn.execute(
         "UPDATE llm_calls SET status=?, finished=?, error=?, "
-        "elapsed_s=(julianday(?) - julianday(started)) * 86400.0 WHERE id=?",
-        (status, ts, error, ts, call_id),
+        "elapsed_s=(julianday(?) - julianday(started)) * 86400.0, "
+        "prompt_tokens=?, completion_tokens=?, total_tokens=? WHERE id=?",
+        (status, ts, error, ts,
+         usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens"),
+         call_id),
     )
     conn.commit()
