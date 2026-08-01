@@ -5,11 +5,12 @@
 # only ever did the network part -- everything it did is still here under
 # --network.
 #
-#   ./reset.sh                    -- reset everything: network + db + queue + attacker (default)
+#   ./reset.sh                    -- reset everything: network + db + queue + attacker + target (default)
 #   ./reset.sh --network          -- only undo block_ip rules
 #   ./reset.sh --db               -- only wipe soc.db and recreate empty schema
 #   ./reset.sh --queue            -- only reseed tail_state to each log's current EOF
 #   ./reset.sh --attacker         -- only rebuild soc-attacker and clear attacker/loot
+#   ./reset.sh --target           -- only rebuild the active lab-mode's target container(s)
 #   ./reset.sh --network --queue  -- combine any subset
 #   ./reset.sh --status           -- report current state of all three, change nothing
 #   ./reset.sh --no-kill          -- modifier: don't kill running pipeline processes first
@@ -17,11 +18,12 @@
 # --db and --queue are independent on purpose (see pipeline/reset_lab.py's
 # docstring for why a --db wipe without --queue leaves the next `ingest.py
 # --follow` about to replay the entire on-disk log history back in as a
-# fresh backlog) but the default (no flags) always does all four together,
+# fresh backlog) but the default (no flags) always does all five together,
 # so plain `./reset.sh` always leaves the lab in a state where nothing is
-# blocked, the db is empty, the queue is caught up, AND the attacker box
-# itself is back to a clean image -- see --attacker below for why that last
-# one matters as much as the other three, not just a nice-to-have.
+# blocked, the db is empty, the queue is caught up, the attacker box is
+# back to a clean image, AND the target itself is back to a clean install
+# -- see --attacker and --target below for why those last two matter as
+# much as the other three, not just a nice-to-have.
 #
 # --attacker: soc-attacker (compose.yaml) has no volume over /tmp, /root,
 # or anywhere else in its own filesystem -- only /scripts (ro) and /loot
@@ -38,6 +40,28 @@
 # HOST bind mount, not part of the container's own filesystem, so
 # recreating the container alone doesn't touch it -- cleared explicitly
 # too (loot is generated/regenerable by design, see .gitignore).
+#
+# --target: the mirror-image bug, on the TARGET side. Most targets here
+# (cowrie, metasploitable, juiceshop, nginx) have no named volume either,
+# so a plain `--force-recreate` already resets them fully -- done here for
+# consistency, not because they were ever actually a problem. wordpress
+# mode is the real case: wordpress-html and wordpress-db-data ARE named
+# volumes (compose.yaml), so they survive a force-recreate exactly like
+# soc-attacker's writable layer used to -- any webshell uploaded, plugin
+# installed, or database row changed by an attacker session (a cracked
+# admin password, injected content via the SQLi chain) is still there for
+# the next "fresh" session to find. Confirmed live: the wordpress
+# container was still the SAME one from 9 hours and several "reset and
+# start from scratch" campaigns earlier, because nothing before this flag
+# ever actually removed it. --target reads lab_mode.json (same source of
+# truth lab-mode.sh writes and pipeline/redteam/lab_modes.py reads) so it
+# rebuilds whichever target is actually active without needing a separate
+# flag to remember to pass, same reasoning as lab_mode.json's own role
+# elsewhere in this codebase. For wordpress specifically this removes the
+# wordpress/wordpress-db/wordpress-netlock containers AND the two named
+# volumes, then rebuilds the image and re-runs wordpress-init -- a truly
+# fresh WP install, fresh DB, fresh admin password, fresh flags, every
+# time, not just a fresh container wrapped around old state.
 #
 # --db/--queue reset while ingest.py/detect/rules.py/triage/agent.py/
 # redteam/agent.py are still running would race their open connections
@@ -69,6 +93,7 @@ DO_NETWORK=0
 DO_DB=0
 DO_QUEUE=0
 DO_ATTACKER=0
+DO_TARGET=0
 DO_STATUS=0
 KILL_FIRST=1
 ANY_FLAG=0
@@ -79,11 +104,12 @@ for arg in "$@"; do
     --db)       DO_DB=1;       ANY_FLAG=1 ;;
     --queue)    DO_QUEUE=1;    ANY_FLAG=1 ;;
     --attacker) DO_ATTACKER=1; ANY_FLAG=1 ;;
-    --all)      DO_NETWORK=1; DO_DB=1; DO_QUEUE=1; DO_ATTACKER=1; ANY_FLAG=1 ;;
+    --target)   DO_TARGET=1;   ANY_FLAG=1 ;;
+    --all)      DO_NETWORK=1; DO_DB=1; DO_QUEUE=1; DO_ATTACKER=1; DO_TARGET=1; ANY_FLAG=1 ;;
     --status)   DO_STATUS=1 ;;
     --no-kill)  KILL_FIRST=0 ;;
     *)
-      echo "usage: $0 [--all] [--network] [--db] [--queue] [--attacker] [--status] [--no-kill]" >&2
+      echo "usage: $0 [--all] [--network] [--db] [--queue] [--attacker] [--target] [--status] [--no-kill]" >&2
       exit 1
       ;;
   esac
@@ -106,9 +132,10 @@ if [ "$ANY_FLAG" = "0" ]; then
   DO_DB=1
   DO_QUEUE=1
   DO_ATTACKER=1
+  DO_TARGET=1
 fi
 
-if [ "$KILL_FIRST" = "1" ] && { [ "$DO_DB" = "1" ] || [ "$DO_QUEUE" = "1" ] || [ "$DO_ATTACKER" = "1" ]; }; then
+if [ "$KILL_FIRST" = "1" ] && { [ "$DO_DB" = "1" ] || [ "$DO_QUEUE" = "1" ] || [ "$DO_ATTACKER" = "1" ] || [ "$DO_TARGET" = "1" ]; }; then
   echo "[reset] stopping any running pipeline processes first..."
   for pattern in "pipeline/ingest.py" "pipeline/detect/rules.py" "pipeline/triage/agent.py" "pipeline/redteam/agent.py"; do
     pkill -f "$pattern" 2>/dev/null && echo "    killed: $pattern" || true
@@ -122,6 +149,46 @@ if [ "$DO_ATTACKER" = "1" ]; then
   find attacker/loot -mindepth 1 -delete 2>/dev/null || true
   docker compose up -d --force-recreate attacker
   echo "[reset] soc-attacker rebuilt clean, attacker/loot cleared"
+fi
+
+if [ "$DO_TARGET" = "1" ]; then
+  LAB_MODE="$("$PY" -c "
+import json
+try:
+    print(json.load(open('lab_mode.json'))['mode'])
+except Exception:
+    print('unknown')
+" 2>/dev/null || echo unknown)"
+  case "$LAB_MODE" in
+    wordpress)
+      echo "[reset] rebuilding the wordpress target clean -- wordpress-html and"
+      echo "        wordpress-db-data are named volumes, so unlike a stateless"
+      echo "        target a plain force-recreate would leave whatever the last"
+      echo "        session uploaded, installed, or changed in the DB still there..."
+      docker compose --profile wordpress rm -sf wordpress wordpress-init wordpress-netlock wordpress-db
+      docker volume rm -f soc-lab_wordpress-html soc-lab_wordpress-db-data >/dev/null 2>&1 || true
+      docker compose --profile wordpress up -d --build --force-recreate \
+        wordpress-db wordpress wordpress-init wordpress-netlock
+      echo "[reset] wordpress target rebuilt clean: fresh image layer, fresh DB, fresh WP install"
+      ;;
+    easy)
+      echo "[reset] recreating easy-mode target containers (no named volumes on"
+      echo "        these -- force-recreate alone is already a full reset, done"
+      echo "        here for consistency with --attacker/--target above)..."
+      docker compose up -d --force-recreate --remove-orphans nginx juiceshop
+      docker compose --profile easy up -d --force-recreate cowrie metasploitable
+      ;;
+    hard)
+      echo "[reset] recreating hard-mode target containers (no named volumes on"
+      echo "        these -- force-recreate alone is already a full reset, done"
+      echo "        here for consistency with --attacker/--target above)..."
+      docker compose -f compose.yaml -f compose.hard.yml up -d --force-recreate juiceshop nginx juiceshop-netlock
+      ;;
+    *)
+      echo "[reset] lab_mode.json missing or unrecognized ($LAB_MODE) -- skipping target rebuild" >&2
+      echo "  (run ./lab-mode.sh {easy|hard|wordpress} first)" >&2
+      ;;
+  esac
 fi
 
 if [ "$DO_NETWORK" = "1" ]; then
