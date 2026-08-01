@@ -109,7 +109,10 @@ services:
     networks: [soclab]
 
   wordpress:
-    image: wordpress:7.0.1-php8.3-apache
+    build:
+      context: ./wordpress
+      dockerfile: Dockerfile
+    image: soc-lab-wordpress:7.0.1-php8.3-apache-vuln
     container_name: soc-wordpress
     restart: unless-stopped
     profiles: ["wordpress"]
