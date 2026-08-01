@@ -216,13 +216,29 @@ if [ "$DO_DB" = "1" ]; then
   DASH_PID="$(pgrep -f 'dashboard/server\.py' | head -1 || true)"
   if [ -n "$DASH_PID" ]; then
     echo "[reset] dashboard server is running (pid $DASH_PID) -- its live-push connection"
-    echo "        goes stale across a db wipe, restarting it with the same env it had..."
+    echo "        goes stale across a db wipe, restarting it with the same env AND the"
+    echo "        same interpreter it had -- NOT necessarily this worktree's own \$PY:"
+    echo "        the dashboard is commonly launched from a different checkout's venv"
+    echo "        (e.g. the main checkout's .venv, which has fastapi/uvicorn installed)"
+    echo "        pointed at THIS worktree's soc.db via SOC_DASHBOARD_DB. Re-deriving"
+    echo "        \$PY fresh here instead of reusing the original process's own"
+    echo "        interpreter silently launches a python3 that's missing fastapi and"
+    echo "        dies instantly with nothing captured (output was going to /dev/null) --"
+    echo "        observed live. argv[0] from /proc/<pid>/cmdline is what was actually"
+    echo "        invoked -- NOT /proc/<pid>/exe, which resolves through the venv's"
+    echo "        bin/python3 symlink to the bare system interpreter and loses the"
+    echo "        venv's sys.path entirely (also observed live, while fixing this)."
     DASH_ENV="$(tr '\0' '\n' < "/proc/$DASH_PID/environ" 2>/dev/null | grep '^SOC_DASHBOARD_' || true)"
+    DASH_PY="$(tr '\0' '\n' < "/proc/$DASH_PID/cmdline" 2>/dev/null | head -1 || true)"
+    if [ ! -x "$DASH_PY" ]; then
+      echo "    [!] couldn't read the original interpreter from /proc -- falling back to \$PY ($PY)" >&2
+      DASH_PY="$PY"
+    fi
     pkill -f 'dashboard/server\.py' 2>/dev/null && echo "    killed: dashboard/server.py" || true
     sleep 1
-    env $DASH_ENV nohup "$PY" dashboard/server.py > /dev/null 2>&1 &
+    env $DASH_ENV nohup "$DASH_PY" dashboard/server.py > /dev/null 2>&1 &
     disown
-    echo "    dashboard server restarted (pid $!)"
+    echo "    dashboard server restarted (pid $!, interpreter: $DASH_PY)"
   fi
 fi
 
