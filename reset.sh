@@ -5,10 +5,11 @@
 # only ever did the network part -- everything it did is still here under
 # --network.
 #
-#   ./reset.sh                    -- reset everything: network + db + queue (default)
+#   ./reset.sh                    -- reset everything: network + db + queue + attacker (default)
 #   ./reset.sh --network          -- only undo block_ip rules
 #   ./reset.sh --db               -- only wipe soc.db and recreate empty schema
 #   ./reset.sh --queue            -- only reseed tail_state to each log's current EOF
+#   ./reset.sh --attacker         -- only rebuild soc-attacker and clear attacker/loot
 #   ./reset.sh --network --queue  -- combine any subset
 #   ./reset.sh --status           -- report current state of all three, change nothing
 #   ./reset.sh --no-kill          -- modifier: don't kill running pipeline processes first
@@ -16,9 +17,27 @@
 # --db and --queue are independent on purpose (see pipeline/reset_lab.py's
 # docstring for why a --db wipe without --queue leaves the next `ingest.py
 # --follow` about to replay the entire on-disk log history back in as a
-# fresh backlog) but the default (no flags) always does both together, plus
-# --network, so plain `./reset.sh` always leaves the lab in a state where
-# nothing is blocked, the db is empty, and the queue is caught up.
+# fresh backlog) but the default (no flags) always does all four together,
+# so plain `./reset.sh` always leaves the lab in a state where nothing is
+# blocked, the db is empty, the queue is caught up, AND the attacker box
+# itself is back to a clean image -- see --attacker below for why that last
+# one matters as much as the other three, not just a nice-to-have.
+#
+# --attacker: soc-attacker (compose.yaml) has no volume over /tmp, /root,
+# or anywhere else in its own filesystem -- only /scripts (ro) and /loot
+# are mounted -- so its writable layer just accumulates forever across
+# EVERY campaign ever run against it, "fresh" or not: old exploit scripts,
+# extracted hashes, wordlists, partially-cracked credential files, all
+# still sitting in /tmp for a later session to stumble onto and reuse.
+# Observed live: a session credited with independently rebuilding a whole
+# exploit chain had actually grepped a hash out of a wp2shell_extract2.py
+# file left over from a session three days earlier -- silently
+# contaminating how much of that "success" was actually earned fresh vs.
+# recycled. `docker compose up -d --force-recreate attacker` throws away
+# that writable layer and starts clean from the image; attacker/loot is a
+# HOST bind mount, not part of the container's own filesystem, so
+# recreating the container alone doesn't touch it -- cleared explicitly
+# too (loot is generated/regenerable by design, see .gitignore).
 #
 # --db/--queue reset while ingest.py/detect/rules.py/triage/agent.py/
 # redteam/agent.py are still running would race their open connections
@@ -49,20 +68,22 @@ fi
 DO_NETWORK=0
 DO_DB=0
 DO_QUEUE=0
+DO_ATTACKER=0
 DO_STATUS=0
 KILL_FIRST=1
 ANY_FLAG=0
 
 for arg in "$@"; do
   case "$arg" in
-    --network) DO_NETWORK=1; ANY_FLAG=1 ;;
-    --db)      DO_DB=1;      ANY_FLAG=1 ;;
-    --queue)   DO_QUEUE=1;   ANY_FLAG=1 ;;
-    --all)     DO_NETWORK=1; DO_DB=1; DO_QUEUE=1; ANY_FLAG=1 ;;
-    --status)  DO_STATUS=1 ;;
-    --no-kill) KILL_FIRST=0 ;;
+    --network)  DO_NETWORK=1;  ANY_FLAG=1 ;;
+    --db)       DO_DB=1;       ANY_FLAG=1 ;;
+    --queue)    DO_QUEUE=1;    ANY_FLAG=1 ;;
+    --attacker) DO_ATTACKER=1; ANY_FLAG=1 ;;
+    --all)      DO_NETWORK=1; DO_DB=1; DO_QUEUE=1; DO_ATTACKER=1; ANY_FLAG=1 ;;
+    --status)   DO_STATUS=1 ;;
+    --no-kill)  KILL_FIRST=0 ;;
     *)
-      echo "usage: $0 [--all] [--network] [--db] [--queue] [--status] [--no-kill]" >&2
+      echo "usage: $0 [--all] [--network] [--db] [--queue] [--attacker] [--status] [--no-kill]" >&2
       exit 1
       ;;
   esac
@@ -84,13 +105,23 @@ if [ "$ANY_FLAG" = "0" ]; then
   DO_NETWORK=1
   DO_DB=1
   DO_QUEUE=1
+  DO_ATTACKER=1
 fi
 
-if [ "$KILL_FIRST" = "1" ] && { [ "$DO_DB" = "1" ] || [ "$DO_QUEUE" = "1" ]; }; then
+if [ "$KILL_FIRST" = "1" ] && { [ "$DO_DB" = "1" ] || [ "$DO_QUEUE" = "1" ] || [ "$DO_ATTACKER" = "1" ]; }; then
   echo "[reset] stopping any running pipeline processes first..."
   for pattern in "pipeline/ingest.py" "pipeline/detect/rules.py" "pipeline/triage/agent.py" "pipeline/redteam/agent.py"; do
     pkill -f "$pattern" 2>/dev/null && echo "    killed: $pattern" || true
   done
+fi
+
+if [ "$DO_ATTACKER" = "1" ]; then
+  echo "[reset] rebuilding soc-attacker (clears its own filesystem -- old exploit"
+  echo "        scripts, extracted hashes, wordlists, anything a prior session left"
+  echo "        in /tmp) and clearing attacker/loot..."
+  find attacker/loot -mindepth 1 -delete 2>/dev/null || true
+  docker compose up -d --force-recreate attacker
+  echo "[reset] soc-attacker rebuilt clean, attacker/loot cleared"
 fi
 
 if [ "$DO_NETWORK" = "1" ]; then
