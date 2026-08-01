@@ -20,9 +20,19 @@ else
   #   lsof    - metasploit-framework depends on it for its own (unreliable in
   #             this non-systemd container -- see below) service detection
   #   curl/jq/hping3/netcat - glue and manual pokes
+  #   python3/bc - any real attacker box has these; leaving them out isn't a
+  #                realism choice, it's just friction. sqlmap already pulls
+  #                python3 in transitively, but listing it explicitly means
+  #                it's guaranteed present even if that changes -- observed
+  #                live: a session that never got provisioned at all (see
+  #                reset.sh's --attacker handling) had none of this, spent
+  #                hours reimplementing basic HTTP/crypto in raw bash
+  #                because python3/curl looked withheld on purpose rather
+  #                than just missing.
   apt-get install -y --no-install-recommends \
     nmap hydra sqlmap metasploit-framework lsof \
-    curl jq hping3 netcat-traditional seclists sshpass ca-certificates
+    curl jq hping3 netcat-traditional seclists sshpass ca-certificates \
+    python3 bc
 
   echo "[provision] done: $(nmap --version | head -1)"
 fi

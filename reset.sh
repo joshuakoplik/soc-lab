@@ -147,8 +147,47 @@ if [ "$DO_ATTACKER" = "1" ]; then
   echo "        scripts, extracted hashes, wordlists, anything a prior session left"
   echo "        in /tmp) and clearing attacker/loot..."
   find attacker/loot -mindepth 1 -delete 2>/dev/null || true
+  # --build, not just --force-recreate: force-recreate alone reuses whatever
+  # image is already on disk, which silently goes stale the moment
+  # attacker/Dockerfile changes -- confirmed live, an image built hours
+  # before a Dockerfile edit came back missing iptables entirely on
+  # recreate, with no error, no warning.
+  docker compose build attacker
   docker compose up -d --force-recreate attacker
-  echo "[reset] soc-attacker rebuilt clean, attacker/loot cleared"
+  # Neither the provisioned toolkit (nmap/hydra/sqlmap/msf/curl/python3/...,
+  # see provision.sh) nor the egress lockdown below survive a recreate --
+  # both live only in the container's own writable layer/netns, on purpose
+  # (see attacker/README's "Egress lockdown" section), which means a fresh
+  # container is BOTH unprovisioned AND unlocked until both of these run,
+  # in this exact order (provision needs real egress; the lockdown then
+  # removes it). Skipping this step was a real, silent bug here before:
+  # a session ran for hours against a container with no toolkit at all
+  # (reduced to raw bash /dev/tcp for everything) that was ALSO not
+  # actually locked down the whole time, since neither step ever ran.
+  echo "[reset] provisioning soc-attacker's toolkit (nmap/hydra/sqlmap/msf/curl/python3/...)..."
+  docker exec soc-attacker bash /scripts/provision.sh
+  echo "[reset] reapplying soc-attacker's egress lockdown (loopback + lab subnet only)..."
+  docker exec soc-attacker iptables -F OUTPUT
+  docker exec soc-attacker iptables -A OUTPUT -o lo -j ACCEPT
+  docker exec soc-attacker iptables -A OUTPUT -d 10.211.0.0/24 -j ACCEPT
+  docker exec soc-attacker iptables -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+  docker exec soc-attacker iptables -A OUTPUT -j DROP
+  # Verify rather than trust -- a silent failure here is exactly the
+  # "shell_exec has no other containment" scenario CLAUDE.md warns about.
+  # curl exits nonzero (28) on the timeout a working lockdown produces, which
+  # is the EXPECTED outcome here, not a failure -- `|| true` only silences
+  # set -e for that expected nonzero status; it must not echo anything,
+  # since curl's -w already printed "000" to stdout on its own and a
+  # fallback echo would concatenate onto it (confirmed live: an earlier
+  # version of this check read "000FAIL" and reported the lockdown broken
+  # when it was actually working correctly).
+  REAL_NET="$(docker exec soc-attacker curl -m 5 -s -o /dev/null -w '%{http_code}' http://1.1.1.1/ 2>/dev/null)" || true
+  LAB_NET="$(docker exec soc-attacker curl -m 5 -s -o /dev/null -w '%{http_code}' http://wordpress/ 2>/dev/null)" || true
+  if [ "$REAL_NET" != "000" ]; then
+    echo "    [!] EGRESS LOCKDOWN NOT WORKING: real internet returned http_code=$REAL_NET (expected 000/hang)" >&2
+    exit 1
+  fi
+  echo "[reset] soc-attacker rebuilt, provisioned, and locked down (real internet: $REAL_NET, lab: $LAB_NET); attacker/loot cleared"
 fi
 
 if [ "$DO_TARGET" = "1" ]; then
