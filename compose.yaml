@@ -282,6 +282,24 @@ services:
       # and alerts.json is the only output we consume.
       - INDEXER_URL=disabled
       - FILEBEAT_SSL_VERIFICATION_MODE=none
+      # The manager image ships two built-in API accounts (wazuh, wazuh-wui)
+      # with the same fixed default password out of the box, regardless of
+      # whether the indexer/dashboard components this account naming is
+      # meant for are actually deployed here (they aren't -- manager only,
+      # see above). Confirmed live 2026-08-01: a red-team session logged in
+      # to BOTH default accounts with zero effort and used the admin API's
+      # own (legitimate, intended) remote-config-push feature to get root
+      # command execution on this container. API_USERNAME/API_PASSWORD are
+      # a first-class hook the image's own /etc/cont-init.d/2-manager boot
+      # script reads (see create_user.py in the image): setting them
+      # rewrites the NAMED account's password to this value AND randomizes
+      # the *other* default account's password too (create_user.py's own
+      # disable_user() loop), closing both holes in one step rather than
+      # just the one being renamed. Runs on every container init -- no
+      # persistent /var/ossec volume here, so this reapplies cleanly on
+      # every force-recreate, same as the rest of this lab's reset story.
+      - API_USERNAME=wazuh-wui
+      - API_PASSWORD=${WAZUH_API_PASSWORD_SECRET}
     volumes:
       # Config goes to wazuh-config-mount, NOT straight onto /var/ossec/etc.
       # The image copies it into place at boot; bind-mounting over the live
