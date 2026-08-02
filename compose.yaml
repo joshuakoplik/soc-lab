@@ -310,7 +310,18 @@ services:
       - ./logs:/lab-logs:ro
       # THE OUTPUT. alerts.json lands on the host for ingest.py to tail.
       - ./logs/wazuh:/var/ossec/logs/alerts
-    networks: [soclab]
+    # No network at all -- not even peer-reachable in a future
+    # misconfiguration, since there's no bridge for anything to be added
+    # to. Confirmed Wazuh needs zero network I/O here: no ports published,
+    # INDEXER_URL=disabled (the one thing that would otherwise want
+    # outbound reachability), and both its I/O paths above are host bind
+    # mounts, not sockets. This replaced being on the same flat `soclab`
+    # bridge as every target and the attacker -- a red-team session found
+    # it purely by sweeping that shared bridge and rooted it via the
+    # manager's own admin API using default credentials. See
+    # pipeline/net_topology.py for the per-mode networks this and every
+    # target now lives on instead.
+    network_mode: none
 
   # --- The red team. On the bridge, so every packet carries a TRUE container
   #     IP that all four sensors see. This is what makes same_field and
