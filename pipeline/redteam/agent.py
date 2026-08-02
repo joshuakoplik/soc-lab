@@ -222,11 +222,11 @@ FLAG_RE = re.compile(r"FLAG\{[^}]+\}")
 # tool_* functions below for that distinction. Two different host ports now
 # (nginx-easy/nginx-hard can both be up at once, see compose.yaml) -- keyed
 # by mode rather than a single constant.
-JUICESHOP_HOST_PORTS = {"easy": 8080, "hard": 8081}
+JUICESHOP_HOST_PORTS = {"easy": 8082, "hard": 8081}
 
 
 def _juiceshop_host_url():
-    return f"http://localhost:{JUICESHOP_HOST_PORTS.get(lab_modes.current_mode(), 8080)}"
+    return f"http://localhost:{JUICESHOP_HOST_PORTS.get(lab_modes.current_mode(), 8082)}"
 
 
 # ---------------------------------------------------------------------------

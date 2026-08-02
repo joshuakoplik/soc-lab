@@ -17,11 +17,11 @@ done
 
 echo
 echo "=== 2. Generate web traffic through nginx ==="
-curl -s -o /dev/null -w '  GET /            -> %{http_code}\n' http://localhost:8080/
+curl -s -o /dev/null -w '  GET /            -> %{http_code}\n' http://localhost:8082/
 # A benign-looking request with attacker-controlled fields, so you can see them land verbatim.
 curl -s -o /dev/null -w '  GET /?q=test     -> %{http_code}\n' \
      -A 'soc-lab-verify/1.0' \
-     'http://localhost:8080/rest/products/search?q=test'
+     'http://localhost:8082/rest/products/search?q=test'
 sleep 1
 
 echo

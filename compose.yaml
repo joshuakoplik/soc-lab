@@ -60,7 +60,11 @@ services:
     profiles: ["easy"]
     depends_on: [juiceshop-easy]
     ports:
-      - "8080:80"
+      # 8082, not the more obvious 8080 -- this host already has an
+      # unrelated project (Open WebUI, /home/josh/openwebui) permanently
+      # bound to 8080. Moving the lab's own port is simpler and more
+      # durable than hoping nothing else on the box ever wants 8080.
+      - "8082:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./logs/nginx:/var/log/nginx
@@ -142,8 +146,8 @@ services:
       "
 
   # --- Web telemetry source, hard-mode variant. Published on a DIFFERENT
-  #     host port (8081, not 8080) than nginx-easy -- two nginx instances
-  #     can't both bind 8080 when easy and hard coexist. ---
+  #     host port (8081) than nginx-easy's 8082 -- two nginx instances
+  #     can't share a host port when easy and hard coexist. ---
   nginx-hard:
     image: nginx:1.27-alpine
     container_name: soc-nginx-hard

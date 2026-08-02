@@ -9,7 +9,7 @@ underneath it are mush.
 ```
   you / attacker tools
          |
-         |  :2222 (SSH)              :8080 (HTTP)
+         |  :2222 (SSH)              :8082 (HTTP)
          v                                v
    +-----------+                    +-----------+
    |  cowrie   |                    |   nginx   |  <-- reverse proxy, JSON access log
@@ -84,6 +84,8 @@ attacker were added later without a rewrite here):
   coexist -- `./lab-mode.sh up <mode>` / `down <mode>` bring one mode up
   or down without touching the others; `./lab-mode.sh switch <mode>` is
   the old "replace whatever's running" behavior, still available. Easy
-  mode's nginx is `:8080` as above; hard mode's is a separate `:8081`
-  (two nginx instances can't share a host port when both are up).
+  mode's nginx is `:8082` as above (moved off the more obvious `:8080`
+  -- this host has an unrelated project permanently bound there); hard
+  mode's is a separate `:8081` (two nginx instances can't share a host
+  port when both are up).
   `./lab-mode.sh status` shows all three modes' live state at once.

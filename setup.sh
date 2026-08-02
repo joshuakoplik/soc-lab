@@ -31,7 +31,7 @@ echo "[*] Waiting for services to settle (Juice Shop takes ~20s to boot)..."
 sleep 25
 docker compose ps
 echo
-echo "    Juice Shop (via nginx):  http://localhost:8080"
+echo "    Juice Shop (via nginx):  http://localhost:8082"
 echo "    Cowrie SSH:              ssh -p 2222 root@localhost   (any password, after a few tries)"
 echo
 echo "[*] Now run ./verify.sh to confirm telemetry is actually landing on disk."
