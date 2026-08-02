@@ -166,10 +166,16 @@ if [ "$DO_ATTACKER" = "1" ]; then
   # actually locked down the whole time, since neither step ever ran.
   echo "[reset] provisioning soc-attacker's toolkit (nmap/hydra/sqlmap/msf/curl/python3/...)..."
   docker exec soc-attacker bash /scripts/provision.sh
-  echo "[reset] reapplying soc-attacker's egress lockdown (loopback + lab subnet only)..."
+  echo "[reset] reapplying soc-attacker's egress lockdown (loopback + every lab subnet only)..."
+  # One ACCEPT per lab network now, not the single 10.211.0.0/24 this used
+  # to be -- soc-attacker is multi-homed across all three (see
+  # pipeline/net_topology.py, compose.yaml). Reads the subnet list from
+  # net_topology.py rather than hardcoding it a second time here.
   docker exec soc-attacker iptables -F OUTPUT
   docker exec soc-attacker iptables -A OUTPUT -o lo -j ACCEPT
-  docker exec soc-attacker iptables -A OUTPUT -d 10.211.0.0/24 -j ACCEPT
+  while read -r subnet; do
+    docker exec soc-attacker iptables -A OUTPUT -d "$subnet" -j ACCEPT
+  done < <("$PY" pipeline/net_topology.py --subnets)
   docker exec soc-attacker iptables -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
   docker exec soc-attacker iptables -A OUTPUT -j DROP
   # Verify rather than trust -- a silent failure here is exactly the
@@ -182,12 +188,16 @@ if [ "$DO_ATTACKER" = "1" ]; then
   # version of this check read "000FAIL" and reported the lockdown broken
   # when it was actually working correctly).
   REAL_NET="$(docker exec soc-attacker curl -m 5 -s -o /dev/null -w '%{http_code}' http://1.1.1.1/ 2>/dev/null)" || true
-  LAB_NET="$(docker exec soc-attacker curl -m 5 -s -o /dev/null -w '%{http_code}' http://wordpress/ 2>/dev/null)" || true
+  # No single "is the lab still reachable" spot check here anymore -- which
+  # target is up is mode-dependent under coexistence (see lab-mode.sh),
+  # unlike the single always-there wordpress check this used to be able to
+  # assume. --target below (or lab-mode.sh status) is the place to confirm
+  # a specific mode's own reachability.
   if [ "$REAL_NET" != "000" ]; then
     echo "    [!] EGRESS LOCKDOWN NOT WORKING: real internet returned http_code=$REAL_NET (expected 000/hang)" >&2
     exit 1
   fi
-  echo "[reset] soc-attacker rebuilt, provisioned, and locked down (real internet: $REAL_NET, lab: $LAB_NET); attacker/loot cleared"
+  echo "[reset] soc-attacker rebuilt, provisioned, and locked down (real internet: $REAL_NET); attacker/loot cleared"
 fi
 
 if [ "$DO_TARGET" = "1" ]; then
@@ -214,14 +224,15 @@ except Exception:
       echo "[reset] recreating easy-mode target containers (no named volumes on"
       echo "        these -- force-recreate alone is already a full reset, done"
       echo "        here for consistency with --attacker/--target above)..."
-      docker compose up -d --force-recreate --remove-orphans nginx juiceshop
-      docker compose --profile easy up -d --force-recreate cowrie metasploitable
+      docker compose --profile easy up -d --force-recreate --remove-orphans \
+        cowrie metasploitable juiceshop-easy nginx-easy
       ;;
     hard)
       echo "[reset] recreating hard-mode target containers (no named volumes on"
       echo "        these -- force-recreate alone is already a full reset, done"
       echo "        here for consistency with --attacker/--target above)..."
-      docker compose -f compose.yaml -f compose.hard.yml up -d --force-recreate juiceshop nginx juiceshop-netlock
+      docker compose --profile hard up -d --force-recreate --remove-orphans \
+        juiceshop-hard nginx-hard juiceshop-netlock
       ;;
     *)
       echo "[reset] lab_mode.json missing or unrecognized ($LAB_MODE) -- skipping target rebuild" >&2
