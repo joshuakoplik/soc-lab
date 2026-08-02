@@ -1,0 +1,152 @@
+name: northwind-range
+
+# Milestone 1 skeleton (SPEC.md §13 step 1). Every custom service except
+# edge-nginx/litellm is a /health-only stub -- real logic lands milestone by
+# milestone per the build order. Network shape and the internal/host-port
+# split are the part this milestone actually verifies (see
+# scripts/verify-isolation.sh and scripts/verify-no-cves.sh).
+
+services:
+  edge-nginx:
+    build: ./services/edge-nginx
+    container_name: nw-edge-nginx
+    networks:
+      - nw_dmz
+    depends_on:
+      chat-web:
+        condition: service_healthy
+
+  chat-web:
+    build: ./services/chat-web
+    container_name: nw-chat-web
+    networks:
+      - nw_dmz
+
+  portal-api:
+    build: ./services/portal-api
+    container_name: nw-portal-api
+    networks:
+      - nw_dmz
+      - nw_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  litellm:
+    build: ./services/litellm
+    container_name: nw-litellm
+    networks:
+      - nw_app
+    volumes:
+      - ./services/litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  llm-backend:
+    build: ./services/llm-backend
+    container_name: nw-llm-backend
+    networks:
+      - nw_app
+
+  retrieval-svc:
+    build: ./services/retrieval-svc
+    container_name: nw-retrieval-svc
+    networks:
+      - nw_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  tool-svc:
+    build: ./services/tool-svc
+    container_name: nw-tool-svc
+    networks:
+      - nw_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ingest-svc:
+    build: ./services/ingest-svc
+    container_name: nw-ingest-svc
+    networks:
+      - nw_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    build: ./services/postgres
+    container_name: nw-postgres
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - nw_app
+      - nw_ops
+    environment:
+      POSTGRES_USER: northwind
+      POSTGRES_PASSWORD: northwind-placeholder
+      POSTGRES_DB: northwind
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "northwind"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: nw-redis
+    networks:
+      - nw_app
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  harness:
+    build: ./harness
+    container_name: nw-harness
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - nw_ops
+      - nw_dmz
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The one operator port this whole range publishes (SPEC.md §0.2) --
+    # 127.0.0.1 only, never 0.0.0.0. nw_dmz stays internal:true; harness's
+    # leg on it is for driving attack traffic into edge-nginx like a real
+    # user would (see plan's design-decision #1), not for the published port.
+    ports:
+      - "127.0.0.1:8090:8000"
+
+networks:
+  nw_dmz:
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.10.0/24
+          gateway: 172.28.10.1
+  nw_app:
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.20.0/24
+          gateway: 172.28.20.1
+  nw_ops:
+    internal: false
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.40.0/24
+          gateway: 172.28.40.1

@@ -1,0 +1,7 @@
+# Milestone 1: config-only placeholder so the real upstream litellm image has
+# something valid to boot against. Milestone 4 wires this to llm-backend for
+# real; milestone 6 adds the renamed-endpoint / minimal-runtime hardening.
+model_list: []
+
+general_settings:
+  master_key: sk-northwind-placeholder
