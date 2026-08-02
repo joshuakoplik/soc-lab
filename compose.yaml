@@ -22,13 +22,19 @@ services:
       # its bytes" (the honeyfs overlay) -- see cowrie/cowrie.cfg.
       - ./cowrie/custom-fs.pickle:/cowrie/cowrie-git/custom-fs.pickle:ro
       - ./cowrie/honeyfs:/cowrie/cowrie-git/honeyfs:ro
-    networks: [soclab]
+    networks: [soclab-easy]
 
-  # --- Target 2: the web app. Not exposed directly; all traffic goes through nginx. ---
-  juiceshop:
+  # --- Target 2: the web app, easy-mode variant. Not exposed directly; all
+  #     traffic goes through nginx-easy. Split from a single shared
+  #     "juiceshop" service (was toggled between configs via
+  #     compose.hard.yml) into always-defined easy/hard services so both
+  #     can run simultaneously instead of being mutually exclusive -- see
+  #     pipeline/net_topology.py and lab-mode.sh's up/down-per-mode verbs. ---
+  juiceshop-easy:
     image: bkimminich/juice-shop:latest
-    container_name: soc-juiceshop
+    container_name: soc-juiceshop-easy
     restart: unless-stopped
+    profiles: ["easy"]
     expose:
       - "3000"
     environment:
@@ -37,24 +43,122 @@ services:
       # flag system. See README/pipeline docs for how the red-team agent
       # retrieves them.
       - CTF_KEY=${CTF_KEY}
-    networks: [soclab]
+    # aliases: [juiceshop] -- nginx/nginx.conf's upstream block hardcodes
+    # "juiceshop" (the same shared config file is mounted into both
+    # nginx-easy and nginx-hard), so whichever juiceshop variant lives on
+    # the SAME network as a given nginx instance needs to answer to that
+    # name too, same reasoning as nginx's own "nginx" alias below.
+    networks:
+      soclab-easy:
+        aliases: [juiceshop]
 
-  # --- Web telemetry source. Reverse proxy in front of Juice Shop. ---
-  nginx:
+  # --- Web telemetry source, easy-mode variant. ---
+  nginx-easy:
     image: nginx:1.27-alpine
-    container_name: soc-nginx
+    container_name: soc-nginx-easy
     restart: unless-stopped
-    depends_on: [juiceshop]
+    profiles: ["easy"]
+    depends_on: [juiceshop-easy]
     ports:
       - "8080:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./logs/nginx:/var/log/nginx
-      # Easy-mode decoy set (planted leaked credentials). compose.hard.yml
-      # overrides this whole volumes list to point at ./nginx/decoys-hard
-      # instead -- see lab-mode.sh.
       - ./nginx/decoys-easy:/etc/nginx/decoys:ro
-    networks: [soclab]
+    # aliases: [nginx] -- the red-team-agent-facing target name stays the
+    # mode-agnostic "nginx" (see lab_modes.py's targets tuples, unchanged);
+    # only the compose service key and container name are mode-specific.
+    # soc-attacker is multi-homed onto every mode's network, so without a
+    # per-network alias "nginx" would be ambiguous the moment more than one
+    # mode is up at once -- see executor.py's resolve_target_ip(), which
+    # resolves "nginx.soclab-easy" / "nginx.soclab-hard" explicitly instead
+    # of a bare hostname for exactly this reason.
+    networks:
+      soclab-easy:
+        aliases: [nginx]
+
+  # --- Target 2, hard-mode variant: Juice Shop hardened (hints/tutorial
+  #     off, safetyMode: disabled -- see juiceshop/config/hard.yml) and
+  #     network-locked the same way soc-attacker is, via the
+  #     juiceshop-netlock sidecar below (see its own comment for why this
+  #     is still an iptables sidecar rather than a structural network
+  #     property). ---
+  juiceshop-hard:
+    image: bkimminich/juice-shop:latest
+    container_name: soc-juiceshop-hard
+    restart: unless-stopped
+    profiles: ["hard"]
+    expose:
+      - "3000"
+    environment:
+      - CTF_KEY=${CTF_KEY}
+      - NODE_ENV=hard
+    volumes:
+      - ./juiceshop/config/hard.yml:/juice-shop/config/hard.yml:ro
+    # Hard mode's config sets safetyMode: disabled, which unlocks several
+    # DoS-shaped challenges (NoSQL DoS, XXE DoS, RCE DoS, Memory Bomb).
+    # Capped so a solved one degrades this one container, not the host
+    # running everything else.
+    mem_limit: 512m
+    cpus: 1.0
+    networks:
+      soclab-hard:
+        aliases: [juiceshop]
+
+  # Shares juiceshop-hard's network namespace (not its filesystem or process
+  # tree) purely to apply an egress lockdown to it: loopback + the lab
+  # subnet only, default DROP -- same reasoning as wordpress-netlock above
+  # (soclab-hard is a normal, not internal:true, bridge -- see
+  # pipeline/net_topology.py's bootstrap() for why), applied here because
+  # safetyMode: disabled unlocks challenges that execute inside the
+  # juiceshop container itself.
+  #
+  # Installs iptables fresh every time this starts (the juiceshop image has
+  # no package manager baked in, confirmed live -- no apt/apk, not even
+  # `ls`/`cat` on PATH) then sleeps. The rules apply to the shared network
+  # namespace and persist for as long as soc-juiceshop-hard does, independent
+  # of whether this sidecar container itself keeps running.
+  juiceshop-netlock:
+    image: alpine:latest
+    container_name: soc-juiceshop-netlock
+    profiles: ["hard"]
+    network_mode: "container:soc-juiceshop-hard"
+    cap_add: [NET_ADMIN, NET_RAW]
+    depends_on: [juiceshop-hard]
+    restart: "no"
+    command: >
+      sh -c "
+      apk add --no-cache iptables ip6tables >/dev/null &&
+      iptables -F OUTPUT &&
+      iptables -A OUTPUT -o lo -j ACCEPT &&
+      iptables -A OUTPUT -d 10.211.20.0/24 -j ACCEPT &&
+      iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT &&
+      iptables -A OUTPUT -j DROP &&
+      ip6tables -F OUTPUT &&
+      ip6tables -A OUTPUT -o lo -j ACCEPT &&
+      ip6tables -A OUTPUT -j DROP &&
+      echo '[juiceshop-netlock] egress locked to 10.211.20.0/24' &&
+      sleep infinity
+      "
+
+  # --- Web telemetry source, hard-mode variant. Published on a DIFFERENT
+  #     host port (8081, not 8080) than nginx-easy -- two nginx instances
+  #     can't both bind 8080 when easy and hard coexist. ---
+  nginx-hard:
+    image: nginx:1.27-alpine
+    container_name: soc-nginx-hard
+    restart: unless-stopped
+    profiles: ["hard"]
+    depends_on: [juiceshop-hard]
+    ports:
+      - "8081:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs/nginx:/var/log/nginx
+      - ./nginx/decoys-hard:/etc/nginx/decoys:ro
+    networks:
+      soclab-hard:
+        aliases: [nginx]
 
   # --- Target 3: a real vulnerable Linux box, not an emulated honeypot. Real
   #     remote exploits (distccd, Samba usermap_script, the ingreslock
@@ -75,14 +179,14 @@ services:
     # the same way. sleep infinity in place of bash keeps the
     # already-started services running indefinitely.
     command: ["sh", "-c", "/bin/services.sh && sleep infinity"]
-    networks: [soclab]
+    networks: [soclab-easy]
     # No ports published, no host bind, ever. This image is intentionally
     # and extensively vulnerable -- real backdoors (a root shell on the
     # ingreslock port), real RCE (distccd, Samba usermap_script, Tomcat
     # manager), unauthenticated MySQL/PostgreSQL/NFS. It must only ever be
-    # reachable from soc-attacker over the internal soclab bridge, same rule
-    # as Juice Shop and Cowrie's real sshd port, just with a much sharper
-    # consequence if it were ever exposed.
+    # reachable from soc-attacker over its own internal soclab-easy bridge,
+    # same rule as Juice Shop and Cowrie's real sshd port, just with a much
+    # sharper consequence if it were ever exposed.
 
   # --- Target 4: real WordPress core, pinned to the version vulnerable to
   #     CVE-2026-63030 (batch REST API logic flaw) chained with CVE-2026-60137
@@ -106,7 +210,7 @@ services:
       - MYSQL_RANDOM_ROOT_PASSWORD=yes
     volumes:
       - wordpress-db-data:/var/lib/mysql
-    networks: [soclab]
+    networks: [soclab-wordpress]
 
   wordpress:
     build:
@@ -142,7 +246,7 @@ services:
       # existing ErrorLog/CustomLog directives (unchanged) then just open
       # regular files there, same as cowrie/nginx already do for their logs.
       - ./logs/wordpress:/var/log/apache2
-    networks: [soclab]
+    networks: [soclab-wordpress]
     # No ports published -- reach it from soc-attacker as http://wordpress,
     # same no-host-exposure rule as every other intentionally-vulnerable
     # target in this lab.
@@ -174,12 +278,17 @@ services:
     volumes:
       - wordpress-html:/var/www/html
       - ./wordpress/init.sh:/init.sh:ro
-    networks: [soclab]
+    networks: [soclab-wordpress]
 
-  # Defense in depth on top of the auto-update constants above: same
-  # egress-lock pattern as juiceshop-netlock in compose.hard.yml, applied to
-  # wordpress's network namespace so it can't reach api.wordpress.org (or
-  # anything else off-subnet) even if the in-app disable were bypassed.
+  # Defense in depth on top of the auto-update constants above: soclab-wordpress
+  # is a normal (not internal:true) bridge -- that flag was tried during this
+  # refactor and reverted after confirming it also silently disables Docker's
+  # own host port publishing for every container on the network, which broke
+  # nginx's host-reachable ports elsewhere in this file. So wordpress still
+  # needs its own explicit egress lock, same as before this refactor, just
+  # pointed at wordpress's new subnet -- so it can't reach api.wordpress.org
+  # (or anything else off-subnet) even if the in-app auto-update disable were
+  # bypassed.
   wordpress-netlock:
     image: alpine:latest
     container_name: soc-wordpress-netlock
@@ -193,32 +302,33 @@ services:
       apk add --no-cache iptables ip6tables >/dev/null &&
       iptables -F OUTPUT &&
       iptables -A OUTPUT -o lo -j ACCEPT &&
-      iptables -A OUTPUT -d 10.211.0.0/24 -j ACCEPT &&
+      iptables -A OUTPUT -d 10.211.30.0/24 -j ACCEPT &&
       iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT &&
       iptables -A OUTPUT -j DROP &&
       ip6tables -F OUTPUT &&
       ip6tables -A OUTPUT -o lo -j ACCEPT &&
       ip6tables -A OUTPUT -j DROP &&
-      echo '[wordpress-netlock] egress locked to 10.211.0.0/24' &&
+      echo '[wordpress-netlock] egress locked to 10.211.30.0/24' &&
       sleep infinity
       "
 
   # --- Real enforcement point for the defender's block_ip tool -----------
-  # network_mode: host because inter-container traffic on the soclab bridge
-  # is filtered through the HOST's netfilter DOCKER-USER chain -- Docker's
-  # own documented hook point for user-inserted container/bridge filtering
-  # -- and a container on its own bridge netns can't reach that chain at
-  # all. No profile: this is baseline defensive infra, up regardless of
-  # which attacker-side lab mode is active, same as suricata/wazuh below.
+  # network_mode: host because inter-container traffic on any soclab-*
+  # bridge is filtered through the HOST's netfilter DOCKER-USER chain --
+  # Docker's own documented hook point for user-inserted container/bridge
+  # filtering -- and a container on its own bridge netns can't reach that
+  # chain at all. No profile: this is baseline defensive infra, up
+  # regardless of which attacker-side lab mode(s) are active, same as
+  # suricata/wazuh below.
   #
   # This container itself has full host-netns iptables power by virtue of
   # network_mode: host + NET_ADMIN -- the actual fence is one level up, in
   # pipeline/triage/block_enforcer.py: it is the ONLY caller that ever
-  # execs into this container, and it only ever constructs one rule shape
-  # (chain=DOCKER-USER, -i soclab0, a validated in-subnet src_ip, -j DROP),
-  # never an arbitrary command. See block_enforcer.py's docstring for the
-  # two-layer fence and network-reset.sh to undo everything it's ever
-  # blocked.
+  # execs into this container, and it only ever constructs rule shapes
+  # scoped to a validated in-lab-subnet src_ip and the matching bridge
+  # interface (see net_topology.py), never an arbitrary command. See
+  # block_enforcer.py's docstring for the two-layer fence and reset.sh
+  # --network to undo everything it's ever blocked.
   block-enforcer:
     image: alpine:latest
     container_name: soc-block-enforcer
@@ -228,24 +338,24 @@ services:
     command: >
       sh -c "
       apk add --no-cache iptables ip6tables >/dev/null &&
-      echo '[block-enforcer] ready -- inserts DOCKER-USER rules scoped to -i soclab0 only' &&
+      echo '[block-enforcer] ready -- inserts DOCKER-USER rules scoped to soclab-* interfaces only' &&
       sleep infinity
       "
 
-  # --- Network IDS. Watches the whole bridge; emits EVE JSON. ---
+  # --- Network IDS. Watches every per-mode bridge; emits EVE JSON. ---
   suricata:
     image: jasonish/suricata:latest
     container_name: soc-suricata
     restart: unless-stopped
-    # host netns so Suricata can see the bridge interface 'soclab0' that the
-    # network below is pinned to. This is why the bridge gets a fixed name.
+    # host netns so Suricata can see whichever soclab-*0 bridge interfaces
+    # currently exist -- entrypoint.sh self-discovers all of them (see that
+    # script) rather than watching one fixed interface, so a mode coming up
+    # or down doesn't require restarting or reconfiguring this container.
     network_mode: host
     cap_add:
-      - NET_ADMIN     # bring the interface into promiscuous mode
+      - NET_ADMIN     # bring interfaces into promiscuous mode
       - NET_RAW       # raw packet capture
       - SYS_NICE      # thread priority for the worker threads
-    environment:
-      - SURICATA_IFACE=soclab0
     # /bin/sh explicitly: the script does not need to be executable, which
     # survives the file being copied/pasted around.
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
@@ -256,18 +366,12 @@ services:
       - ./suricata/entrypoint.sh:/entrypoint.sh:ro
       - ./logs/suricata:/var/log/suricata
       - suricata-rules:/var/lib/suricata/rules   # persist ET Open across restarts
-    # cowrie deliberately not listed: it's easy-mode-only (profiles: ["easy"]),
-    # and this is a passive network sniffer, not something that calls cowrie
-    # directly -- there's no functional ordering requirement, only nginx's
-    # (log directory expectations) matters.
-    depends_on: [nginx]
 
-
-  # --- The SIEM. Log-based detection: reads Cowrie + nginx, applies rules. ---
+  # --- The SIEM. Log-based detection: reads Cowrie + nginx + wordpress.
   # Manager ONLY. No indexer, no dashboard, no agents. The manager is the rules
   # engine; the indexer/dashboard are just storage and a UI, and our consumer is
   # ingest.py, not a human with a browser. That's what keeps this ~1GB instead
-  # of the 8GB an all-in-one wants.
+  # of the 8GB an all-in-one wants. ---
   wazuh:
     image: wazuh/wazuh-manager:4.14.6
     container_name: soc-wazuh
@@ -323,15 +427,38 @@ services:
     # target now lives on instead.
     network_mode: none
 
-  # --- The red team. On the bridge, so every packet carries a TRUE container
-  #     IP that all four sensors see. This is what makes same_field and
-  #     cross_source correlation mean something instead of everything looking
-  #     like it came from the gateway. ---
+  # --- The red team. Multi-homed onto every mode's network, always,
+  #     regardless of which modes' target containers currently happen to
+  #     be up -- an idle network with no other peers is harmless to stay
+  #     attached to, and this avoids needing docker network connect/
+  #     disconnect scripted into every lab-mode.sh call. Every packet still
+  #     carries a TRUE container IP on whichever mode's segment it's
+  #     talking on, which is what makes same_field and cross_source
+  #     correlation mean something instead of everything looking like it
+  #     came from the gateway.
+  #
+  #     No internet access by default -- reset.sh --attacker reapplies an
+  #     iptables OUTPUT lockdown inside this container's own netns after
+  #     every rebuild/recreate, one ACCEPT rule per lab subnet plus a
+  #     default DROP (see reset.sh and attacker/README). This is the same
+  #     approach the lab used before this refactor; `internal: true` on
+  #     these networks was tried instead (structural, not
+  #     reapply-after-every-recreate) and reverted after confirming live
+  #     that it also silently disables Docker's own host port publishing
+  #     for every container on the network, not just egress -- see
+  #     pipeline/net_topology.py's bootstrap() docstring. The actual
+  #     incident this refactor is downstream of (Wazuh reachable and
+  #     rootable from the shared bridge) is fully closed by Wazuh's own
+  #     network_mode: none above, independent of this. Deliberately
+  #     opening real egress again (e.g. a bounded
+  #     REDTEAM_UNRESTRICTED_EGRESS=1 experiment, see
+  #     pipeline/redteam/agent.py) means not reapplying that lockdown, or
+  #     explicitly punching a hole in it -- see attacker/README. ---
   attacker:
-    # Built, not the bare image: kalilinux/kali-rolling doesn't ship
-    # iproute2, and rotate_ip() (executor.py) needs `ip addr` to swap this
-    # container onto a fresh lab IP. See attacker/Dockerfile for why that
-    # has to happen at build time, not runtime.
+    # Built, not the bare image: the full attack toolkit (nmap, hydra,
+    # sqlmap, metasploit, curl, python3, ...) is baked in at build time --
+    # see attacker/Dockerfile -- since this container has no internet
+    # access at runtime to fetch any of it once it's up.
     build: ./attacker
     image: soc-lab-attacker
     container_name: soc-attacker
@@ -349,18 +476,31 @@ services:
       # The attack scripts, and a place to drop loot/output back on the host.
       - ./attacker/scripts:/scripts:ro
       - ./attacker/loot:/loot
-    networks: [soclab]
-    # No ports published. The attacker reaches the targets over the internal
-    # bridge by service name (cowrie:2222, nginx:80); nothing is exposed to the
-    # host, and it can't be reached from outside the lab.
+    networks: [soclab-easy, soclab-hard, soclab-wordpress]
+    # No ports published. The attacker reaches whichever mode's targets are
+    # up over that mode's bridge by service name (cowrie:2222, nginx:80,
+    # wordpress:80); nothing is exposed to the host. Real internet access
+    # is denied via this container's own iptables lockdown (see above and
+    # reset.sh --attacker), not by these networks themselves -- they're
+    # normal bridges, same as every Docker network unless told otherwise.
 
 networks:
-  soclab:
-    driver: bridge
-    driver_opts:
-      # Pin the Linux bridge name so Suricata's -i soclab0 is deterministic.
-      # Without this Docker generates br-<hash> and the sensor can't find it.
-      com.docker.network.bridge.name: soclab0
+  # Created once by pipeline/net_topology.py's bootstrap() (see setup.sh /
+  # lab-mode.sh), not by compose itself -- external: true means compose
+  # only ever REFERENCES these by name, never creates/destroys them, so a
+  # mode's containers stopping doesn't tear down the network underneath
+  # Suricata or leave soc-attacker's multi-homing dangling. No CIDR/driver
+  # config here at all -- Docker already knows the subnet/gateway/bridge
+  # name from whenever bootstrap() created it; net_topology.py is the only
+  # place that information lives. NOT internal: true -- see
+  # net_topology.py's bootstrap() docstring for why that was tried and
+  # reverted (it breaks Docker's own host port publishing).
+  soclab-easy:
+    external: true
+  soclab-hard:
+    external: true
+  soclab-wordpress:
+    external: true
 
 volumes:
   suricata-rules:

@@ -1,9 +1,19 @@
 """
 Canonical registry of this lab's per-mode Docker networks -- one isolated
-subnet per mode (easy/hard/wordpress), each `internal: true` so nothing on
-it can reach the real internet regardless of what happens inside a
-container, plus Wazuh's own total isolation (`network_mode: none`, tracked
-here only as a comment since it has no subnet of its own to register).
+subnet per mode (easy/hard/wordpress), separating what used to be a single
+shared bridge so each mode's targets (and soc-attacker, multi-homed across
+all three) live on their own segment instead of one flat network everything
+could see. NOT `internal: true` -- that was the first attempt, reverted
+after confirming live that it also silently disables Docker's own host
+port publishing for every container on the network (nginx's 8080/8081
+included), not just egress. soc-attacker's own no-internet guarantee comes
+from per-container iptables instead (see reset.sh --attacker), same
+approach as before this refactor, just applied across all three of its
+interfaces now that it's multi-homed. Wazuh gets its own total isolation
+separately (`network_mode: none`, tracked here only as a comment since it
+has no subnet of its own to register) -- that one full disconnection
+(rather than a shared, merely-isolated network) is what actually closes
+the incident below, independent of anything about these three networks.
 
 This module's job is to describe what SHOULD exist so block_enforcer.py,
 executor.py, reset.sh, lab-mode.sh, and injection_asr/ don't each carry
@@ -116,17 +126,32 @@ def bootstrap():
     already exist. Called by setup.sh and at the top of every lab-mode.sh
     verb -- cheap no-op (one `docker network inspect` each) once the
     networks are already up, so there's no reason to guard calls to this
-    behind a first-run check of your own."""
+    behind a first-run check of your own.
+
+    Deliberately NOT --internal. That was the first attempt (isolate each
+    network structurally, retire the per-container iptables sidecars) --
+    confirmed live it also silently disables Docker's own host port
+    publishing for EVERY container on the network, not just egress, which
+    breaks nginx's host-reachable port (8080/8081) and anything else that
+    might ever need one. The actual incident this whole refactor is
+    downstream of (Wazuh reachable and rootable from the shared bridge) is
+    already fully solved by Wazuh's own network_mode: none -- it was never
+    on these networks to begin with, so isolating THEM structurally was
+    solving a problem they didn't actually have. soc-attacker's own
+    no-internet guarantee goes back to per-container iptables instead (see
+    reset.sh --attacker), same proven approach as before this refactor,
+    just applied across all three of its interfaces now that it's
+    multi-homed. wordpress-netlock/juiceshop-netlock (compose.yaml) cover
+    those two targets the same way they always did."""
     for net in LAB_NETWORKS:
         if _network_exists(net.compose_name):
             print(f"[net_topology] {net.compose_name} already exists")
             continue
-        print(f"[net_topology] creating {net.compose_name} ({net.subnet}, internal)")
+        print(f"[net_topology] creating {net.compose_name} ({net.subnet})")
         subprocess.run(
             [
                 "docker", "network", "create",
                 "--driver", "bridge",
-                "--internal",
                 "--subnet", str(net.subnet),
                 "--gateway", str(net.gateway),
                 "--opt", f"com.docker.network.bridge.name={net.bridge_iface}",
