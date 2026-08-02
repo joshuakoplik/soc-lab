@@ -2,6 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+echo "[*] Ensuring per-mode lab networks exist (soclab-easy/hard/wordpress, each internal-only)..."
+python3 pipeline/net_topology.py --bootstrap
+
 echo "[*] Creating log directories..."
 mkdir -p logs/cowrie logs/nginx
 
