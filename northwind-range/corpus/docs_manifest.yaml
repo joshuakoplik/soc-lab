@@ -1,0 +1,1802 @@
+documents:
+- tenant: riverside
+  department: Admin
+  category: policies
+  topic: Acceptable Use Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-policies-00-acceptable-use-policy
+- tenant: riverside
+  department: Admin
+  category: policies
+  topic: Incident Escalation Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-policies-01-incident-escalation-policy
+- tenant: riverside
+  department: Admin
+  category: policies
+  topic: Code of Conduct
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-policies-02-code-of-conduct
+- tenant: riverside
+  department: Admin
+  category: policies
+  topic: Remote Work Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-policies-03-remote-work-policy
+- tenant: riverside
+  department: Admin
+  category: policies
+  topic: Data Retention Policy
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-policies-04-data-retention-policy
+- tenant: riverside
+  department: Admin
+  category: policies
+  topic: Vendor Access Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-policies-05-vendor-access-policy
+- tenant: riverside
+  department: Admin
+  category: policies
+  topic: Information Security Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-policies-06-information-security-policy
+- tenant: riverside
+  department: Admin
+  category: policies
+  topic: Expense Reimbursement Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-policies-07-expense-reimbursement-policy
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: Database Failover Runbook
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-00-database-failover-runbook
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: Disaster Recovery Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-01-disaster-recovery-runbook
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: Incident Postmortem Template
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-02-incident-postmortem-template
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: Certificate Rotation Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-03-certificate-rotation-runbook
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: Backup Restoration Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-04-backup-restoration-runbook
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: API Gateway Outage Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-05-api-gateway-outage-runbook
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: Load Balancer Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-06-load-balancer-runbook
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: Production Deploy Runbook
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-07-production-deploy-runbook
+- tenant: riverside
+  department: Engineering
+  category: runbooks
+  topic: On-Call Escalation Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-runbooks-08-on-call-escalation-runbook
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Login Issue Macro
+  label: public
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-00-login-issue-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Billing Dispute Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-01-billing-dispute-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Escalation to Engineering Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-02-escalation-to-engineering-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Data Export Request Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-03-data-export-request-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Account Cancellation Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-04-account-cancellation-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Password Reset Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-05-password-reset-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Refund Request Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-06-refund-request-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Subscription Upgrade Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-07-subscription-upgrade-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Bug Report Triage Macro
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-08-bug-report-triage-macro
+- tenant: riverside
+  department: Support
+  category: support_macros
+  topic: Shipping Delay Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-support-macros-09-shipping-delay-macro
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: API Rate Limits FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-00-api-rate-limits-faq
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: Integrations FAQ
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-01-integrations-faq
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: Mobile App FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-02-mobile-app-faq
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: Cancellation FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-03-cancellation-faq
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: Pricing Plans FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-04-pricing-plans-faq
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: Account Security FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-05-account-security-faq
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: Data Privacy FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-06-data-privacy-faq
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: Billing FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-07-billing-faq
+- tenant: riverside
+  department: Support
+  category: product_faq
+  topic: Getting Started FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-product-faq-08-getting-started-faq
+- tenant: riverside
+  department: HR
+  category: hr_material
+  topic: Org Chart and Reporting Lines
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-hr-material-00-org-chart-and-reporting-lines
+- tenant: riverside
+  department: HR
+  category: hr_material
+  topic: Benefits Enrollment Guide
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-hr-material-01-benefits-enrollment-guide
+- tenant: riverside
+  department: HR
+  category: hr_material
+  topic: PTO and Leave Policy
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-hr-material-02-pto-and-leave-policy
+- tenant: riverside
+  department: HR
+  category: hr_material
+  topic: Compensation Bands Overview
+  label: confidential
+  shares:
+  - Finance
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-hr-material-03-compensation-bands-overview
+- tenant: riverside
+  department: HR
+  category: hr_material
+  topic: Workplace Conduct Guidelines
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-hr-material-04-workplace-conduct-guidelines
+- tenant: riverside
+  department: HR
+  category: hr_material
+  topic: Performance Review Process
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-hr-material-05-performance-review-process
+- tenant: riverside
+  department: HR
+  category: hr_material
+  topic: Employee Onboarding Guide
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-hr-material-06-employee-onboarding-guide
+- tenant: riverside
+  department: HR
+  category: hr_material
+  topic: Termination Procedure
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-hr-material-07-termination-procedure
+- tenant: riverside
+  department: Finance
+  category: financial_summaries
+  topic: Investor Update Draft
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-financial-summaries-00-investor-update-draft
+- tenant: riverside
+  department: Finance
+  category: financial_summaries
+  topic: Capital Expenditure Report
+  label: restricted
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-financial-summaries-01-capital-expenditure-report
+- tenant: riverside
+  department: Finance
+  category: financial_summaries
+  topic: Vendor Spend Report
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-financial-summaries-02-vendor-spend-report
+- tenant: riverside
+  department: Finance
+  category: financial_summaries
+  topic: Quarterly Revenue Summary
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-financial-summaries-03-quarterly-revenue-summary
+- tenant: riverside
+  department: Finance
+  category: financial_summaries
+  topic: Payroll Cost Summary
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-financial-summaries-04-payroll-cost-summary
+- tenant: riverside
+  department: Finance
+  category: financial_summaries
+  topic: Departmental Budget Variance Report
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-financial-summaries-05-departmental-budget-variance-report
+- tenant: riverside
+  department: Finance
+  category: financial_summaries
+  topic: Cash Flow Statement
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-financial-summaries-06-cash-flow-statement
+- tenant: riverside
+  department: Finance
+  category: financial_summaries
+  topic: Annual Budget Overview
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-financial-summaries-07-annual-budget-overview
+- tenant: riverside
+  department: Engineering
+  category: engineering_design_notes
+  topic: Competitive Technical Analysis
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: riverside-engineering-design-notes-00-competitive-technical-analysis
+- tenant: riverside
+  department: Engineering
+  category: engineering_design_notes
+  topic: Multi-Region Failover Design
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: riverside-engineering-design-notes-01-multi-region-failover-design
+- tenant: riverside
+  department: Engineering
+  category: engineering_design_notes
+  topic: Data Pipeline Architecture
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: riverside-engineering-design-notes-02-data-pipeline-architecture
+- tenant: riverside
+  department: Engineering
+  category: engineering_design_notes
+  topic: Storage Tiering Proposal
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-engineering-design-notes-03-storage-tiering-proposal
+- tenant: riverside
+  department: Engineering
+  category: engineering_design_notes
+  topic: Service Mesh Migration Design
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-engineering-design-notes-04-service-mesh-migration-design
+- tenant: riverside
+  department: Engineering
+  category: engineering_design_notes
+  topic: Authentication System Redesign
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-engineering-design-notes-05-authentication-system-redesign
+- tenant: riverside
+  department: Engineering
+  category: engineering_design_notes
+  topic: Internal ML Platform Design
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-engineering-design-notes-06-internal-ml-platform-design
+- tenant: riverside
+  department: Engineering
+  category: engineering_design_notes
+  topic: API Versioning Strategy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: riverside-engineering-design-notes-07-api-versioning-strategy
+- tenant: bluepeak
+  department: Admin
+  category: policies
+  topic: Code of Conduct
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-policies-00-code-of-conduct
+- tenant: bluepeak
+  department: Admin
+  category: policies
+  topic: Expense Reimbursement Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-policies-01-expense-reimbursement-policy
+- tenant: bluepeak
+  department: Admin
+  category: policies
+  topic: Incident Escalation Policy
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-policies-02-incident-escalation-policy
+- tenant: bluepeak
+  department: Admin
+  category: policies
+  topic: Information Security Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-policies-03-information-security-policy
+- tenant: bluepeak
+  department: Admin
+  category: policies
+  topic: Data Retention Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-policies-04-data-retention-policy
+- tenant: bluepeak
+  department: Admin
+  category: policies
+  topic: Acceptable Use Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-policies-05-acceptable-use-policy
+- tenant: bluepeak
+  department: Admin
+  category: policies
+  topic: Remote Work Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-policies-06-remote-work-policy
+- tenant: bluepeak
+  department: Admin
+  category: policies
+  topic: Vendor Access Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-policies-07-vendor-access-policy
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: Certificate Rotation Runbook
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-00-certificate-rotation-runbook
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: Disaster Recovery Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-01-disaster-recovery-runbook
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: Database Failover Runbook
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-02-database-failover-runbook
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: Incident Postmortem Template
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-03-incident-postmortem-template
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: API Gateway Outage Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-04-api-gateway-outage-runbook
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: Production Deploy Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-05-production-deploy-runbook
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: Backup Restoration Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-06-backup-restoration-runbook
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: Load Balancer Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-07-load-balancer-runbook
+- tenant: bluepeak
+  department: Engineering
+  category: runbooks
+  topic: On-Call Escalation Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-runbooks-08-on-call-escalation-runbook
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Billing Dispute Macro
+  label: internal
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-00-billing-dispute-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Data Export Request Macro
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-01-data-export-request-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Account Cancellation Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-02-account-cancellation-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Refund Request Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-03-refund-request-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Subscription Upgrade Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-04-subscription-upgrade-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Password Reset Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-05-password-reset-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Bug Report Triage Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-06-bug-report-triage-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Shipping Delay Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-07-shipping-delay-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Escalation to Engineering Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-08-escalation-to-engineering-macro
+- tenant: bluepeak
+  department: Support
+  category: support_macros
+  topic: Login Issue Macro
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-support-macros-09-login-issue-macro
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: API Rate Limits FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-00-api-rate-limits-faq
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: Account Security FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-01-account-security-faq
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: Pricing Plans FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-02-pricing-plans-faq
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: Billing FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-03-billing-faq
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: Mobile App FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-04-mobile-app-faq
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: Data Privacy FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-05-data-privacy-faq
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: Integrations FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-06-integrations-faq
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: Getting Started FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-07-getting-started-faq
+- tenant: bluepeak
+  department: Support
+  category: product_faq
+  topic: Cancellation FAQ
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-product-faq-08-cancellation-faq
+- tenant: bluepeak
+  department: HR
+  category: hr_material
+  topic: PTO and Leave Policy
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-hr-material-00-pto-and-leave-policy
+- tenant: bluepeak
+  department: HR
+  category: hr_material
+  topic: Compensation Bands Overview
+  label: internal
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-hr-material-01-compensation-bands-overview
+- tenant: bluepeak
+  department: HR
+  category: hr_material
+  topic: Termination Procedure
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-hr-material-02-termination-procedure
+- tenant: bluepeak
+  department: HR
+  category: hr_material
+  topic: Workplace Conduct Guidelines
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-hr-material-03-workplace-conduct-guidelines
+- tenant: bluepeak
+  department: HR
+  category: hr_material
+  topic: Employee Onboarding Guide
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-hr-material-04-employee-onboarding-guide
+- tenant: bluepeak
+  department: HR
+  category: hr_material
+  topic: Org Chart and Reporting Lines
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-hr-material-05-org-chart-and-reporting-lines
+- tenant: bluepeak
+  department: HR
+  category: hr_material
+  topic: Benefits Enrollment Guide
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-hr-material-06-benefits-enrollment-guide
+- tenant: bluepeak
+  department: HR
+  category: hr_material
+  topic: Performance Review Process
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-hr-material-07-performance-review-process
+- tenant: bluepeak
+  department: Finance
+  category: financial_summaries
+  topic: Annual Budget Overview
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-financial-summaries-00-annual-budget-overview
+- tenant: bluepeak
+  department: Finance
+  category: financial_summaries
+  topic: Capital Expenditure Report
+  label: restricted
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-financial-summaries-01-capital-expenditure-report
+- tenant: bluepeak
+  department: Finance
+  category: financial_summaries
+  topic: Vendor Spend Report
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-financial-summaries-02-vendor-spend-report
+- tenant: bluepeak
+  department: Finance
+  category: financial_summaries
+  topic: Investor Update Draft
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-financial-summaries-03-investor-update-draft
+- tenant: bluepeak
+  department: Finance
+  category: financial_summaries
+  topic: Departmental Budget Variance Report
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-financial-summaries-04-departmental-budget-variance-report
+- tenant: bluepeak
+  department: Finance
+  category: financial_summaries
+  topic: Quarterly Revenue Summary
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-financial-summaries-05-quarterly-revenue-summary
+- tenant: bluepeak
+  department: Finance
+  category: financial_summaries
+  topic: Payroll Cost Summary
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-financial-summaries-06-payroll-cost-summary
+- tenant: bluepeak
+  department: Finance
+  category: financial_summaries
+  topic: Cash Flow Statement
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-financial-summaries-07-cash-flow-statement
+- tenant: bluepeak
+  department: Engineering
+  category: engineering_design_notes
+  topic: Service Mesh Migration Design
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: bluepeak-engineering-design-notes-00-service-mesh-migration-design
+- tenant: bluepeak
+  department: Engineering
+  category: engineering_design_notes
+  topic: Competitive Technical Analysis
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: true
+  slug: bluepeak-engineering-design-notes-01-competitive-technical-analysis
+- tenant: bluepeak
+  department: Engineering
+  category: engineering_design_notes
+  topic: Multi-Region Failover Design
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: bluepeak-engineering-design-notes-02-multi-region-failover-design
+- tenant: bluepeak
+  department: Engineering
+  category: engineering_design_notes
+  topic: Internal ML Platform Design
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-engineering-design-notes-03-internal-ml-platform-design
+- tenant: bluepeak
+  department: Engineering
+  category: engineering_design_notes
+  topic: Data Pipeline Architecture
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-engineering-design-notes-04-data-pipeline-architecture
+- tenant: bluepeak
+  department: Engineering
+  category: engineering_design_notes
+  topic: API Versioning Strategy
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-engineering-design-notes-05-api-versioning-strategy
+- tenant: bluepeak
+  department: Engineering
+  category: engineering_design_notes
+  topic: Authentication System Redesign
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-engineering-design-notes-06-authentication-system-redesign
+- tenant: bluepeak
+  department: Engineering
+  category: engineering_design_notes
+  topic: Storage Tiering Proposal
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: bluepeak-engineering-design-notes-07-storage-tiering-proposal
+- tenant: fenwick
+  department: Admin
+  category: policies
+  topic: Information Security Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-policies-00-information-security-policy
+- tenant: fenwick
+  department: Admin
+  category: policies
+  topic: Data Retention Policy
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-policies-01-data-retention-policy
+- tenant: fenwick
+  department: Admin
+  category: policies
+  topic: Vendor Access Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-policies-02-vendor-access-policy
+- tenant: fenwick
+  department: Admin
+  category: policies
+  topic: Code of Conduct
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-policies-03-code-of-conduct
+- tenant: fenwick
+  department: Admin
+  category: policies
+  topic: Incident Escalation Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-policies-04-incident-escalation-policy
+- tenant: fenwick
+  department: Admin
+  category: policies
+  topic: Acceptable Use Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-policies-05-acceptable-use-policy
+- tenant: fenwick
+  department: Admin
+  category: policies
+  topic: Remote Work Policy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-policies-06-remote-work-policy
+- tenant: fenwick
+  department: Admin
+  category: policies
+  topic: Expense Reimbursement Policy
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-policies-07-expense-reimbursement-policy
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: Certificate Rotation Runbook
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-00-certificate-rotation-runbook
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: Load Balancer Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-01-load-balancer-runbook
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: Production Deploy Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-02-production-deploy-runbook
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: API Gateway Outage Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-03-api-gateway-outage-runbook
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: Backup Restoration Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-04-backup-restoration-runbook
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: Disaster Recovery Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-05-disaster-recovery-runbook
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: On-Call Escalation Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-06-on-call-escalation-runbook
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: Incident Postmortem Template
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-07-incident-postmortem-template
+- tenant: fenwick
+  department: Engineering
+  category: runbooks
+  topic: Database Failover Runbook
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-runbooks-08-database-failover-runbook
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Shipping Delay Macro
+  label: internal
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-00-shipping-delay-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Account Cancellation Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-01-account-cancellation-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Data Export Request Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-02-data-export-request-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Refund Request Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-03-refund-request-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Billing Dispute Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-04-billing-dispute-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Escalation to Engineering Macro
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-05-escalation-to-engineering-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Bug Report Triage Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-06-bug-report-triage-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Password Reset Macro
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-07-password-reset-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Subscription Upgrade Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-08-subscription-upgrade-macro
+- tenant: fenwick
+  department: Support
+  category: support_macros
+  topic: Login Issue Macro
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-support-macros-09-login-issue-macro
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: Data Privacy FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-00-data-privacy-faq
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: Pricing Plans FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-01-pricing-plans-faq
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: Cancellation FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-02-cancellation-faq
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: Integrations FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-03-integrations-faq
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: API Rate Limits FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-04-api-rate-limits-faq
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: Account Security FAQ
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-05-account-security-faq
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: Getting Started FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-06-getting-started-faq
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: Billing FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-07-billing-faq
+- tenant: fenwick
+  department: Support
+  category: product_faq
+  topic: Mobile App FAQ
+  label: public
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-product-faq-08-mobile-app-faq
+- tenant: fenwick
+  department: HR
+  category: hr_material
+  topic: Workplace Conduct Guidelines
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-hr-material-00-workplace-conduct-guidelines
+- tenant: fenwick
+  department: HR
+  category: hr_material
+  topic: Benefits Enrollment Guide
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-hr-material-01-benefits-enrollment-guide
+- tenant: fenwick
+  department: HR
+  category: hr_material
+  topic: Employee Onboarding Guide
+  label: internal
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-hr-material-02-employee-onboarding-guide
+- tenant: fenwick
+  department: HR
+  category: hr_material
+  topic: Performance Review Process
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-hr-material-03-performance-review-process
+- tenant: fenwick
+  department: HR
+  category: hr_material
+  topic: PTO and Leave Policy
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-hr-material-04-pto-and-leave-policy
+- tenant: fenwick
+  department: HR
+  category: hr_material
+  topic: Compensation Bands Overview
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-hr-material-05-compensation-bands-overview
+- tenant: fenwick
+  department: HR
+  category: hr_material
+  topic: Termination Procedure
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-hr-material-06-termination-procedure
+- tenant: fenwick
+  department: HR
+  category: hr_material
+  topic: Org Chart and Reporting Lines
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-hr-material-07-org-chart-and-reporting-lines
+- tenant: fenwick
+  department: Finance
+  category: financial_summaries
+  topic: Payroll Cost Summary
+  label: restricted
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-financial-summaries-00-payroll-cost-summary
+- tenant: fenwick
+  department: Finance
+  category: financial_summaries
+  topic: Vendor Spend Report
+  label: confidential
+  shares: []
+  contains_pii: true
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-financial-summaries-01-vendor-spend-report
+- tenant: fenwick
+  department: Finance
+  category: financial_summaries
+  topic: Cash Flow Statement
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-financial-summaries-02-cash-flow-statement
+- tenant: fenwick
+  department: Finance
+  category: financial_summaries
+  topic: Quarterly Revenue Summary
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-financial-summaries-03-quarterly-revenue-summary
+- tenant: fenwick
+  department: Finance
+  category: financial_summaries
+  topic: Investor Update Draft
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-financial-summaries-04-investor-update-draft
+- tenant: fenwick
+  department: Finance
+  category: financial_summaries
+  topic: Capital Expenditure Report
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-financial-summaries-05-capital-expenditure-report
+- tenant: fenwick
+  department: Finance
+  category: financial_summaries
+  topic: Annual Budget Overview
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-financial-summaries-06-annual-budget-overview
+- tenant: fenwick
+  department: Finance
+  category: financial_summaries
+  topic: Departmental Budget Variance Report
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-financial-summaries-07-departmental-budget-variance-report
+- tenant: fenwick
+  department: Engineering
+  category: engineering_design_notes
+  topic: API Versioning Strategy
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: fenwick-engineering-design-notes-00-api-versioning-strategy
+- tenant: fenwick
+  department: Engineering
+  category: engineering_design_notes
+  topic: Internal ML Platform Design
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: fenwick-engineering-design-notes-01-internal-ml-platform-design
+- tenant: fenwick
+  department: Engineering
+  category: engineering_design_notes
+  topic: Authentication System Redesign
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: true
+  mislabeled_restricted_quote: false
+  slug: fenwick-engineering-design-notes-02-authentication-system-redesign
+- tenant: fenwick
+  department: Engineering
+  category: engineering_design_notes
+  topic: Competitive Technical Analysis
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-engineering-design-notes-03-competitive-technical-analysis
+- tenant: fenwick
+  department: Engineering
+  category: engineering_design_notes
+  topic: Multi-Region Failover Design
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-engineering-design-notes-04-multi-region-failover-design
+- tenant: fenwick
+  department: Engineering
+  category: engineering_design_notes
+  topic: Service Mesh Migration Design
+  label: confidential
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-engineering-design-notes-05-service-mesh-migration-design
+- tenant: fenwick
+  department: Engineering
+  category: engineering_design_notes
+  topic: Data Pipeline Architecture
+  label: internal
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-engineering-design-notes-06-data-pipeline-architecture
+- tenant: fenwick
+  department: Engineering
+  category: engineering_design_notes
+  topic: Storage Tiering Proposal
+  label: restricted
+  shares: []
+  contains_pii: false
+  contains_credential: false
+  mislabeled_restricted_quote: false
+  slug: fenwick-engineering-design-notes-07-storage-tiering-proposal
