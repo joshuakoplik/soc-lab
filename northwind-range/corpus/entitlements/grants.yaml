@@ -1,0 +1,20 @@
+# SPEC.md §6.1 messy cases. Timestamps are fixed (not .seed-derived) so
+# "currently active" / "already revoked" status is stable and doesn't drift
+# with wall-clock time across re-seeds.
+grants:
+  # "a Support user with a time-boxed Engineering grant" -- currently active
+  # (expires in the future).
+  - username: maria.support
+    department: Engineering
+    granted_at: "2026-06-01T00:00:00Z"
+    expires_at: "2026-12-01T00:00:00Z"
+
+  # "a user whose grant was revoked mid-corpus, for testing stale context" --
+  # milestone 3/9 should pick corpus/ingestion timestamps that straddle
+  # revoked_at below so the "stale entitlement" attack category (SPEC.md
+  # §9.2) has something real to test: content retrieved while this grant was
+  # still active, then referenced again after it was revoked.
+  - username: olivia.hr
+    department: Finance
+    granted_at: "2026-05-01T00:00:00Z"
+    revoked_at: "2026-07-01T00:00:00Z"

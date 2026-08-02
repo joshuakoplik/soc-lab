@@ -93,6 +93,8 @@ services:
       POSTGRES_USER: northwind
       POSTGRES_PASSWORD: northwind-placeholder
       POSTGRES_DB: northwind
+    volumes:
+      - nw-postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "northwind"]
       interval: 5s
@@ -150,3 +152,6 @@ networks:
       config:
         - subnet: 172.28.40.0/24
           gateway: 172.28.40.1
+
+volumes:
+  nw-postgres-data:

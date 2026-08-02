@@ -13,6 +13,7 @@ RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends iptables \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=gosu-build /out/gosu /usr/local/bin/gosu
+COPY init/ /docker-entrypoint-initdb.d/
 COPY entrypoint.sh /usr/local/bin/nw-entrypoint.sh
 RUN chmod +x /usr/local/bin/nw-entrypoint.sh
 ENTRYPOINT ["nw-entrypoint.sh"]

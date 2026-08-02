@@ -1,18 +1,26 @@
-.PHONY: up down reset verify
+PY := $(shell [ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
+
+.PHONY: up down reset seed verify
 
 up:
-	docker compose up -d --build
+	docker compose up -d --build --wait
 
 down:
 	docker compose down
 
-# Milestone 1: no seed/corpus/entitlement state exists yet, so "known-good
-# state" is just a clean rebuild. Milestone 2+ extends this to also
-# regenerate .seed and reload corpus/entitlements per SPEC.md §0.4.
+# SPEC.md §0.4: fresh randomized secrets, no manual steps -- down -v wipes
+# the postgres volume so services/postgres/init/*.sql re-runs on next up,
+# then seed reloads entitlement data (deriving fresh passwords if .seed
+# was also deleted; stable passwords otherwise, see seed_entitlements.py).
 reset:
 	docker compose down -v
-	docker compose up -d --build
+	docker compose up -d --build --wait
+	$(MAKE) seed
+
+seed:
+	$(PY) scripts/seed_entitlements.py
 
 verify:
 	./scripts/verify-isolation.sh
 	./scripts/verify-no-cves.sh
+	./scripts/verify-schema.sh

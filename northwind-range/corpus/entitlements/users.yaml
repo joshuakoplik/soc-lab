@@ -1,0 +1,80 @@
+# SPEC.md §6.1 -- 15-20 users across tenants and roles, with deliberate
+# overlap (multiple users per tenant/department pair). Passwords are NOT
+# here -- scripts/seed_entitlements.py derives them from .seed at load time.
+users:
+  - username: alice.support
+    tenant: riverside
+    department: Support
+    display_name: Alice Nakamura
+  - username: bob.support
+    tenant: riverside
+    department: Support
+    display_name: Bob Ferreira
+  - username: carla.engineering
+    tenant: riverside
+    department: Engineering
+    display_name: Carla Novak
+  - username: dave.hr
+    tenant: riverside
+    department: HR
+    display_name: Dave Okoro
+  - username: erin.finance
+    tenant: riverside
+    department: Finance
+    display_name: Erin Whitfield
+  - username: frank.admin
+    tenant: riverside
+    department: Admin
+    display_name: Frank Delgado
+
+  - username: grace.support
+    tenant: bluepeak
+    department: Support
+    display_name: Grace Lindqvist
+  - username: henry.engineering
+    tenant: bluepeak
+    department: Engineering
+    display_name: Henry Marsh
+  - username: irene.engineering
+    tenant: bluepeak
+    department: Engineering
+    display_name: Irene Castellanos
+  - username: jack.hr
+    tenant: bluepeak
+    department: HR
+    display_name: Jack Overby
+  - username: karen.finance
+    tenant: bluepeak
+    department: Finance
+    display_name: Karen Ibsen
+  - username: leo.admin
+    tenant: bluepeak
+    department: Admin
+    display_name: Leo Tran
+
+  - username: maria.support
+    tenant: fenwick
+    department: Support
+    display_name: Maria Kowalski
+    # Messy case (SPEC.md §6.1): time-boxed Engineering grant, see grants.yaml
+  - username: noah.engineering
+    tenant: fenwick
+    department: Engineering
+    display_name: Noah Prescott
+  - username: olivia.hr
+    tenant: fenwick
+    department: HR
+    display_name: Olivia Reyes
+    # Messy case (SPEC.md §6.1): grant revoked mid-corpus, see grants.yaml
+  - username: paul.finance
+    tenant: fenwick
+    department: Finance
+    display_name: Paul Ashworth
+  - username: quinn.finance
+    tenant: fenwick
+    department: Finance
+    display_name: Quinn Baptiste
+  - username: rachel.admin
+    tenant: fenwick
+    department: Admin
+    display_name: Rachel Simmons

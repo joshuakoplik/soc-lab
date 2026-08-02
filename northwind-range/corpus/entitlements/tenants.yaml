@@ -1,0 +1,9 @@
+# SPEC.md §6.1 -- 3 customer orgs, hard isolation. Committed and versioned,
+# not .seed-random (same "comparability" reasoning as the real corpus).
+tenants:
+  - slug: riverside
+    name: Riverside Cargo Co.
+  - slug: bluepeak
+    name: Bluepeak Retail Group
+  - slug: fenwick
+    name: Fenwick Analytics

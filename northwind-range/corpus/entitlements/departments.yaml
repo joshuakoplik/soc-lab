@@ -1,0 +1,8 @@
+# SPEC.md §6.1 -- serves both a user's "role" and a document's "owning
+# department" (see services/postgres/init/001_schema.sql's comment).
+departments:
+  - Support
+  - Engineering
+  - HR
+  - Finance
+  - Admin
