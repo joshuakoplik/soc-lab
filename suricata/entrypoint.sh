@@ -1,7 +1,6 @@
 #!/bin/sh
 set -e
 
-IFACE="${SURICATA_IFACE:-soclab0}"
 BASE=/etc/suricata/suricata.yaml
 OVER=/overrides.yaml
 MERGED=/tmp/suricata-merged.yaml
@@ -72,12 +71,40 @@ fi
 echo "[suricata] validating config + ruleset (-T)..."
 suricata -T -c "$MERGED" -v 2>&1 | grep -E "error|Error|ERROR|successfully|Configuration provided" | tail -8 || true
 
-# --- 4. Wait for the bridge, then run ---------------------------------------
+# --- 4. Discover every lab bridge, then run ---------------------------------
+# One interface per mode network now (soclab-easy0, soclab-hard0,
+# soclab-wp0, ... -- see pipeline/net_topology.py), not the single fixed
+# "soclab0" this used to wait for. Self-discovery off the naming
+# convention means a future mode needs zero changes here: multiple -i
+# flags in one Suricata invocation is its own documented mechanism for
+# multi-interface af-packet capture, not something this script has to
+# implement itself. SURICATA_IFACES (plural, space-separated) is kept as
+# an explicit operator override for debugging -- SURICATA_IFACE
+# (singular) is gone along with the single-bridge assumption it implied.
+discover_ifaces() {
+  ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^soclab-[a-z]+0$' | sort
+}
+
 for i in $(seq 1 30); do
-  if ip link show "$IFACE" >/dev/null 2>&1; then break; fi
-  echo "[suricata] waiting for interface $IFACE ($i)..."
+  [ -n "$(discover_ifaces)" ] && break
+  echo "[suricata] waiting for a soclab-*0 bridge to exist ($i)..."
   sleep 1
 done
 
-echo "[suricata] starting on $IFACE"
-exec suricata -c "$MERGED" -i "$IFACE"
+IFACES="${SURICATA_IFACES:-$(discover_ifaces)}"
+if [ -z "$IFACES" ]; then
+  echo "[suricata] FATAL: no soclab-*0 bridge interfaces found -- has"
+  echo "[suricata] pipeline/net_topology.py --bootstrap run yet? (setup.sh / lab-mode.sh do this)"
+  exit 1
+fi
+
+IFACE_ARGS=""
+IFACE_LIST=""
+for i in $IFACES; do
+  IFACE_ARGS="$IFACE_ARGS -i $i"
+  IFACE_LIST="$IFACE_LIST $i"
+done
+
+echo "[suricata] starting on:$IFACE_LIST"
+# shellcheck disable=SC2086
+exec suricata -c "$MERGED" $IFACE_ARGS
