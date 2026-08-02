@@ -219,8 +219,14 @@ FLAG_RE = re.compile(r"FLAG\{[^}]+\}")
 
 # Juice Shop is only reachable from the host via nginx's published port --
 # soc-attacker (inside the bridge) uses the bare hostname instead; see the
-# tool_* functions below for that distinction.
-JUICESHOP_HOST_URL = "http://localhost:8080"
+# tool_* functions below for that distinction. Two different host ports now
+# (nginx-easy/nginx-hard can both be up at once, see compose.yaml) -- keyed
+# by mode rather than a single constant.
+JUICESHOP_HOST_PORTS = {"easy": 8080, "hard": 8081}
+
+
+def _juiceshop_host_url():
+    return f"http://localhost:{JUICESHOP_HOST_PORTS.get(lab_modes.current_mode(), 8080)}"
 
 
 # ---------------------------------------------------------------------------
@@ -2281,7 +2287,7 @@ def _check_juiceshop_flags(conn, session_id, pending_action_id):
     if not ctf_key:
         return
     try:
-        with urllib.request.urlopen(f"{JUICESHOP_HOST_URL}/api/Challenges", timeout=10) as r:
+        with urllib.request.urlopen(f"{_juiceshop_host_url()}/api/Challenges", timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
         return

@@ -103,11 +103,18 @@ ALLOWED_MSF_MODULES = {
 # Shop's CTF flags are per-challenge, an open-ended number depending on how
 # much gets solved -- doesn't fit a simple integer); wordpress is the one
 # mode with a small, fixed, deliberately-planted count.
+# "network": which pipeline/net_topology.py entry (by its own .mode key)
+# this mode's containers live on -- not consulted by validate_target()
+# (stays purely name-based, unchanged), but makes the mode<->network
+# relationship explicit and machine-checkable rather than left implicit,
+# and is what executor.py's resolve_target_ip()/attacker_ip()/rotate_ip()
+# default to when no mode is passed explicitly.
 EASY = {
     "targets": ("cowrie", "nginx", "metasploitable"),
     "gated_tools": ("hydra_bruteforce", "sqlmap_scan", "ssh_exec", "msf_run_module", "shell_exec"),
     "msf_modules": ALLOWED_MSF_MODULES,
     "expected_flags": None,
+    "network": "easy",
 }
 
 HARD = {
@@ -115,6 +122,7 @@ HARD = {
     "gated_tools": ("sqlmap_scan", "shell_exec"),
     "msf_modules": {},
     "expected_flags": None,
+    "network": "hard",
 }
 
 # sqlmap_scan/hydra_bruteforce/ssh_exec/msf_run_module all gate on a target
@@ -127,6 +135,7 @@ WORDPRESS = {
     # see wordpress/README -- /var/www/flag1.txt (any code exec) and
     # /root/flag2.txt (root only, via CVE-2025-32463).
     "expected_flags": 2,
+    "network": "wordpress",
 }
 
 MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS}
