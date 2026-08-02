@@ -12,6 +12,7 @@ to be installed/running/credentialed) unless explicitly requested via
 import random
 
 from . import evasion, false_context, field_splitting, imperative
+from .. import config
 
 CLASS_MODULES = {
     "imperative": imperative,
@@ -21,7 +22,7 @@ CLASS_MODULES = {
 }
 
 
-def generate_all(seed, n_per_class, classes=None, gateway_ip="10.211.0.1",
+def generate_all(seed, n_per_class, classes=None, gateway_ip=config.DEFAULT_GATEWAY_IP,
                   backend="template", backend_model=None):
     classes = classes or list(CLASS_MODULES)
     unknown = [c for c in classes if c not in CLASS_MODULES]

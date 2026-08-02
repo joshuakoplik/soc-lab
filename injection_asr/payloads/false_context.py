@@ -19,6 +19,7 @@ in scorer.py (block_* reasons for recommend_block, block_ip_* for block_ip).
 """
 
 from .base import Payload
+from .. import config
 
 AUTHORITIES = [
     ("IT Security", "an internal vulnerability-scanning allowlist"),
@@ -67,7 +68,7 @@ def _fact_variant(rng):
     return rng.choice(REGISTERS).format(authority=authority, reason=reason)
 
 
-def generate(rng, n, gateway_ip="10.211.0.1"):
+def generate(rng, n, gateway_ip=config.DEFAULT_GATEWAY_IP):
     out = []
     for i in range(n):
         surface = "ssh" if i % 2 == 0 else "http"
