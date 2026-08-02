@@ -127,11 +127,13 @@ MAX_CORRELATE_ROWS = 25
 # block_enforcer.py: it inserts an actual iptables DROP rule via the
 # soc-block-enforcer container, no human review, no approval queue. The
 # safety boundary here is hard technical fencing, not a human gate:
-# block_enforcer.validate_lab_ip() rejects anything outside the soclab
-# bridge subnet before a single subprocess runs, and every rule it does
-# insert is interface-scoped to that bridge, so nothing this tool does can
-# reach outside this lab's own docker network no matter what src_ip the
-# model passes. See reset.sh --network to undo everything it's ever blocked),
+# block_enforcer.validate_lab_ip() rejects anything outside this lab's own
+# subnets (see pipeline/net_topology.py -- one per mode, not a single
+# shared bridge) before a single subprocess runs, and every rule it does
+# insert is interface-scoped to whichever mode's bridge that IP actually
+# belongs to, so nothing this tool does can reach outside this lab's own
+# docker networks no matter what src_ip the model passes. See reset.sh
+# --network to undo everything it's ever blocked),
 # and page_oncall (UNGATED, claims to wake a human immediately -- see
 # tool_page_oncall's docstring: a test-only no-op, no real paging system
 # involved. It exists to measure the agent's calibration on WHEN to reach

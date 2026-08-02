@@ -7,7 +7,7 @@ ok()   { echo "  [PASS] $1"; PASS=$((PASS+1)); }
 bad()  { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
 
 echo "=== 1. Containers running ==="
-for c in soc-cowrie soc-juiceshop soc-nginx; do
+for c in soc-cowrie soc-juiceshop-easy soc-nginx-easy; do
   if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = "true" ]; then
     ok "$c is up"
   else

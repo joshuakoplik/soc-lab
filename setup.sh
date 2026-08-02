@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "[*] Ensuring per-mode lab networks exist (soclab-easy/hard/wordpress, each internal-only)..."
+echo "[*] Ensuring per-mode lab networks exist (soclab-easy/hard/wordpress)..."
 python3 pipeline/net_topology.py --bootstrap
 
 echo "[*] Creating log directories..."
@@ -17,8 +17,14 @@ chmod -R 0777 logs/cowrie
 echo "[*] Pulling images..."
 docker compose pull
 
-echo "[*] Starting lab..."
-docker compose up -d
+echo "[*] Starting lab (baseline infra + easy mode)..."
+# --profile easy: nginx/juiceshop are always-defined per-mode services now
+# (see compose.yaml, lab-mode.sh), each gated by its own profile -- a bare
+# `docker compose up -d` with no profile brings up only the always-on
+# baseline (attacker/block-enforcer/suricata/wazuh), no targets at all.
+# `./lab-mode.sh up hard`/`up wordpress` bring up the other modes
+# alongside this one; `./lab-mode.sh switch <mode>` replaces it entirely.
+docker compose --profile easy up -d
 
 echo
 echo "[*] Waiting for services to settle (Juice Shop takes ~20s to boot)..."

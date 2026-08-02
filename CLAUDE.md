@@ -108,10 +108,12 @@ contract — read them before changing anything here. Key points:
   chain, where inter-container/bridge traffic is filtered). No human gate;
   the safety boundary is hard technical fencing instead —
   `pipeline/triage/block_enforcer.py`'s `validate_lab_ip()` rejects anything
-  outside the soclab bridge subnet before a single subprocess runs, and
-  every rule it does insert is scoped to `-i soclab0` (the lab's own bridge
-  interface) — so this tool cannot reach outside this lab's own docker
-  network no matter what `src_ip` the model passes. Every call — executed
+  outside this lab's own subnets (one per mode now, not a single shared
+  bridge — see `pipeline/net_topology.py`) before a single subprocess runs,
+  and every rule it does insert is scoped to whichever mode's bridge
+  interface that IP actually belongs to — so this tool cannot reach outside
+  this lab's own docker networks no matter what `src_ip` the model passes.
+  Every call — executed
   or rejected — is logged to `block_ip_calls`. Run `./reset.sh --network` to
   remove every block this has ever put in place. `get_raw_event` exists but
   is deliberately not in `TOOLS` — opt-in only.
@@ -131,7 +133,8 @@ before touching gating logic — the short version:
   `approved=1` via a separate `--approve <id>` call. Approving ≠ executing.
 - **Whitelisted-network exception**: every target currently in `ALLOWED_TARGETS`
   (cowrie, nginx, metasploitable, wordpress) also resolves inside
-  `executor.ALLOWED_NETWORKS` (the `soclab` bridge, `10.211.0.0/24`) — lab-internal
+  `executor.ALLOWED_NETWORKS` (one subnet per mode now, see
+  `pipeline/net_topology.py`, not a single shared bridge) — lab-internal
   and reversible by construction. For those, `propose_action` auto-approves
   (`approved_by="auto-whitelist"`) and executes in the same model turn, no human
   step at all, and the gated executors drop their intensity caps (see the
@@ -143,9 +146,14 @@ before touching gating logic — the short version:
   `msf_run_module` additionally restricts `module` to `lab_modes.ALLOWED_MSF_MODULES`.
 - `shell_exec` is the one tool with **no target allowlist or module allowlist at
   all** at the Python level — its only containment is an iptables OUTPUT lockdown
-  on the `soc-attacker` container applied *outside this codebase* (loopback +
-  `10.211.0.0/24` only, default DROP). Don't enable it against an attacker
-  container that hasn't had that lockdown applied.
+  on the `soc-attacker` container (loopback + every lab subnet from
+  `pipeline/net_topology.py`, default DROP; `soc-attacker` is multi-homed
+  onto all of them at once — see `compose.yaml`). Applied *outside this
+  codebase*, though `./reset.sh --attacker` reapplies it automatically on
+  every rebuild — don't enable `shell_exec` against an attacker container
+  that hasn't had that lockdown applied (a stale image predating the
+  current Dockerfile can silently lack the `iptables` binary needed to
+  apply it at all — confirmed live, see git history if curious).
 - `lab_modes.py` defines what each mode (`easy`/`hard`/`wordpress`) means — which
   targets exist, which gated tools are reachable, which MSF modules are
   allowlisted — but never decides which one is active; `lab-mode.sh` does that,
@@ -179,8 +187,9 @@ infrastructure and deliberately NOT intercepted by this harness:
 path a live triage run does, on purpose, because whether a forged payload can
 trick the model into calling the real block tool on the wrong target is
 exactly what this harness is for. The only safety boundary is
-`block_enforcer.py`'s hard CIDR fence (10.211.0.0/24 only, never the
-gateway) — a rejection prints loudly so a fence hit during a harness run is
+`block_enforcer.py`'s hard CIDR fence (this lab's own subnets only, see
+`pipeline/net_topology.py`, never a subnet's own gateway) — a rejection
+prints loudly so a fence hit during a harness run is
 never mistaken for routine noise. Run `./reset.sh --network` after a run to
 undo anything it blocked (the harness's own DB is already isolated from
 soc.db, so a full `./reset.sh` isn't needed here). `recommend_block` never
