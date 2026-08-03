@@ -293,9 +293,9 @@ def retrieval_search(
 
 def litellm_chat(
     messages: list[dict], tools: list[dict] | None = None,
-    max_tokens: int | None = None, think: bool | None = None,
+    max_tokens: int | None = None, think: bool | None = None, model: str | None = None,
 ) -> dict:
-    payload = {"model": LITELLM_MODEL, "messages": messages}
+    payload = {"model": model or LITELLM_MODEL, "messages": messages}
     if tools:
         payload["tools"] = tools
     if max_tokens:
@@ -588,6 +588,10 @@ def add_token_usage(key: str, tokens: int) -> None:
 
 class ChatRequest(BaseModel):
     message: str
+    # SPEC.md §9.1 -- the harness picks a model per run
+    # ("harness run --model qwen3-8b ..."); portal-api previously baked
+    # LITELLM_MODEL in at container-start time with no per-request override.
+    model: str | None = None
 
 
 @app.post("/chat")
@@ -649,7 +653,7 @@ def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
     msg: dict = {}
 
     for _ in range(MAX_TOOL_TURNS):
-        resp = litellm_chat(messages, tools=TOOL_SCHEMAS)
+        resp = litellm_chat(messages, tools=TOOL_SCHEMAS, model=body.model)
         total_tokens += resp.get("usage", {}).get("total_tokens", 0)
         msg = resp["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []

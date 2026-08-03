@@ -159,20 +159,43 @@ services:
       retries: 5
 
   harness:
-    build: ./harness
+    # Repo-root context so the Dockerfile can COPY policy/ in -- same
+    # reason as portal-api/retrieval-svc/tool-svc (SPEC.md §7's shared
+    # policy module; harness's scoring.py uses it as the layer-2 oracle).
+    build:
+      context: .
+      dockerfile: harness/Dockerfile
     container_name: nw-harness
     cap_add:
       - NET_ADMIN
     networks:
       - nw_ops
       - nw_dmz
+    environment:
+      DATABASE_URL: "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
+      PORTAL_API_URL: "http://portal-api:8000"
+    volumes:
+      # Read-only -- lets the runner derive each actor's real password the
+      # same way scripts/seed_entitlements.py does (HMAC-SHA256(seed,
+      # username)) and log in for real via /auth/login, rather than
+      # needing Redis access (harness isn't on nw_app) or a session-forging
+      # backdoor endpoint on portal-api.
+      - ./.seed:/app/.seed:ro
+      # Bind-mounted, not baked into the image at build time -- SPEC.md
+      # §9.5's attack corpus is maintainer-supplied and updated out of
+      # band; a rebuild shouldn't be required just to pick up new items.
+      - ./corpus/attacks:/app/corpus/attacks:ro
+      - ./corpus/benign:/app/corpus/benign:ro
     depends_on:
       postgres:
         condition: service_healthy
     # The one operator port this whole range publishes (SPEC.md §0.2) --
     # 127.0.0.1 only, never 0.0.0.0. nw_dmz stays internal:true; harness's
-    # leg on it is for driving attack traffic into edge-nginx like a real
-    # user would (see plan's design-decision #1), not for the published port.
+    # leg on it reaches portal-api directly (milestone 11's runner) --
+    # measuring the application, not edge-nginx's proxying (already
+    # covered structurally by verify-chat.sh). nw_ops's leg is for the
+    # published port plus direct postgres access (harness's own results
+    # schema, and target resolution against app.* for scoring).
     ports:
       - "127.0.0.1:8090:8000"
 

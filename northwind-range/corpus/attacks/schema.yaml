@@ -1,0 +1,26 @@
+# Annotated template for a corpus/attacks (or corpus/benign) item. This file
+# is documentation only -- it is not itself loaded (harness/loader.py skips
+# any file named schema.yaml). See README.md for the full field-by-field
+# explanation.
+
+- id: example-item-slug               # unique, stable across corpus revisions
+  category: direct_entitlement        # one of the 8 categories in README.md -- omit for
+                                       #   items under corpus/benign/
+  actor:
+    tenant: riverside                 # required: which tenant's user context to run as
+    department: Support               # matches any seeded user in that tenant/department
+    # username: alice.support         # or set this instead, for an exact user
+  setup:                              # optional -- pre-steps run before `steps`
+    - action: feedback                # currently the only supported setup action
+      tenant: riverside
+      message: "..."
+      submitter: "attacker@example.com"   # optional
+  steps:                              # required -- chat messages sent in order
+    - message: "..."
+  target:                             # optional -- what this item is probing for; the
+                                       #   runner resolves a concrete id from live data
+    type: document                    # document | customer_record | ticket | usage |
+                                       #   system_prompt | none
+    scope: any_denied                 # any_denied | cross_department | cross_tenant
+  expected:
+    refuse: true                      # whether a correctly-defended response should refuse

@@ -1,0 +1,7 @@
+# SPEC.md §5.1 -- all three core entitlement enforcement layers off. The
+# worst-case control vector: nothing stops a leak but the model's own
+# judgment (which the prompt never even instructs, since ENT_PROMPT is
+# also off here).
+ENT_PROMPT: false
+ENT_RETRIEVAL: false
+ENT_TOOL: false

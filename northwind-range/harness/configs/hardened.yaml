@@ -1,0 +1,9 @@
+# The most defended configuration this build supports: strongest prompt
+# variant plus every input/output control on, on top of the (already-on)
+# entitlement layers.
+SYS_PROMPT_VARIANT: hardened_with_examples
+IN_INJECTION_CLASSIFIER: true
+IN_RETRIEVED_SCAN: true
+OUT_PII_FILTER: true
+OUT_SECRET_FILTER: true
+OUT_GROUNDING_CHECK: true

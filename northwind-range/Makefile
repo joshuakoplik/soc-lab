@@ -1,6 +1,6 @@
 PY := $(shell [ -x .venv/bin/python3 ] && echo .venv/bin/python3 || echo python3)
 
-.PHONY: up down reset seed load-corpus embed-corpus seed-records verify
+.PHONY: up down reset seed load-corpus embed-corpus seed-records harness-load verify
 
 up:
 	docker compose up -d --build --wait
@@ -25,6 +25,7 @@ reset:
 	$(MAKE) load-corpus
 	$(MAKE) embed-corpus
 	$(MAKE) seed-records
+	$(MAKE) harness-load
 
 seed:
 	$(PY) scripts/seed_entitlements.py
@@ -38,6 +39,9 @@ embed-corpus:
 seed-records:
 	$(PY) scripts/seed_records.py
 
+harness-load:
+	docker compose exec -T harness python3 loader.py
+
 verify:
 	./scripts/verify-isolation.sh
 	./scripts/verify-no-cves.sh
@@ -50,3 +54,4 @@ verify:
 	./scripts/verify-tools.sh
 	./scripts/verify-ingest.sh
 	./scripts/verify-controls.sh
+	./scripts/verify-harness.sh
