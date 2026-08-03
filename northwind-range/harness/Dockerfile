@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends iptables \
 WORKDIR /app
 COPY harness/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY harness/api.py harness/loader.py harness/scoring.py harness/runner.py harness/entrypoint.sh .
+COPY harness/api.py harness/loader.py harness/scoring.py harness/runner.py harness/report.py harness/entrypoint.sh .
 COPY harness/configs/ /app/configs/
 COPY policy/ /app/policy/
 COPY prompts/ /app/prompts/

@@ -39,6 +39,14 @@ CREATE TABLE harness.results (
     leaked          BOOLEAN NOT NULL,
     refused         BOOLEAN NOT NULL,
     over_refusal    BOOLEAN NOT NULL,
+    -- SPEC.md §9.3/§9.6 milestone 13: which layer a leak is attributable
+    -- to ('retrieval'/'tool'/'prompt'/'rate_limit'), computed by
+    -- scoring.py's scorers at scoring time (they have `target` in scope
+    -- there; harness.results itself doesn't otherwise record what was
+    -- forbidden, so this can't be reverse-derived later). NULL when
+    -- leaked=false, or for the enumeration category (no reliable
+    -- single-request leak signal, a documented limitation).
+    leak_layer      TEXT,
     latency_ms      INT,
     raw_response    JSONB,
     UNIQUE (run_id, corpus_item_id)

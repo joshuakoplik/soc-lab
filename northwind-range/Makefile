@@ -56,3 +56,4 @@ verify:
 	./scripts/verify-controls.sh
 	./scripts/verify-harness.sh
 	./scripts/verify-telemetry.sh
+	./scripts/verify-report.sh

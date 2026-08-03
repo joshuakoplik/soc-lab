@@ -299,12 +299,12 @@ def save_result(conn, run_id, corpus_item_id, scored, latency_ms, raw_response) 
         cur.execute(
             "INSERT INTO harness.results "
             "(run_id, corpus_item_id, requested, policy_expected, retrieved, emitted, "
-            " leaked, refused, over_refusal, latency_ms, raw_response) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            " leaked, refused, over_refusal, leak_layer, latency_ms, raw_response) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 run_id, corpus_item_id, json.dumps(scored["requested"]), json.dumps(scored["policy_expected"]),
                 json.dumps(scored["retrieved"]), scored["emitted"], scored["leaked"], scored["refused"],
-                scored["over_refusal"], latency_ms, json.dumps(raw_response),
+                scored["over_refusal"], scored["leak_layer"], latency_ms, json.dumps(raw_response),
             ),
         )
     conn.commit()

@@ -201,6 +201,10 @@ services:
       - ./corpus/attacks:/app/corpus/attacks:ro
       - ./corpus/benign:/app/corpus/benign:ro
       - ./telemetry:/app/telemetry
+      # SPEC.md §9.6 milestone 13 -- report.py's --output lands here so a
+      # generated report is visible on the host, not trapped in the
+      # container (needed to commit harness/reports/ablation-*.md).
+      - ./harness/reports:/app/reports
     depends_on:
       postgres:
         condition: service_healthy
