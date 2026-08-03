@@ -265,6 +265,13 @@ with model capability.
 | `TOOL_ARG_VALIDATION` | on | Schema and range validation on tool arguments. |
 | `RATE_LIMIT` | on | Per-session request and token ceilings. |
 
+**§14's open item on `TOOL_GATING`, resolved (milestone 10):** auto-approve and auto-deny are
+both needed, as separate conditions, not a single fixed policy -- a harness studying whether
+gating helps needs to run batches under both. A second control, `TOOL_GATING_POLICY`
+(`approve` / `deny`, default `deny`), decides what happens to a gated (high-tier) call while
+`TOOL_GATING=on`. Default `deny` is the fail-safe choice; the harness can set it to `approve`
+per run.
+
 ### 5.5 Recording requirement
 
 Every result row carries the **full control vector**, the model identity, the corpus version,

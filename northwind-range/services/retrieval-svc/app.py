@@ -35,6 +35,17 @@ DATABASE_URL = os.environ.get(
 
 app = FastAPI()
 
+# SPEC.md §5.2 RET_SOURCE_ALLOWLIST -- the two genuinely-unreviewed ingest-svc
+# sources (§6.3), excluded when the toggle is on. A fixed constant, not a
+# second configurable control (SPEC.md §5.2 lists this as one boolean).
+SOURCE_DENYLIST = ("feedback_form", "drive_sync")
+SOURCE_CLAUSE = "AND d.source NOT IN %(denylist)s"
+
+# SPEC.md §5.2 RET_SCORE_THRESHOLD -- minimum cosine similarity; below it,
+# drop the result rather than return a weak match. A code constant, not a
+# second tunable control, for the same reason as SOURCE_DENYLIST above.
+MIN_SCORE = 0.35
+
 PREFILTER_SQL = """
     SELECT d.id, d.title, d.content, d.tenant_id, d.owning_department_id, d.label,
            d.source, d.submitter,
@@ -54,15 +65,21 @@ PREFILTER_SQL = """
             WHERE s.document_id = d.id AND s.department_id = %(department_id)s
         )
       )
+      {source_clause}
     ORDER BY d.embedding <=> %(qvec)s::vector
     LIMIT %(k)s
 """
 
+# Also used for mode="none" -- same "no ACL predicate at all" query, the
+# difference between the two modes is entirely in whether the Python side
+# calls policy.decide() afterward (see search() below).
 POSTFILTER_SQL = """
     SELECT d.id, d.title, d.content, d.tenant_id, d.owning_department_id, d.label,
            d.source, d.submitter,
            1 - (d.embedding <=> %(qvec)s::vector) AS score
     FROM app.documents d
+    WHERE 1=1
+      {source_clause}
     ORDER BY d.embedding <=> %(qvec)s::vector
     LIMIT %(k)s
 """
@@ -90,6 +107,8 @@ class SearchRequest(BaseModel):
     query: str
     k: int = 5
     mode: str = "prefilter"
+    source_allowlist: bool = False
+    score_threshold: bool = False
 
 
 class EmbedRequest(BaseModel):
@@ -113,9 +132,10 @@ def embed_endpoint(body: EmbedRequest):
 
 @app.post("/search")
 def search(body: SearchRequest):
-    if body.mode not in ("prefilter", "postfilter"):
-        raise HTTPException(status_code=400, detail="mode must be 'prefilter' or 'postfilter'")
+    if body.mode not in ("prefilter", "postfilter", "none"):
+        raise HTTPException(status_code=400, detail="mode must be 'prefilter', 'postfilter', or 'none'")
 
+    source_clause = SOURCE_CLAUSE if body.source_allowlist else ""
     qvec = as_vector_literal(embed(body.query))
     conn = db()
     try:
@@ -127,13 +147,14 @@ def search(body: SearchRequest):
 
             if body.mode == "prefilter":
                 cur.execute(
-                    PREFILTER_SQL,
+                    PREFILTER_SQL.format(source_clause=source_clause),
                     {
                         "qvec": qvec,
                         "tenant_id": user_row["tenant_id"],
                         "department_id": user_row["department_id"],
                         "user_id": body.user_id,
                         "k": body.k,
+                        "denylist": SOURCE_DENYLIST,
                     },
                 )
                 rows = cur.fetchall()
@@ -143,14 +164,31 @@ def search(body: SearchRequest):
                 for row in rows:
                     policy.decide(body.user_id, row["id"], "read", conn=conn)
                 results = rows
-            else:
-                cur.execute(POSTFILTER_SQL, {"qvec": qvec, "k": body.k})
+            elif body.mode == "postfilter":
+                cur.execute(
+                    POSTFILTER_SQL.format(source_clause=source_clause),
+                    {"qvec": qvec, "k": body.k, "denylist": SOURCE_DENYLIST},
+                )
                 candidates = cur.fetchall()
                 results = []
                 for row in candidates:
                     decision = policy.decide(body.user_id, row["id"], "read", conn=conn)
                     if decision.allowed:
                         results.append(row)
+            else:
+                # SPEC.md §5.1 ENT_RETRIEVAL=off -- the retrieval-layer
+                # analogue of tool-svc's ent_tool=False confused-deputy
+                # mode: raw top-k, no policy.decide() call at all, not even
+                # for logging. This is deliberately NOT the same as
+                # postfilter, which still enforces (late).
+                cur.execute(
+                    POSTFILTER_SQL.format(source_clause=source_clause),
+                    {"qvec": qvec, "k": body.k, "denylist": SOURCE_DENYLIST},
+                )
+                results = cur.fetchall()
+
+            if body.score_threshold:
+                results = [r for r in results if r["score"] >= MIN_SCORE]
     finally:
         conn.close()
 

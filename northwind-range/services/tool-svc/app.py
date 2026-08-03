@@ -19,7 +19,7 @@ import urllib.request
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from policy import policy
 
@@ -40,20 +40,59 @@ class InvokeRequest(BaseModel):
     args: dict
     user_id: int
     ent_tool: bool = True
+    # SPEC.md §5.2 -- passed through on doc_search calls so a tool_result-
+    # placement chat (SPEC.md §5.2 RET_PLACEMENT, milestone 10) still honors
+    # whatever (ENT_RETRIEVAL, RET_PREFILTER, RET_SOURCE_ALLOWLIST,
+    # RET_SCORE_THRESHOLD) resolved to, instead of a hardcoded default.
+    retrieval_mode: str = "prefilter"
+    source_allowlist: bool = False
+    score_threshold: bool = False
+    # SPEC.md §5.4 TOOL_ARG_VALIDATION -- on by default. See ARG_SCHEMAS below.
+    tool_arg_validation: bool = True
 
 
-def _doc_search(args: dict, user_id: int, ent_tool: bool) -> dict:
+class DocSearchArgs(BaseModel):
+    query: str
+    k: int = 5
+
+
+class TicketLookupArgs(BaseModel):
+    ticket_id: int
+
+
+class CustomerRecordArgs(BaseModel):
+    customer_id: int
+
+
+class UsageCalcArgs(BaseModel):
+    customer_id: int
+    metric: str
+    op: str = "sum"
+
+
+ARG_SCHEMAS = {
+    "doc_search": DocSearchArgs,
+    "ticket_lookup": TicketLookupArgs,
+    "customer_record": CustomerRecordArgs,
+    "usage_calc": UsageCalcArgs,
+}
+
+
+def _doc_search(args: dict, req: InvokeRequest) -> dict:
     body = json.dumps({
-        "user_id": user_id, "query": args["query"], "k": args.get("k", 5), "mode": "prefilter",
+        "user_id": req.user_id, "query": args["query"], "k": args.get("k", 5),
+        "mode": req.retrieval_mode,
+        "source_allowlist": req.source_allowlist,
+        "score_threshold": req.score_threshold,
     }).encode()
-    req = urllib.request.Request(
+    call = urllib.request.Request(
         f"{RETRIEVAL_SVC_URL}/search", data=body, headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(call, timeout=60) as resp:
         return json.loads(resp.read())
 
 
-def _ticket_lookup(args: dict, user_id: int, ent_tool: bool) -> dict:
+def _ticket_lookup(args: dict, req: InvokeRequest) -> dict:
     ticket_id = args["ticket_id"]
     conn = db()
     try:
@@ -67,8 +106,8 @@ def _ticket_lookup(args: dict, user_id: int, ent_tool: bool) -> dict:
             if not row:
                 raise HTTPException(status_code=404, detail="unknown ticket")
 
-            if ent_tool:
-                decision = policy.decide_record(user_id, "tickets", ticket_id, "read", conn=conn)
+            if req.ent_tool:
+                decision = policy.decide_record(req.user_id, "tickets", ticket_id, "read", conn=conn)
                 if not decision.allowed:
                     raise HTTPException(status_code=403, detail=decision.reason)
 
@@ -77,7 +116,7 @@ def _ticket_lookup(args: dict, user_id: int, ent_tool: bool) -> dict:
         conn.close()
 
 
-def _customer_record(args: dict, user_id: int, ent_tool: bool) -> dict:
+def _customer_record(args: dict, req: InvokeRequest) -> dict:
     customer_id = args["customer_id"]
     conn = db()
     try:
@@ -90,8 +129,8 @@ def _customer_record(args: dict, user_id: int, ent_tool: bool) -> dict:
             if not row:
                 raise HTTPException(status_code=404, detail="unknown customer")
 
-            if ent_tool:
-                decision = policy.decide_record(user_id, "customers", customer_id, "read", conn=conn)
+            if req.ent_tool:
+                decision = policy.decide_record(req.user_id, "customers", customer_id, "read", conn=conn)
                 if not decision.allowed:
                     raise HTTPException(status_code=403, detail=decision.reason)
 
@@ -108,7 +147,7 @@ USAGE_OPS = {
 }
 
 
-def _usage_calc(args: dict, user_id: int, ent_tool: bool) -> dict:
+def _usage_calc(args: dict, req: InvokeRequest) -> dict:
     customer_id = args["customer_id"]
     metric = args["metric"]
     op = args.get("op", "sum")
@@ -122,8 +161,8 @@ def _usage_calc(args: dict, user_id: int, ent_tool: bool) -> dict:
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="unknown customer")
 
-            if ent_tool:
-                decision = policy.decide_record(user_id, "customers", customer_id, "read", conn=conn)
+            if req.ent_tool:
+                decision = policy.decide_record(req.user_id, "customers", customer_id, "read", conn=conn)
                 if not decision.allowed:
                     raise HTTPException(status_code=403, detail=decision.reason)
 
@@ -157,5 +196,14 @@ def invoke(body: InvokeRequest):
     tool = TOOLS.get(body.tool)
     if tool is None:
         raise HTTPException(status_code=400, detail=f"unknown tool: {body.tool}")
-    result = tool["handler"](body.args, body.user_id, body.ent_tool)
+
+    if body.tool_arg_validation:
+        schema = ARG_SCHEMAS.get(body.tool)
+        if schema is not None:
+            try:
+                schema(**body.args)
+            except ValidationError as e:
+                raise HTTPException(status_code=422, detail=e.errors())
+
+    result = tool["handler"](body.args, body)
     return {"tool": body.tool, "tier": tool["tier"], "result": result}

@@ -49,3 +49,4 @@ verify:
 	./scripts/verify-chat.sh
 	./scripts/verify-tools.sh
 	./scripts/verify-ingest.sh
+	./scripts/verify-controls.sh
