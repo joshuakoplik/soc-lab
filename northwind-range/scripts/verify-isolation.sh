@@ -65,15 +65,17 @@ check_no_egress() {
     ok "$container: real internet unreachable"
   fi
 }
-check_no_egress nw-edge-nginx wget
 check_no_egress nw-portal-api python
 
 echo
-echo "=== 2b. nw_ops members (harness, postgres) also can't reach the internet ==="
+echo "=== 2b. nw_ops members (harness, postgres, edge-nginx) also can't reach the internet ==="
 echo "    (nw_ops is the one non-internal network -- egress here is enforced by"
-echo "     per-container iptables, not the network itself. See harness/entrypoint.sh"
-echo "     and services/postgres/entrypoint.sh.)"
+echo "     per-container iptables, not the network itself. See harness/entrypoint.sh,"
+echo "     services/postgres/entrypoint.sh, and services/edge-nginx/entrypoint.sh."
+echo "     edge-nginx joined this group when it was dual-homed onto nw_ops for its"
+echo "     operator-requested Tailscale port -- SPEC.md §0.2's amendment.)"
 check_no_egress nw-harness python
+check_no_egress nw-edge-nginx wget
 if docker inspect -f '{{.State.Running}}' nw-postgres >/dev/null 2>&1; then
   if docker exec nw-postgres timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/80' 2>/dev/null; then
     bad "nw-postgres: reached 1.1.1.1 -- egress is NOT blocked"
@@ -110,7 +112,11 @@ else
 fi
 
 echo
-echo "=== 3. Only the harness publishes a host port, and only on 127.0.0.1 ==="
+echo "=== 3. Only the harness (and the operator-requested edge-nginx tailnet port) publish a host port ==="
+# SPEC.md §0.2's post-build-order exception: edge-nginx also publishes on
+# this host's own Tailscale interface IP, narrowly (never 0.0.0.0), for
+# operator convenience -- same "one specific, narrow interface" discipline
+# the harness's own 127.0.0.1-only carve-out already uses.
 ALL_SERVICES="nw-edge-nginx nw-chat-web nw-portal-api nw-litellm nw-llm-backend nw-retrieval-svc nw-tool-svc nw-ingest-svc nw-postgres nw-redis nw-harness"
 BAD_PUBLISH=0
 for c in $ALL_SERVICES; do
@@ -121,6 +127,15 @@ for c in $ALL_SERVICES; do
     else
       bad "nw-harness: expected 127.0.0.1:8090 published, got: ${ports:-none}"
     fi
+  elif [ "$c" = "nw-edge-nginx" ]; then
+    if echo "$ports" | grep -q "100.64.0.10:8888"; then
+      ok "nw-edge-nginx: published on 100.64.0.10:8888 (Tailscale-only, not 0.0.0.0)"
+    elif [ -z "$ports" ]; then
+      : # fine -- the tailnet exception is a working-session convenience, not mandatory
+    else
+      bad "nw-edge-nginx: has an unexpected published port (not the Tailscale IP): $ports"
+      BAD_PUBLISH=1
+    fi
   else
     if [ -z "$ports" ]; then
       : # fine, no port
@@ -130,7 +145,7 @@ for c in $ALL_SERVICES; do
     fi
   fi
 done
-[ "$BAD_PUBLISH" -eq 0 ] && ok "no other service has any host-published port"
+[ "$BAD_PUBLISH" -eq 0 ] && ok "no other service has an unexpected host-published port"
 
 echo
 echo "=== 4. Harness API actually reachable from the host ==="

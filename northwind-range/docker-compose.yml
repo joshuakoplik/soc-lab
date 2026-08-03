@@ -10,10 +10,28 @@ services:
   edge-nginx:
     build: ./services/edge-nginx
     container_name: nw-edge-nginx
+    cap_add:
+      - NET_ADMIN
     networks:
       - nw_dmz
+      # Confirmed empirically: Docker does not forward a published port
+      # for a container whose only networks are internal:true -- the
+      # DNAT rule never actually binds (docker inspect shows the request
+      # in HostConfig.PortBindings but NetworkSettings.Ports stays null).
+      # Dual-homing onto nw_ops (already non-internal, already used the
+      # same way by harness/postgres) is required to make the operator-
+      # requested Tailscale port work at all. entrypoint.sh's iptables
+      # lockdown keeps this from becoming a real egress hole.
+      - nw_ops
     volumes:
       - ./telemetry:/app/telemetry
+    # Operator-requested, deliberate exception to SPEC.md §0.2 ("no host
+    # port publishing except the harness API"), documented there --
+    # bound to this host's own Tailscale interface IP specifically, never
+    # 0.0.0.0, same "narrow bind, not a wide-open hole" discipline the
+    # harness's own 127.0.0.1-only port already uses.
+    ports:
+      - "100.64.0.10:8888:80"
     depends_on:
       chat-web:
         condition: service_healthy
