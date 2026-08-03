@@ -23,10 +23,10 @@ if [ "${1:-}" = "--cold-start" ]; then
 fi
 
 echo "=== 1. Network topology: internal flags and CIDRs ==="
-declare -A WANT_INTERNAL=( [nw_dmz]=true [nw_app]=true [nw_ops]=false )
-declare -A WANT_SUBNET=( [nw_dmz]=172.28.10.0/24 [nw_app]=172.28.20.0/24 [nw_ops]=172.28.40.0/24 )
+declare -A WANT_INTERNAL=( [nw_dmz]=true [nw_app]=true [nw_ops]=false [nw_llm_egress]=false )
+declare -A WANT_SUBNET=( [nw_dmz]=172.28.10.0/24 [nw_app]=172.28.20.0/24 [nw_ops]=172.28.40.0/24 [nw_llm_egress]=172.28.50.0/24 )
 
-for net in nw_dmz nw_app nw_ops; do
+for net in nw_dmz nw_app nw_ops nw_llm_egress; do
   full_name="northwind-range_${net}"
   info="$(docker network inspect "$full_name" 2>/dev/null)" || { bad "$net: network does not exist"; continue; }
   internal="$(echo "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["Internal"])' 2>/dev/null)"
@@ -87,6 +87,26 @@ if docker inspect -f '{{.State.Running}}' nw-postgres >/dev/null 2>&1; then
   fi
 else
   bad "nw-postgres isn't running -- can't check"
+fi
+
+echo
+echo "=== 2c. llm-backend: narrow egress, exactly the configured host, nothing else ==="
+echo "    (SPEC.md §0.1/§4's one deliberate exception -- see"
+echo "     services/llm-backend/entrypoint.sh. Must NOT be a wide-open hole.)"
+if ! docker inspect -f '{{.State.Running}}' nw-llm-backend >/dev/null 2>&1; then
+  bad "nw-llm-backend isn't running -- can't check"
+else
+  if docker exec nw-llm-backend wget -q -T 5 -O /dev/null http://1.1.1.1/ 2>/dev/null; then
+    bad "nw-llm-backend: reached 1.1.1.1 -- egress allow-list is too broad"
+  else
+    ok "nw-llm-backend: unrelated external address (1.1.1.1) still unreachable"
+  fi
+  UPSTREAM="$(docker inspect nw-llm-backend --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^OLLAMA_UPSTREAM_HOST=//p')"
+  if [ -n "$UPSTREAM" ] && docker exec nw-llm-backend wget -q -T 10 -O /dev/null "http://${UPSTREAM}:11434/api/tags" 2>/dev/null; then
+    ok "nw-llm-backend: configured upstream ($UPSTREAM) is reachable"
+  else
+    bad "nw-llm-backend: configured upstream ($UPSTREAM) is NOT reachable"
+  fi
 fi
 
 echo

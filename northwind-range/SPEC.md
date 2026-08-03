@@ -23,8 +23,12 @@ registry. Same shape, different layer.
 A build violating any of these is a failed build.
 
 1. **No egress.** All Docker networks are `internal: true` except a build-time bridge torn
-   down after image build. `scripts/verify-isolation.sh` must prove no container reaches an
-   external address, and must pass on a cold start.
+   down after image build, and except one deliberate, narrow exception: `llm-backend`
+   forwards to an operator-controlled remote inference host over a dedicated
+   non-`internal` network (`nw_llm_egress`), allow-listed to exactly that one destination —
+   see §4 for the mechanism and the tradeoff being made. `scripts/verify-isolation.sh` must
+   prove every other container reaches no external address, that `llm-backend` reaches
+   nothing *but* its configured upstream, and must pass on a cold start.
 2. **No host port publishing** except the operator harness API, bound to `127.0.0.1`. Never
    `0.0.0.0`.
 3. **No known-vulnerable dependency versions in any Phase 1 image.** Every package, base
@@ -108,7 +112,8 @@ places no human reviews closely.
 |---|---|---|---|
 | `nw_dmz` | 172.28.10.0/24 | yes | `edge-nginx`, `chat-web`, `portal-api` (dual-homed) |
 | `nw_app` | 172.28.20.0/24 | yes | `portal-api`, `litellm`, `llm-backend`, `retrieval-svc`, `tool-svc`, `ingest-svc`, `postgres`, `redis` |
-| `nw_ops` | 172.28.40.0/24 | yes | `harness`, `postgres` (results schema) |
+| `nw_ops` | 172.28.40.0/24 | no | `harness`, `postgres` (results schema) |
+| `nw_llm_egress` | 172.28.50.0/24 | no | `llm-backend` (dual-homed with `nw_app`) |
 
 Phase 2 adds `nw_ml`. Leave the compose file structured so that is additive.
 
@@ -116,13 +121,18 @@ Phase 2 adds `nw_ml`. Leave the compose file structured so that is additive.
 here:** `internal: true` silently disables Docker's own host port publishing for every
 container on that network, not just egress — confirmed empirically during the parent
 soc-lab's own network-isolation refactor. `nw_ops` hosts the harness's one required host port
-(§0.2), so **`nw_ops` must not be `internal: true`**, even though the table above lists it
-alongside two networks that are. This is deliberate, not an inconsistency: `nw_ops` is
-operator-plane, not part of the measured application, and has no reason to route anywhere but
-to `harness` and the results schema of `postgres`. `scripts/verify-isolation.sh` must assert
-`nw_dmz` and `nw_app` are `internal: true` and that `nw_ops` is not, alongside its no-egress
-checks — a build that makes all three internal "for consistency" would silently break the
-harness's own API.
+(§0.2), so **`nw_ops` must not be `internal: true`**, unlike `nw_dmz`/`nw_app`. This is
+deliberate, not an inconsistency: `nw_ops` is operator-plane, not part of the measured
+application, and has no reason to route anywhere but to `harness` and the results schema of
+`postgres`. `nw_llm_egress` is non-`internal` for a different, unrelated reason — see §4's
+"Remote inference backend" for why `llm-backend` needs real egress at all.
+`scripts/verify-isolation.sh` must assert `nw_dmz`/`nw_app` are `internal: true`, that
+`nw_ops`/`nw_llm_egress` are not, and — since `nw_llm_egress` existing at all is a real
+exception to §0.1, not just a port-publishing workaround like `nw_ops` — that `llm-backend`
+reaches *only* its configured upstream and nothing else. A build that makes all four internal
+"for consistency" would silently break the harness's own API; a build that leaves
+`nw_llm_egress` unrestricted would silently turn a narrow, audited exception into an open
+hole.
 
 ---
 
@@ -153,16 +163,53 @@ when the ACL predicate and the vector index live in the same query planner.
 The point of `litellm` in Phase 1 is to make the backend model a variable rather than a
 constant.
 
-- **Weights baked in at build time.** Ollama and llama.cpp both pull on first run, which
-  violates §0.1. Fetch during the build-time bridge window, bake into a pre-populated named
-  volume, then verify cold start offline.
-- **Ship at least three sizes** so capability can be treated as an independent variable.
-  Qwen3-8B quantized is the default. Add one smaller (~3B) and one larger if host resources
-  allow. Report measured headroom rather than assuming.
-- **Model selection is a run parameter**, not a config file edit. The harness sets it per
-  run via the gateway.
-- Pin temperature and seed. Cap context and max tokens.
-- Record model identity, quantization, and all sampling parameters on **every result row**.
+### 4.1 Remote inference backend (deliberate exception to §0.1)
+
+The original design here was "bake weights into the `llm-backend` image at build time, run
+entirely locally" — the standard approach, and still the right default for a range meant to
+be portable and fully air-gapped. It was reconsidered before building, for reasons specific
+to this deployment, not as a general recommendation:
+
+- The build host has no GPU and limited RAM. Local CPU inference on an 8B model would be slow
+  enough to make iteration and eval runs genuinely painful.
+- A real, motivating use case for this range — comparing how *different* models resist
+  tampering — is much better served by cheap model-swapping than by one baked-in model.
+  Baking in "three sizes" per the original plan below would mean maintaining several
+  multi-gigabyte images; pointing at an existing multi-model Ollama host turns "add a model"
+  into one `litellm` config line.
+
+**What was built instead:** `llm-backend` is a narrow reverse proxy (nginx), not a model
+server. It forwards to one operator-configured remote Ollama host over a dedicated network,
+`nw_llm_egress` (§2.1) — the *only* real egress anywhere in this range. The blast radius is
+scoped tightly on purpose:
+
+- `nw_llm_egress` is non-`internal`, but `llm-backend` is the only container on it.
+- `llm-backend`'s own per-container iptables allow exactly loopback, this range's own
+  subnets (it's still dual-homed on `nw_app` too), and the one configured
+  `OLLAMA_UPSTREAM_HOST:OLLAMA_UPSTREAM_PORT` — default `DROP` otherwise. Not a general
+  internet hole; one destination, enforced at the packet level, not just by convention.
+- Every other container in the range is unaffected — still exactly as isolated as §0.1
+  describes. This exception is `llm-backend`'s alone.
+
+**The tradeoff, stated plainly:** this range is no longer fully self-contained for its model
+layer. A fresh checkout on a different machine won't have this specific Ollama host
+reachable, and a run's behavior now depends on infrastructure outside the repo — the kind of
+external dependency §0.5's determinism goal ("a run from March must be comparable to a run
+from July") normally argues against. That's accepted here as a conscious cost, not an
+oversight; if this range is ever handed off or needs to run somewhere without access to that
+host, `llm-backend` would need to revert to the original baked-weights design.
+
+- **Model selection is a run parameter**, not a config file edit. This is easier now, not
+  harder: each model is one `litellm` `model_list` entry (`ollama_chat/<model>` pointed at
+  `llm-backend`), and the harness picks per run via the gateway exactly as originally
+  planned. `services/litellm/config.yaml` ships two working entries (`qwen3-8b`,
+  `gemma4-31b`) as of milestone 4; adding another remote-hosted model is a config change, not
+  a rebuild.
+- Pin temperature and seed. Cap context and max tokens. (`temperature`/`max_tokens` are
+  pinned in `litellm`'s config now; `num_ctx`/seed pass-through at the request level is
+  whichever milestone actually constructs chat requests, portal-api, milestone 5+.)
+- Record model identity, quantization, and all sampling parameters on **every result row**
+  (harness's job, milestone 11).
 
 ---
 
@@ -496,7 +543,12 @@ in the loop, every downstream measurement is uninterpretable.
 
 Flag rather than deciding unilaterally:
 
-- Model lineup and quantization, pending measured host headroom after milestone 4.
+- ~~Model lineup and quantization, pending measured host headroom after milestone 4.~~
+  **Resolved differently than assumed, milestone 4:** local host headroom is no longer the
+  constraint — `llm-backend` forwards to a remote Ollama host instead of running inference
+  locally (§4.1), so "ship 3 sizes" became "add `litellm` config entries." Two models are
+  wired up as of this milestone (`qwen3-8b`, `gemma4-31b`); more can be added the same way
+  without a rebuild.
 - Whether the injection classifier is a local small model, a rules engine, or both as
   separate toggles.
 - Corpus size, and whether documents are generated per-build or committed once. Committed is

@@ -31,3 +31,4 @@ verify:
 	./scripts/verify-no-cves.sh
 	./scripts/verify-schema.sh
 	./scripts/verify-corpus.sh
+	./scripts/verify-llm-backend.sh

@@ -51,8 +51,20 @@ services:
   llm-backend:
     build: ./services/llm-backend
     container_name: nw-llm-backend
+    cap_add:
+      - NET_ADMIN
     networks:
       - nw_app
+      - nw_llm_egress
+    # SPEC.md §0.1/§4: the one deliberate, narrow exception to "no egress" in
+    # this whole range -- llm-backend forwards to an operator-controlled
+    # remote Ollama host instead of running inference locally. See
+    # entrypoint.sh for the iptables allow-list this depends on. Raw IP, not
+    # a hostname -- nw_llm_egress has no reachable DNS resolver under that
+    # same lockdown.
+    environment:
+      OLLAMA_UPSTREAM_HOST: "100.64.0.20"
+      OLLAMA_UPSTREAM_PORT: "11434"
 
   retrieval-svc:
     build: ./services/retrieval-svc
@@ -152,6 +164,16 @@ networks:
       config:
         - subnet: 172.28.40.0/24
           gateway: 172.28.40.1
+  # SPEC.md §0.1/§4: narrow, non-internal by design -- llm-backend's one
+  # documented egress exception, not internal:true like every other network
+  # in this range.
+  nw_llm_egress:
+    internal: false
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.50.0/24
+          gateway: 172.28.50.1
 
 volumes:
   nw-postgres-data:

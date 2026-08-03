@@ -1,7 +1,28 @@
-# Milestone 1: config-only placeholder so the real upstream litellm image has
-# something valid to boot against. Milestone 4 wires this to llm-backend for
-# real; milestone 6 adds the renamed-endpoint / minimal-runtime hardening.
-model_list: []
+# SPEC.md §4: model selection is a run parameter (which model_list entry a
+# caller picks), not a config file edit -- picking a different model here
+# just means adding another entry, since llm-backend forwards to whichever
+# model name Ollama is asked for on the configured remote host (see
+# services/llm-backend/). temperature/max_tokens pinned per §4; num_ctx and
+# seed pass-through are left for whichever milestone actually constructs
+# chat requests (portal-api, milestone 5) rather than guessed at here.
+#
+# qwen3-8b and gemma4:31b are both proven working and good quality (see the
+# corpus-generation model bench, milestone 3) -- llama3.3:70b is
+# deliberately not listed here, since that same bench found it reliably
+# exceeds a 10-minute timeout on this same remote host.
+model_list:
+  - model_name: qwen3-8b
+    litellm_params:
+      model: ollama_chat/qwen3:8b
+      api_base: http://llm-backend:11434
+      temperature: 0.2
+      max_tokens: 1024
+  - model_name: gemma4-31b
+    litellm_params:
+      model: ollama_chat/gemma4:31b
+      api_base: http://llm-backend:11434
+      temperature: 0.2
+      max_tokens: 1024
 
 general_settings:
   master_key: sk-northwind-placeholder
