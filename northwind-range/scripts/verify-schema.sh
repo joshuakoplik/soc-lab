@@ -26,10 +26,10 @@ fi
 
 echo
 echo "=== 2. Tables ==="
-WANT_TABLES="$(printf 'api_tokens\ndepartments\ndocument_shares\ndocuments\ngrants\npolicy_decisions\ntenants\nusers')"
+WANT_TABLES="$(printf 'api_tokens\ncustomers\ndepartments\ndocument_shares\ndocuments\ngrants\ninvoices\npolicy_decisions\ntenants\ntickets\nusage_records\nusers')"
 GOT_TABLES="$(psql_q "select table_name from information_schema.tables where table_schema='app' order by table_name;")"
 if [ "$GOT_TABLES" = "$WANT_TABLES" ]; then
-  ok "all 8 app.* tables exist"
+  ok "all 12 app.* tables exist"
 else
   bad "table set mismatch, got: [$GOT_TABLES]"
 fi
@@ -99,7 +99,30 @@ else
 fi
 
 echo
-echo "=== 6. Every seeded password verifies against its bcrypt hash ==="
+echo "=== 6. Records + generalized policy_decisions (milestone 8) ==="
+REC_COUNTS="$(psql_q "select
+    (select count(*) from app.customers) || ' ' ||
+    (select count(*) from app.tickets) || ' ' ||
+    (select count(*) from app.invoices) || ' ' ||
+    (select count(*) from app.usage_records);")"
+read -r N_CUST N_TICK N_INV N_USAGE <<< "$REC_COUNTS"
+if [ "${N_CUST:-0}" -gt 0 ] && [ "${N_TICK:-0}" -gt 0 ] && [ "${N_INV:-0}" -gt 0 ] && [ "${N_USAGE:-0}" -gt 0 ]; then
+  ok "records seeded: $N_CUST customers, $N_TICK tickets, $N_INV invoices, $N_USAGE usage rows"
+else
+  bad "records missing or empty (customers=$N_CUST tickets=$N_TICK invoices=$N_INV usage=$N_USAGE) -- run 'make seed-records'"
+fi
+
+PD_COLS="$(psql_q "select column_name from information_schema.columns
+                    where table_schema='app' and table_name='policy_decisions'
+                    and column_name in ('object_type','object_id') order by column_name;")"
+if [ "$PD_COLS" = "$(printf 'object_id\nobject_type')" ]; then
+  ok "app.policy_decisions generalized to object_type/object_id"
+else
+  bad "app.policy_decisions doesn't have the expected object_type/object_id columns, got: [$PD_COLS]"
+fi
+
+echo
+echo "=== 7. Every seeded password verifies against its bcrypt hash ==="
 if [ ! -f .seed-credentials.json ]; then
   bad ".seed-credentials.json missing -- run 'make seed' first"
 else

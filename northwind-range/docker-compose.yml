@@ -95,10 +95,17 @@ services:
         condition: service_healthy
 
   tool-svc:
-    build: ./services/tool-svc
+    # Repo-root context so the Dockerfile can COPY policy/ in -- same
+    # reason as portal-api/retrieval-svc (SPEC.md §7's shared policy module).
+    build:
+      context: .
+      dockerfile: services/tool-svc/Dockerfile
     container_name: nw-tool-svc
     networks:
       - nw_app
+    environment:
+      DATABASE_URL: "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
+      RETRIEVAL_SVC_URL: "http://retrieval-svc:8000"
     depends_on:
       postgres:
         condition: service_healthy

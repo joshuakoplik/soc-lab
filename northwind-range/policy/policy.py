@@ -1,13 +1,19 @@
 """Single source of truth for entitlement decisions (SPEC.md §7).
 
-Imported directly by portal-api (milestone 5) and, later, retrieval-svc and
-tool-svc (milestones 6/8) -- "a single policy module... not duplicated
-logic." Every call is logged to app.policy_decisions (subject, object,
-action, decision, reason), independent of whatever the caller does with
-the answer.
+Imported directly by portal-api (milestone 5), retrieval-svc (milestone 6),
+and tool-svc (milestone 8) -- "a single policy module... not duplicated
+logic." Every call is logged to app.policy_decisions (subject, object type
++ id, action, decision, reason), independent of whatever the caller does
+with the answer.
 
-Decision algorithm (SPEC.md doesn't specify one explicitly -- this is the
-rule this codebase settled on, documented here since it's load-bearing):
+Two decision functions, not one generic dispatcher -- documents and
+records don't share a shape (labels/departments/grants/shares vs. plain
+tenant ownership), so forcing both through one signature would mean fake
+fields on one side or the other:
+
+decide() -- documents. Decision algorithm (SPEC.md doesn't specify one
+explicitly -- this is the rule this codebase settled on, documented here
+since it's load-bearing):
 
 1. Cross-tenant -> deny, no exceptions (SPEC.md §6.1: "No document or
    record crosses tenants").
@@ -18,6 +24,14 @@ rule this codebase settled on, documented here since it's load-bearing):
    Deny otherwise. All four labels share this same rule -- 'restricted'
    isn't specially gated beyond it; that distinction belongs to the
    control-matrix toggles (SPEC.md §5.2), not a second access-control axis.
+
+decide_record() -- customers/tickets/invoices (SPEC.md §8, milestone 8).
+Tenant-only: no department-ownership axis for customer records the way
+documents have one (the scenario has both support *and* operations staff
+plausibly needing customer lookups). This is what makes tool-svc's
+ENT_TOOL toggle sharp -- with it on, decide_record() is the enforcement;
+with it off, tool-svc skips calling it entirely (the "service credential"
+confused-deputy mode SPEC.md §8 describes).
 """
 import os
 from dataclasses import dataclass
@@ -64,13 +78,13 @@ def decide(user_id: int, document_id: int, action: str = "read", conn=None) -> D
             doc_tenant_id, label, owning_department_id = doc_row
 
             if user_tenant_id != doc_tenant_id:
-                return _log(conn, user_id, document_id, action, False, "cross-tenant")
+                return _log(conn, user_id, "document", document_id, action, False, "cross-tenant")
 
             if label == "public":
-                return _log(conn, user_id, document_id, action, True, "public")
+                return _log(conn, user_id, "document", document_id, action, True, "public")
 
             if user_department_id == owning_department_id:
-                return _log(conn, user_id, document_id, action, True, "same-department")
+                return _log(conn, user_id, "document", document_id, action, True, "same-department")
 
             cur.execute(
                 """
@@ -82,7 +96,7 @@ def decide(user_id: int, document_id: int, action: str = "read", conn=None) -> D
                 (user_id, owning_department_id),
             )
             if cur.fetchone() is not None:
-                return _log(conn, user_id, document_id, action, True, "active-grant")
+                return _log(conn, user_id, "document", document_id, action, True, "active-grant")
 
             # user_department_id, not owning_department_id -- a share row
             # names the department being granted access, which is never the
@@ -92,23 +106,58 @@ def decide(user_id: int, document_id: int, action: str = "read", conn=None) -> D
                 (document_id, user_department_id),
             )
             if cur.fetchone() is not None:
-                return _log(conn, user_id, document_id, action, True, "explicit-share")
+                return _log(conn, user_id, "document", document_id, action, True, "explicit-share")
 
-            return _log(conn, user_id, document_id, action, False, "no-entitlement")
+            return _log(conn, user_id, "document", document_id, action, False, "no-entitlement")
     finally:
         if own_conn:
             conn.close()
 
 
-def _log(conn, user_id: int, document_id: int, action: str, allowed: bool, reason: str) -> Decision:
+# SPEC.md §8: customer records/tickets/invoices have no department-ownership
+# axis the way documents do (the scenario has both support *and* operations
+# staff plausibly needing customer lookups) -- the rule here is tenant-only.
+RECORD_TABLES = ("customers", "tickets", "invoices")
+
+
+def decide_record(user_id: int, table: str, record_id: int, action: str = "read", conn=None) -> Decision:
+    if table not in RECORD_TABLES:
+        raise ValueError(f"unknown record table: {table!r}")
+
+    own_conn = conn is None
+    conn = conn or _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT tenant_id FROM app.users WHERE id = %s", (user_id,))
+            user_row = cur.fetchone()
+            if user_row is None:
+                return Decision(allowed=False, reason="unknown-user")
+            (user_tenant_id,) = user_row
+
+            # table is allow-listed above, not string-interpolated from caller input.
+            cur.execute(f"SELECT tenant_id FROM app.{table} WHERE id = %s", (record_id,))
+            record_row = cur.fetchone()
+            if record_row is None:
+                return Decision(allowed=False, reason=f"unknown-{table[:-1]}")
+            (record_tenant_id,) = record_row
+
+            if user_tenant_id != record_tenant_id:
+                return _log(conn, user_id, table, record_id, action, False, "cross-tenant")
+            return _log(conn, user_id, table, record_id, action, True, "same-tenant")
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def _log(conn, user_id: int, object_type: str, object_id: int, action: str, allowed: bool, reason: str) -> Decision:
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO app.policy_decisions
-                (subject_user_id, object_document_id, action, decision, reason)
-            VALUES (%s, %s, %s, %s, %s)
+                (subject_user_id, object_type, object_id, action, decision, reason)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (user_id, document_id, action, allowed, reason),
+            (user_id, object_type, object_id, action, allowed, reason),
         )
     conn.commit()
     return Decision(allowed=allowed, reason=reason)
