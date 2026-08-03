@@ -26,10 +26,10 @@ fi
 
 echo
 echo "=== 2. Tables ==="
-WANT_TABLES="$(printf 'api_tokens\ncustomers\ndepartments\ndocument_shares\ndocuments\ngrants\ninvoices\npolicy_decisions\ntenants\ntickets\nusage_records\nusers')"
+WANT_TABLES="$(printf 'api_tokens\ncustomers\ndepartments\ndocument_shares\ndocuments\ngrants\ningest_events\ninvoices\npolicy_decisions\ntenants\ntickets\nusage_records\nusers')"
 GOT_TABLES="$(psql_q "select table_name from information_schema.tables where table_schema='app' order by table_name;")"
 if [ "$GOT_TABLES" = "$WANT_TABLES" ]; then
-  ok "all 12 app.* tables exist"
+  ok "all 13 app.* tables exist"
 else
   bad "table set mismatch, got: [$GOT_TABLES]"
 fi
@@ -122,7 +122,28 @@ else
 fi
 
 echo
-echo "=== 7. Every seeded password verifies against its bcrypt hash ==="
+echo "=== 8. Ingestion tables (milestone 9) ==="
+INGEST_COLS="$(psql_q "select column_name from information_schema.columns
+                        where table_schema='app' and table_name='ingest_events'
+                        and column_name in ('source','source_ref','submitter','content_hash','tenant_id','document_id','created_at')
+                        order by column_name;")"
+WANT_INGEST_COLS="$(printf 'content_hash\ncreated_at\ndocument_id\nsource\nsource_ref\nsubmitter\ntenant_id')"
+if [ "$INGEST_COLS" = "$WANT_INGEST_COLS" ]; then
+  ok "app.ingest_events has the expected columns"
+else
+  bad "app.ingest_events columns mismatch, got: [$INGEST_COLS]"
+fi
+
+DOC_SUBMITTER="$(psql_q "select count(*) from information_schema.columns
+                          where table_schema='app' and table_name='documents' and column_name='submitter';")"
+if [ "$DOC_SUBMITTER" = "1" ]; then
+  ok "app.documents has a submitter column"
+else
+  bad "app.documents is missing the submitter column"
+fi
+
+echo
+echo "=== 9. Every seeded password verifies against its bcrypt hash ==="
 if [ ! -f .seed-credentials.json ]; then
   bad ".seed-credentials.json missing -- run 'make seed' first"
 else

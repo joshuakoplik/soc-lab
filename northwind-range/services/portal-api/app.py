@@ -28,6 +28,7 @@ RETRIEVAL_SVC_URL = os.environ.get("RETRIEVAL_SVC_URL", "http://retrieval-svc:80
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "sk-northwind-placeholder")
 LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "qwen3-8b")
+INGEST_SVC_URL = os.environ.get("INGEST_SVC_URL", "http://ingest-svc:8000")
 SESSION_TTL_SECONDS = 8 * 60 * 60
 SESSION_COOKIE = "nw_session"
 SYSTEM_PROMPT = Path("/app/prompts/baseline.txt").read_text()
@@ -196,6 +197,19 @@ def litellm_chat(system_prompt: str, user_turn: str) -> str:
         timeout=180,
     )
     return result["choices"][0]["message"]["content"]
+
+
+class FeedbackRequest(BaseModel):
+    tenant: str
+    message: str
+    submitter: str | None = None
+
+
+@app.post("/feedback")
+def feedback(body: FeedbackRequest):
+    # Deliberately unauthenticated -- SPEC.md §6.3's public feedback form.
+    # Thin proxy: ingest-svc owns all the actual ingestion logic.
+    return _post_json(f"{INGEST_SVC_URL}/feedback", body.model_dump())
 
 
 @app.post("/chat")

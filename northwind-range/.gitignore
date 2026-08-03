@@ -9,3 +9,8 @@
 .venv/
 __pycache__/
 *.pyc
+
+# ingest-svc's drive-sync watched dir -- runtime test/attacker-dropped
+# content, not source. Keep the mount point itself present in git.
+services/ingest-svc/watched/*
+!services/ingest-svc/watched/.gitkeep

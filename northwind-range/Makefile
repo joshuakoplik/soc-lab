@@ -48,3 +48,4 @@ verify:
 	./scripts/verify-retrieval.sh
 	./scripts/verify-chat.sh
 	./scripts/verify-tools.sh
+	./scripts/verify-ingest.sh

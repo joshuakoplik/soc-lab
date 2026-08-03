@@ -39,6 +39,7 @@ services:
       LITELLM_URL: "http://litellm:4000"
       LITELLM_MASTER_KEY: "sk-northwind-placeholder"
       LITELLM_MODEL: "qwen3-8b"
+      INGEST_SVC_URL: "http://ingest-svc:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,6 +116,12 @@ services:
     container_name: nw-ingest-svc
     networks:
       - nw_app
+    environment:
+      DATABASE_URL: "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
+      RETRIEVAL_SVC_URL: "http://retrieval-svc:8000"
+      INGEST_POLL_INTERVAL_SECONDS: "20"
+    volumes:
+      - ./services/ingest-svc/watched:/app/watched
     depends_on:
       postgres:
         condition: service_healthy

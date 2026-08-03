@@ -37,6 +37,7 @@ app = FastAPI()
 
 PREFILTER_SQL = """
     SELECT d.id, d.title, d.content, d.tenant_id, d.owning_department_id, d.label,
+           d.source, d.submitter,
            1 - (d.embedding <=> %(qvec)s::vector) AS score
     FROM app.documents d
     WHERE d.tenant_id = %(tenant_id)s
@@ -59,6 +60,7 @@ PREFILTER_SQL = """
 
 POSTFILTER_SQL = """
     SELECT d.id, d.title, d.content, d.tenant_id, d.owning_department_id, d.label,
+           d.source, d.submitter,
            1 - (d.embedding <=> %(qvec)s::vector) AS score
     FROM app.documents d
     ORDER BY d.embedding <=> %(qvec)s::vector
@@ -90,9 +92,23 @@ class SearchRequest(BaseModel):
     mode: str = "prefilter"
 
 
+class EmbedRequest(BaseModel):
+    text: str
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/embed")
+def embed_endpoint(body: EmbedRequest):
+    # Thin wrapper around the same embed() every /search call already uses
+    # (SPEC.md §13 milestone 6 decision: one embedding call-path, not two) --
+    # milestone 9's ingest-svc calls this instead of talking to llm-backend
+    # itself, so there still isn't a second implementation of "call the
+    # embedding model."
+    return {"embedding": embed(body.text)}
 
 
 @app.post("/search")
@@ -147,6 +163,8 @@ def search(body: SearchRequest):
                 "title": r["title"],
                 "content": r["content"],
                 "label": r["label"],
+                "source": r["source"],
+                "submitter": r["submitter"],
                 "score": float(r["score"]),
             }
             for r in results
