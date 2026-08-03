@@ -35,6 +35,10 @@ services:
     environment:
       DATABASE_URL: "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
       REDIS_URL: "redis://redis:6379/0"
+      RETRIEVAL_SVC_URL: "http://retrieval-svc:8000"
+      LITELLM_URL: "http://litellm:4000"
+      LITELLM_MASTER_KEY: "sk-northwind-placeholder"
+      LITELLM_MODEL: "qwen3-8b"
     depends_on:
       postgres:
         condition: service_healthy

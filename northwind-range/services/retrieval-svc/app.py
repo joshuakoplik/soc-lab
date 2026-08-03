@@ -36,7 +36,7 @@ DATABASE_URL = os.environ.get(
 app = FastAPI()
 
 PREFILTER_SQL = """
-    SELECT d.id, d.title, d.tenant_id, d.owning_department_id, d.label,
+    SELECT d.id, d.title, d.content, d.tenant_id, d.owning_department_id, d.label,
            1 - (d.embedding <=> %(qvec)s::vector) AS score
     FROM app.documents d
     WHERE d.tenant_id = %(tenant_id)s
@@ -58,7 +58,7 @@ PREFILTER_SQL = """
 """
 
 POSTFILTER_SQL = """
-    SELECT d.id, d.title, d.tenant_id, d.owning_department_id, d.label,
+    SELECT d.id, d.title, d.content, d.tenant_id, d.owning_department_id, d.label,
            1 - (d.embedding <=> %(qvec)s::vector) AS score
     FROM app.documents d
     ORDER BY d.embedding <=> %(qvec)s::vector
@@ -145,6 +145,7 @@ def search(body: SearchRequest):
             {
                 "document_id": r["id"],
                 "title": r["title"],
+                "content": r["content"],
                 "label": r["label"],
                 "score": float(r["score"]),
             }

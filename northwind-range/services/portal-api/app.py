@@ -1,12 +1,17 @@
-"""portal-api: authN, session handling (SPEC.md §7, milestone 5).
+"""portal-api: authN, session handling (SPEC.md §7, milestone 5), and the
+chat/RAG orchestration path (milestone 7).
 
 Control-toggle endpoints are deliberately not here yet -- the full control
-matrix (SPEC.md §5) is milestone 10's job; this milestone is authN/session/
-policy-module only, per the build order's own scoping.
+matrix (SPEC.md §5) is milestone 10's job; /chat uses the stated defaults
+(RET_PREFILTER=on, ENT_RETRIEVAL=on) as plain constants, not toggles, same
+"mechanism now, full matrix later" split every milestone since 4 has used.
 """
 import hashlib
+import json
 import os
 import secrets
+import urllib.request
+from pathlib import Path
 
 import psycopg2
 import redis
@@ -19,8 +24,13 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
 )
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+RETRIEVAL_SVC_URL = os.environ.get("RETRIEVAL_SVC_URL", "http://retrieval-svc:8000")
+LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm:4000")
+LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "sk-northwind-placeholder")
+LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "qwen3-8b")
 SESSION_TTL_SECONDS = 8 * 60 * 60
 SESSION_COOKIE = "nw_session"
+SYSTEM_PROMPT = Path("/app/prompts/baseline.txt").read_text()
 
 app = FastAPI()
 r = redis.from_url(REDIS_URL, decode_responses=True)
@@ -151,3 +161,54 @@ def create_token(user: dict = Depends(get_current_user)):
     finally:
         conn.close()
     return {"token": token}
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+def _post_json(url: str, body: dict, headers: dict | None = None, timeout: int = 120) -> dict:
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def retrieval_search(user_id: int, query: str, k: int = 5, mode: str = "prefilter") -> dict:
+    return _post_json(
+        f"{RETRIEVAL_SVC_URL}/search", {"user_id": user_id, "query": query, "k": k, "mode": mode}
+    )
+
+
+def litellm_chat(system_prompt: str, user_turn: str) -> str:
+    result = _post_json(
+        f"{LITELLM_URL}/chat/completions",
+        {
+            "model": LITELLM_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_turn},
+            ],
+        },
+        headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"},
+        timeout=180,
+    )
+    return result["choices"][0]["message"]["content"]
+
+
+@app.post("/chat")
+def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
+    search_result = retrieval_search(user["user_id"], body.message, k=5, mode="prefilter")
+    results = search_result["results"]
+
+    # SPEC.md §5.2 RET_PLACEMENT default: user_delimited -- retrieved
+    # content goes in the user turn, clearly fenced, never the system
+    # turn. Same delimiter-fencing instinct as the parent lab's own
+    # triage agent (<untrusted-evidence> in pipeline/triage/agent.py).
+    context = "\n\n".join(f"[{res['title']}]\n{res['content']}" for res in results)
+    user_turn = f"<retrieved-context>\n{context}\n</retrieved-context>\n\n{body.message}"
+
+    answer = litellm_chat(SYSTEM_PROMPT, user_turn)
+    return {"response": answer, "sources": [res["document_id"] for res in results]}

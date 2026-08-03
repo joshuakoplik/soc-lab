@@ -40,3 +40,4 @@ verify:
 	./scripts/verify-llm-backend.sh
 	./scripts/verify-entitlements.sh
 	./scripts/verify-retrieval.sh
+	./scripts/verify-chat.sh
