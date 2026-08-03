@@ -83,3 +83,29 @@ CREATE TABLE IF NOT EXISTS parse_failures (
     reason  TEXT NOT NULL,
     line    TEXT NOT NULL
 );
+
+-- Northwind range milestone 12 (SPEC.md §10): full LLM transcripts don't
+-- fit the single-row events shape above (retrieved_context and tool_calls
+-- are nested structures, not flat columns) -- a deliberate, minimal
+-- extension of the one-table pattern rather than a lossy flattening.
+-- Populated by pipeline/ingest.py's read_new_transcripts(), tailing
+-- northwind-range/telemetry/llm-transcripts.log the same way every other
+-- source here is tailed.
+CREATE TABLE IF NOT EXISTS llm_transcripts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    session_id        TEXT,
+    username          TEXT,
+    model             TEXT,
+    system_prompt     TEXT,
+    user_turn         TEXT,
+    retrieved_context TEXT,           -- JSON array
+    tool_calls        TEXT,           -- JSON array
+    completion        TEXT,
+    controls          TEXT,           -- JSON: the control vector active for this call
+    raw               TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_transcripts_ts      ON llm_transcripts(ts);
+CREATE INDEX IF NOT EXISTS idx_llm_transcripts_session ON llm_transcripts(session_id);

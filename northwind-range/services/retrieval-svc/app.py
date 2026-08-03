@@ -29,6 +29,8 @@ from pydantic import BaseModel
 from embeddings import as_vector_literal, embed
 from policy import policy
 
+import telemetry_writer
+
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
 )
@@ -164,6 +166,7 @@ def search(body: SearchRequest):
                 for row in rows:
                     policy.decide(body.user_id, row["id"], "read", conn=conn)
                 results = rows
+                candidate_count = len(rows)
             elif body.mode == "postfilter":
                 cur.execute(
                     POSTFILTER_SQL.format(source_clause=source_clause),
@@ -175,6 +178,7 @@ def search(body: SearchRequest):
                     decision = policy.decide(body.user_id, row["id"], "read", conn=conn)
                     if decision.allowed:
                         results.append(row)
+                candidate_count = len(candidates)
             else:
                 # SPEC.md §5.1 ENT_RETRIEVAL=off -- the retrieval-layer
                 # analogue of tool-svc's ent_tool=False confused-deputy
@@ -186,11 +190,24 @@ def search(body: SearchRequest):
                     {"qvec": qvec, "k": body.k, "denylist": SOURCE_DENYLIST},
                 )
                 results = cur.fetchall()
+                candidate_count = len(results)
 
             if body.score_threshold:
                 results = [r for r in results if r["score"] >= MIN_SCORE]
     finally:
         conn.close()
+
+    # SPEC.md §10 milestone 12 -- query, filter predicate, candidate/
+    # returned counts. `query` text traces back to a chat message
+    # (attacker-influenced), so it lands in the `command` column downstream.
+    try:
+        telemetry_writer.emit("retrieval-events", {
+            "user_id": body.user_id, "query": body.query, "mode": body.mode,
+            "source_allowlist": body.source_allowlist, "score_threshold": body.score_threshold,
+            "candidate_count": candidate_count, "returned_count": len(results),
+        })
+    except Exception:
+        pass
 
     return {
         "mode": body.mode,

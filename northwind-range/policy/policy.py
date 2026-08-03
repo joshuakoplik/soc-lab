@@ -38,6 +38,8 @@ from dataclasses import dataclass
 
 import psycopg2
 
+import telemetry_writer
+
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
 )
@@ -160,4 +162,14 @@ def _log(conn, user_id: int, object_type: str, object_id: int, action: str, allo
             (user_id, object_type, object_id, action, allowed, reason),
         )
     conn.commit()
+    # SPEC.md §7/§10 milestone 12 -- every caller (portal-api, retrieval-svc,
+    # tool-svc, harness's scoring) ships its decisions automatically, no
+    # per-caller wiring. Best-effort: telemetry_writer.emit() never raises.
+    try:
+        telemetry_writer.emit("policy-decisions", {
+            "user_id": user_id, "object_type": object_type, "object_id": object_id,
+            "action": action, "decision": allowed, "reason": reason,
+        })
+    except Exception:
+        pass
     return Decision(allowed=allowed, reason=reason)

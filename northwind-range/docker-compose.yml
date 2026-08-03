@@ -12,6 +12,8 @@ services:
     container_name: nw-edge-nginx
     networks:
       - nw_dmz
+    volumes:
+      - ./telemetry:/app/telemetry
     depends_on:
       chat-web:
         condition: service_healthy
@@ -41,6 +43,8 @@ services:
       LITELLM_MASTER_KEY: "sk-northwind-placeholder"
       LITELLM_MODEL: "qwen3-8b"
       INGEST_SVC_URL: "http://ingest-svc:8000"
+    volumes:
+      - ./telemetry:/app/telemetry
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,6 +96,8 @@ services:
       DATABASE_URL: "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
       LLM_BACKEND_URL: "http://llm-backend:11434"
       EMBED_MODEL: "embeddinggemma"
+    volumes:
+      - ./telemetry:/app/telemetry
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,12 +114,19 @@ services:
     environment:
       DATABASE_URL: "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
       RETRIEVAL_SVC_URL: "http://retrieval-svc:8000"
+    volumes:
+      - ./telemetry:/app/telemetry
     depends_on:
       postgres:
         condition: service_healthy
 
   ingest-svc:
-    build: ./services/ingest-svc
+    # Repo-root context so the Dockerfile can COPY telemetry_writer.py in --
+    # SPEC.md §10 milestone 12's first shared-module dependency for this
+    # service (never needed policy/ before now).
+    build:
+      context: .
+      dockerfile: services/ingest-svc/Dockerfile
     container_name: nw-ingest-svc
     networks:
       - nw_app
@@ -123,6 +136,7 @@ services:
       INGEST_POLL_INTERVAL_SECONDS: "20"
     volumes:
       - ./services/ingest-svc/watched:/app/watched
+      - ./telemetry:/app/telemetry
     depends_on:
       postgres:
         condition: service_healthy
@@ -186,6 +200,7 @@ services:
       # band; a rebuild shouldn't be required just to pick up new items.
       - ./corpus/attacks:/app/corpus/attacks:ro
       - ./corpus/benign:/app/corpus/benign:ro
+      - ./telemetry:/app/telemetry
     depends_on:
       postgres:
         condition: service_healthy

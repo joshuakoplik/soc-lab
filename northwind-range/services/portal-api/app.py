@@ -36,6 +36,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from policy import policy
+import telemetry_writer
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
@@ -53,6 +54,30 @@ PROMPTS_DIR = Path("/app/prompts")
 
 app = FastAPI()
 r = redis.from_url(REDIS_URL, decode_responses=True)
+
+
+@app.middleware("http")
+async def telemetry_middleware(request: Request, call_next):
+    # SPEC.md §10 milestone 12 -- one line per request: session, user, and
+    # the active control vector. Covers every endpoint generically (not
+    # just /chat, which additionally emits a full transcript -- see
+    # chat() below). Reads the session cookie directly rather than going
+    # through get_current_user() -- this is telemetry, not auth, and
+    # shouldn't touch the session's TTL on every single request the way
+    # the real auth dependency already does for authenticated routes.
+    response = await call_next(request)
+    try:
+        session_id = request.cookies.get(SESSION_COOKIE)
+        username = None
+        if session_id:
+            username = r.hget(_session_key(session_id), "username")
+        telemetry_writer.emit("portal-api", {
+            "method": request.method, "path": request.url.path, "status": response.status_code,
+            "session_id": session_id, "username": username, "controls": get_control_state(),
+        })
+    except Exception:
+        pass  # telemetry must never break a real request
+    return response
 
 
 def db():
@@ -681,6 +706,7 @@ def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
 
     add_token_usage(rate_key, total_tokens)
     answer = _strip_think(msg.get("content") or "")
+    raw_completion = answer  # snapshot before grounding/structured/redaction post-processing
 
     grounded = None
     if controls["OUT_GROUNDING_CHECK"] and context_block:
@@ -700,6 +726,32 @@ def chat(body: ChatRequest, user: dict = Depends(get_current_user)):
     secrets_filtered = False
     if controls["OUT_SECRET_FILTER"]:
         answer, secrets_filtered = redact_secrets(answer)
+
+    # SPEC.md §10 milestone 12 -- full transcript, separate from the
+    # request-log line the middleware already wrote. `completion` is the
+    # raw model output before grounding/structured/redaction
+    # post-processing (raw_completion) -- deliberately not the same text
+    # as `answer` below, which the user actually saw: a defender needs to
+    # see what the model really said, including anything that got redacted.
+    try:
+        telemetry_writer.emit("llm-transcripts", {
+            "session_id": user["session_id"], "username": user["username"],
+            "model": body.model or LITELLM_MODEL,
+            "system_prompt": system_prompt, "user_turn": user_turn,
+            "retrieved_context": [
+                {
+                    "document_id": res.get("document_id"), "title": res.get("title"),
+                    "source": res.get("source"), "submitter": res.get("submitter"),
+                    "score": res.get("score"),
+                }
+                for res in results
+            ],
+            "tool_calls": tool_calls_made,
+            "completion": raw_completion,
+            "controls": controls,
+        })
+    except Exception:
+        pass  # telemetry must never break a real response
 
     return {
         "response": answer,

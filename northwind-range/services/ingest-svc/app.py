@@ -31,6 +31,8 @@ from fastapi import FastAPI, HTTPException
 from pgvector.psycopg2 import register_vector
 from pydantic import BaseModel
 
+import telemetry_writer
+
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
 )
@@ -105,6 +107,21 @@ def _ingest(
             (source, source_ref, submitter, h, tenant_id, document_id),
         )
     conn.commit()
+
+    # SPEC.md §10 milestone 12 -- dual-write alongside the app.ingest_events
+    # row above: this is Northwind's own internal record; the telemetry
+    # line is what ships to the parent SOC pipeline. `content` is
+    # genuinely attacker-controlled by construction (this service's whole
+    # reason for existing is unreviewed content entering the index).
+    try:
+        telemetry_writer.emit("ingest-events", {
+            "source": source, "source_ref": source_ref, "submitter": submitter,
+            "content_hash": h, "tenant_id": tenant_id, "document_id": document_id,
+            "content": content,
+        })
+    except Exception:
+        pass
+
     return document_id
 
 

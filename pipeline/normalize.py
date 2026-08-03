@@ -252,11 +252,201 @@ def normalize_wazuh(obj, raw):
     }
 
 
+# Northwind range milestone 12 (SPEC.md §10/§13): five more sources,
+# additive only -- nothing above this line changes. Same trust-column
+# discipline as everything else in this file, with one documented
+# compromise: `request_body` (ATTACKER_CONTROLLED below) is reused as a
+# generic JSON-metadata slot for two of these sources (the active control
+# vector on a portal-api request; a policy decision's structured detail) --
+# neither is actually hostile text, but there's no dedicated "trusted JSON
+# metadata" column in this shared table, and treating non-hostile data as
+# attacker-controlled by default is the safe direction to err in, unlike
+# the reverse.
+def normalize_northwind_nginx(obj, raw):
+    """edge-nginx's log_format is the parent nginx.conf's own json_ecs
+    block, verbatim -- reuse normalize_nginx()'s body, just correcting the
+    source tag it hardcodes, rather than a duplicated function."""
+    row = normalize_nginx(obj, raw)
+    row["source"] = "northwind-nginx"
+    return row
+
+
+PORTAL_API_EVENT_MAP = {
+    "/auth/login":   "portal.login",
+    "/auth/logout":  "portal.logout",
+    "/auth/me":      "portal.me",
+    "/auth/tokens":  "portal.token_issue",
+    "/chat":         "portal.chat",
+    "/feedback":     "portal.feedback",
+    "/controls":     "portal.controls",
+}
+
+
+def normalize_northwind_portal_api(obj, raw):
+    return {
+        "ts":             _iso_utc(obj.get("ts")),
+        "source":         "northwind-portal-api",
+        "event_type":     PORTAL_API_EVENT_MAP.get(obj.get("path"), "portal.request"),
+        "src_ip":         None,
+        "src_port":       None,
+        "dst_port":       None,
+        "session_id":     _clean(obj.get("session_id")),
+        "http_status":    _int(obj.get("status")),
+        "bytes_sent":     None,
+        "username":       _clean(obj.get("username")),
+        "password":       None,
+        "command":        None,
+        "http_method":    _clean(obj.get("method")),
+        "url_path":       _clean(obj.get("path")),
+        "url_query":      None,
+        "user_agent":     None,
+        "referer":        None,
+        "request_body":   json.dumps(obj["controls"]) if obj.get("controls") is not None else None,
+        "client_version": None,
+        "ids_signature":    None,
+        "ids_category":     None,
+        "ids_severity":     None,
+        "ids_signature_id": None,
+        "siem_rule_id":     None,
+        "siem_level":       None,
+        "siem_description": None,
+        "siem_groups":      None,
+        "message":        None,
+        "raw":            raw,
+    }
+
+
+def normalize_northwind_policy(obj, raw):
+    """SPEC.md §7's decision log. reason/decision are policy.py's own
+    computed verdict -- system-generated, not attacker text, hence
+    `message` (not one of the attacker-controlled columns)."""
+    return {
+        "ts":             _iso_utc(obj.get("ts")),
+        "source":         "northwind-policy",
+        "event_type":     "policy.decision",
+        "src_ip":         None,
+        "src_port":       None,
+        "dst_port":       None,
+        "session_id":     None,
+        "http_status":    None,
+        "bytes_sent":     None,
+        "username":       None,
+        "password":       None,
+        "command":        None,
+        "http_method":    None,
+        "url_path":       None,
+        "url_query":      None,
+        "user_agent":     None,
+        "referer":        None,
+        "request_body":   json.dumps({
+            "user_id": obj.get("user_id"), "object_type": obj.get("object_type"),
+            "object_id": obj.get("object_id"), "action": obj.get("action"),
+            "decision": obj.get("decision"),
+        }),
+        "client_version": None,
+        "ids_signature":    None,
+        "ids_category":     None,
+        "ids_severity":     None,
+        "ids_signature_id": None,
+        "siem_rule_id":     None,
+        "siem_level":       None,
+        "siem_description": None,
+        "siem_groups":      None,
+        "message":        _clean(obj.get("reason")),
+        "raw":            raw,
+    }
+
+
+def normalize_northwind_ingest(obj, raw):
+    """SPEC.md §6.3/§10: ingest-svc's own event log. The ingested content
+    is genuinely attacker-controlled by construction -- this service's
+    whole reason for existing is unreviewed content entering the index --
+    so it lands in `request_body`, the cleanest possible fit."""
+    return {
+        "ts":             _iso_utc(obj.get("ts")),
+        "source":         "northwind-ingest",
+        "event_type":     f"ingest.{obj.get('source', 'unknown')}",
+        "src_ip":         None,
+        "src_port":       None,
+        "dst_port":       None,
+        "session_id":     None,
+        "http_status":    None,
+        "bytes_sent":     None,
+        "username":       _clean(obj.get("submitter")),
+        "password":       None,
+        "command":        None,
+        "http_method":    None,
+        "url_path":       None,
+        "url_query":      None,
+        "user_agent":     None,
+        "referer":        None,
+        "request_body":   _clean(obj.get("content")),
+        "client_version": None,
+        "ids_signature":    None,
+        "ids_category":     None,
+        "ids_severity":     None,
+        "ids_signature_id": None,
+        "siem_rule_id":     None,
+        "siem_level":       None,
+        "siem_description": None,
+        "siem_groups":      None,
+        "message":        _clean(obj.get("content_hash")),
+        "raw":            raw,
+    }
+
+
+def normalize_northwind_retrieval(obj, raw):
+    """SPEC.md §10: query, filter predicate, candidate/returned counts.
+    query text traces back to a chat message -- attacker-influenced --
+    hence `command`, the same column cowrie's typed shell input uses."""
+    return {
+        "ts":             _iso_utc(obj.get("ts")),
+        "source":         "northwind-retrieval",
+        "event_type":     "retrieval.search",
+        "src_ip":         None,
+        "src_port":       None,
+        "dst_port":       None,
+        "session_id":     None,
+        "http_status":    None,
+        "bytes_sent":     None,
+        "username":       None,
+        "password":       None,
+        "command":        _clean(obj.get("query")),
+        "http_method":    None,
+        "url_path":       None,
+        "url_query":      None,
+        "user_agent":     None,
+        "referer":        None,
+        "request_body":   json.dumps({
+            "mode": obj.get("mode"), "source_allowlist": obj.get("source_allowlist"),
+            "score_threshold": obj.get("score_threshold"),
+            "candidate_count": obj.get("candidate_count"), "returned_count": obj.get("returned_count"),
+            "user_id": obj.get("user_id"),
+        }),
+        "client_version": None,
+        "ids_signature":    None,
+        "ids_category":     None,
+        "ids_severity":     None,
+        "ids_signature_id": None,
+        "siem_rule_id":     None,
+        "siem_level":       None,
+        "siem_description": None,
+        "siem_groups":      None,
+        "message":        None,
+        "raw":            raw,
+    }
+
+
 NORMALIZERS = {
     "cowrie":   normalize_cowrie,
     "nginx":    normalize_nginx,
     "suricata": normalize_suricata,
     "wazuh":    normalize_wazuh,
+    "northwind-nginx":     normalize_northwind_nginx,
+    "northwind-portal-api": normalize_northwind_portal_api,
+    "northwind-policy":     normalize_northwind_policy,
+    "northwind-ingest":     normalize_northwind_ingest,
+    "northwind-retrieval":  normalize_northwind_retrieval,
 }
 
 ATTACKER_CONTROLLED = (

@@ -55,3 +55,4 @@ verify:
 	./scripts/verify-ingest.sh
 	./scripts/verify-controls.sh
 	./scripts/verify-harness.sh
+	./scripts/verify-telemetry.sh

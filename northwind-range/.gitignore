@@ -14,3 +14,8 @@ __pycache__/
 # content, not source. Keep the mount point itself present in git.
 services/ingest-svc/watched/*
 !services/ingest-svc/watched/.gitkeep
+
+# SPEC.md §10 telemetry shippers -- runtime log output, not source. Keep
+# the bind-mount target present in git.
+telemetry/*
+!telemetry/.gitkeep

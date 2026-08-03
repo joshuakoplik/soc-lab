@@ -25,6 +25,7 @@ from llm_view import compute_llm_view, check_llm_view_size, print_strip_summary 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DB_PATH = os.path.join(ROOT, "soc.db")
+NW_TELEMETRY = os.path.join(ROOT, "northwind-range", "telemetry")
 
 SOURCES = [
     ("cowrie",   os.path.join(ROOT, "logs", "cowrie", "cowrie.json")),
@@ -34,6 +35,21 @@ SOURCES = [
     # path stays put while the inode changes. read_new()'s inode check handles
     # it — that branch was written for logrotate and works here unchanged.
     ("wazuh",    os.path.join(ROOT, "logs", "wazuh", "alerts.json")),
+    # Northwind range milestone 12 (SPEC.md §10) -- same tail-a-JSON-lines-
+    # file mechanism, five more sources. See normalize.py for the
+    # corresponding normalizer functions.
+    ("northwind-nginx",      os.path.join(NW_TELEMETRY, "edge-nginx-access.json")),
+    ("northwind-portal-api", os.path.join(NW_TELEMETRY, "portal-api.log")),
+    ("northwind-policy",     os.path.join(NW_TELEMETRY, "policy-decisions.log")),
+    ("northwind-ingest",     os.path.join(NW_TELEMETRY, "ingest-events.log")),
+    ("northwind-retrieval",  os.path.join(NW_TELEMETRY, "retrieval-events.log")),
+]
+
+# Full LLM transcripts don't fit the events table's flat shape (see
+# schema.sql's llm_transcripts table) -- handled by read_new_transcripts()
+# below, not the SOURCES/read_new()/NORMALIZERS path.
+TRANSCRIPT_SOURCES = [
+    ("northwind-portal-api", os.path.join(NW_TELEMETRY, "llm-transcripts.log")),
 ]
 
 
@@ -140,10 +156,17 @@ def ingest_line(conn, source, path, line):
         return False
 
 
-def read_new(conn, source, path):
-    """Read whatever's new since last time. Returns count ingested."""
+def _read_new_lines(conn, path):
+    """Shared tail-since-last-offset + rotation-detection logic. Returns
+    the list of new, complete, non-empty decoded lines. Queues the
+    tail_state update in the same (uncommitted) transaction as whatever
+    the caller does next -- read_new() and read_new_transcripts() both
+    commit once after processing every returned line, so a crash mid-batch
+    rolls back the offset advance along with the inserts, and the next run
+    safely re-reads from the old offset rather than silently skipping
+    lines that were never actually ingested."""
     if not os.path.exists(path):
-        return 0
+        return []
 
     st = os.stat(path)
     known_inode, offset = get_state(conn, path)
@@ -159,9 +182,9 @@ def read_new(conn, source, path):
         offset = 0
 
     if st.st_size == offset:
-        return 0
+        return []
 
-    count = 0
+    lines = []
     # Binary mode, deliberately. Two reasons:
     #  1. Offsets must be EXACT byte counts. Reading in text mode and counting
     #     len(line.encode(...)) drifts: errors="replace" turns one invalid byte
@@ -182,12 +205,65 @@ def read_new(conn, source, path):
                 break
             offset += len(raw_line)          # exact: these are the bytes we read
             line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            if ingest_line(conn, source, path, line):
-                count += 1
+            if line:
+                lines.append(line)
 
     set_state(conn, path, st.st_ino, offset)
+    return lines
+
+
+def read_new(conn, source, path):
+    """Read whatever's new since last time. Returns count ingested."""
+    count = 0
+    for line in _read_new_lines(conn, path):
+        if ingest_line(conn, source, path, line):
+            count += 1
+    conn.commit()
+    return count
+
+
+def insert_transcript(conn, obj, raw):
+    conn.execute(
+        "INSERT INTO llm_transcripts "
+        "(ts, source, session_id, username, model, system_prompt, user_turn, "
+        " retrieved_context, tool_calls, completion, controls, raw) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            obj.get("ts") or now_iso(), "northwind-portal-api",
+            obj.get("session_id"), obj.get("username"), obj.get("model"),
+            obj.get("system_prompt"), obj.get("user_turn"),
+            json.dumps(obj["retrieved_context"]) if obj.get("retrieved_context") is not None else None,
+            json.dumps(obj["tool_calls"]) if obj.get("tool_calls") is not None else None,
+            obj.get("completion"),
+            json.dumps(obj["controls"]) if obj.get("controls") is not None else None,
+            raw,
+        ),
+    )
+
+
+def ingest_transcript_line(conn, path, line):
+    """llm_transcripts' analogue of ingest_line() -- parses one JSON line
+    and inserts it directly, bypassing NORMALIZERS/insert_event since a
+    transcript's nested shape (retrieved_context, tool_calls) doesn't fit
+    the flat events table."""
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError as e:
+        record_failure(conn, path, f"json: {e}", line)
+        return False
+    try:
+        insert_transcript(conn, obj, line)
+        return True
+    except Exception as e:  # noqa: BLE001
+        record_failure(conn, path, f"transcript: {e}", line)
+        return False
+
+
+def read_new_transcripts(conn, path):
+    count = 0
+    for line in _read_new_lines(conn, path):
+        if ingest_transcript_line(conn, path, line):
+            count += 1
     conn.commit()
     return count
 
@@ -201,7 +277,8 @@ def summarize(conn):
         print(f"  {r['source']:<8} {r['event_type']:<22} {r['n']:>6}")
     total = conn.execute("SELECT COUNT(*) n FROM events").fetchone()["n"]
     fails = conn.execute("SELECT COUNT(*) n FROM parse_failures").fetchone()["n"]
-    print(f"\n  total events: {total}   parse failures: {fails}")
+    transcripts = conn.execute("SELECT COUNT(*) n FROM llm_transcripts").fetchone()["n"]
+    print(f"\n  total events: {total}   llm_transcripts: {transcripts}   parse failures: {fails}")
     print_strip_summary()
     if fails:
         print("  inspect with: SELECT reason, COUNT(*) FROM parse_failures GROUP BY reason;")
@@ -230,6 +307,11 @@ def main():
         total += n
         state = "ok" if os.path.exists(path) else "MISSING"
         print(f"[*] {source:<8} {path}  [{state}]  +{n}")
+    for source, path in TRANSCRIPT_SOURCES:
+        n = read_new_transcripts(conn, path)
+        total += n
+        state = "ok" if os.path.exists(path) else "MISSING"
+        print(f"[*] {source:<8} {path}  [{state}]  +{n} (llm_transcripts)")
 
     if not args.follow:
         summarize(conn)
@@ -244,6 +326,11 @@ def main():
                 if n:
                     total += n
                     print(f"  +{n:<4} {source:<8} (total {total})")
+            for source, path in TRANSCRIPT_SOURCES:
+                n = read_new_transcripts(conn, path)
+                if n:
+                    total += n
+                    print(f"  +{n:<4} {source:<8} (total {total}, llm_transcripts)")
     except KeyboardInterrupt:
         print("\n[*] stopped")
         summarize(conn)

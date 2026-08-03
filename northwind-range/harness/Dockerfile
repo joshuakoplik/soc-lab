@@ -12,6 +12,7 @@ COPY harness/api.py harness/loader.py harness/scoring.py harness/runner.py harne
 COPY harness/configs/ /app/configs/
 COPY policy/ /app/policy/
 COPY prompts/ /app/prompts/
+COPY telemetry_writer.py /app/telemetry_writer.py
 RUN chmod +x entrypoint.sh
 EXPOSE 8000
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)" || exit 1
