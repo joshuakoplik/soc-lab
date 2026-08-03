@@ -84,9 +84,12 @@ def decide(user_id: int, document_id: int, action: str = "read", conn=None) -> D
             if cur.fetchone() is not None:
                 return _log(conn, user_id, document_id, action, True, "active-grant")
 
+            # user_department_id, not owning_department_id -- a share row
+            # names the department being granted access, which is never the
+            # document's own owning department (that'd be a no-op share).
             cur.execute(
                 "SELECT 1 FROM app.document_shares WHERE document_id = %s AND department_id = %s",
-                (document_id, owning_department_id),
+                (document_id, user_department_id),
             )
             if cur.fetchone() is not None:
                 return _log(conn, user_id, document_id, action, True, "explicit-share")

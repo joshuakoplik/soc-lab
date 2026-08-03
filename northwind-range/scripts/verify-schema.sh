@@ -75,7 +75,31 @@ else
 fi
 
 echo
-echo "=== 5. Every seeded password verifies against its bcrypt hash ==="
+echo "=== 5. Embeddings (milestone 6) ==="
+EMB_COL="$(psql_q "select data_type from information_schema.columns
+                    where table_schema='app' and table_name='documents' and column_name='embedding';")"
+if [ "$EMB_COL" = "USER-DEFINED" ]; then
+  ok "app.documents.embedding column exists"
+else
+  bad "app.documents.embedding column missing, got data_type: [$EMB_COL]"
+fi
+
+EMB_NULL="$(psql_q "select count(*) from app.documents where embedding is null;")"
+if [ "$EMB_NULL" = "0" ]; then
+  ok "every document has a non-null embedding"
+else
+  bad "$EMB_NULL document(s) missing an embedding -- run 'make embed-corpus'"
+fi
+
+EMB_IDX="$(psql_q "select count(*) from pg_indexes where schemaname='app' and tablename='documents' and indexname='documents_embedding_idx';")"
+if [ "$EMB_IDX" = "1" ]; then
+  ok "documents_embedding_idx (HNSW) exists"
+else
+  bad "documents_embedding_idx missing"
+fi
+
+echo
+echo "=== 6. Every seeded password verifies against its bcrypt hash ==="
 if [ ! -f .seed-credentials.json ]; then
   bad ".seed-credentials.json missing -- run 'make seed' first"
 else

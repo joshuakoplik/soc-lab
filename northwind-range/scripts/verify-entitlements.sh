@@ -46,7 +46,9 @@ def expected(user, doc):
         return True, "same-department"
     if (user[0], d_owner) in active_grants:
         return True, "active-grant"
-    if (doc[0], d_owner) in shares:
+    # u_dept, not d_owner -- a share names the department being granted
+    # access, never the document's own owning department.
+    if (doc[0], u_dept) in shares:
         return True, "explicit-share"
     return False, "no-entitlement"
 

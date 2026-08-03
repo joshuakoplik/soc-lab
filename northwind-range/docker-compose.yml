@@ -74,10 +74,18 @@ services:
       OLLAMA_UPSTREAM_PORT: "11434"
 
   retrieval-svc:
-    build: ./services/retrieval-svc
+    # Repo-root context so the Dockerfile can COPY policy/ in -- same
+    # reason as portal-api (SPEC.md §7's shared policy module).
+    build:
+      context: .
+      dockerfile: services/retrieval-svc/Dockerfile
     container_name: nw-retrieval-svc
     networks:
       - nw_app
+    environment:
+      DATABASE_URL: "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
+      LLM_BACKEND_URL: "http://llm-backend:11434"
+      EMBED_MODEL: "embeddinggemma"
     depends_on:
       postgres:
         condition: service_healthy
