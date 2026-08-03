@@ -23,11 +23,18 @@ services:
       - nw_dmz
 
   portal-api:
-    build: ./services/portal-api
+    # Repo-root context so the Dockerfile can COPY policy/ in alongside its
+    # own code -- SPEC.md §7's shared policy module (see policy/policy.py).
+    build:
+      context: .
+      dockerfile: services/portal-api/Dockerfile
     container_name: nw-portal-api
     networks:
       - nw_dmz
       - nw_app
+    environment:
+      DATABASE_URL: "postgresql://northwind:northwind-placeholder@postgres:5432/northwind"
+      REDIS_URL: "redis://redis:6379/0"
     depends_on:
       postgres:
         condition: service_healthy

@@ -32,3 +32,4 @@ verify:
 	./scripts/verify-schema.sh
 	./scripts/verify-corpus.sh
 	./scripts/verify-llm-backend.sh
+	./scripts/verify-entitlements.sh

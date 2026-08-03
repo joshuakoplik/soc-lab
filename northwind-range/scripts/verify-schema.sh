@@ -26,10 +26,10 @@ fi
 
 echo
 echo "=== 2. Tables ==="
-WANT_TABLES="$(printf 'departments\ndocument_shares\ndocuments\ngrants\ntenants\nusers')"
+WANT_TABLES="$(printf 'api_tokens\ndepartments\ndocument_shares\ndocuments\ngrants\npolicy_decisions\ntenants\nusers')"
 GOT_TABLES="$(psql_q "select table_name from information_schema.tables where table_schema='app' order by table_name;")"
 if [ "$GOT_TABLES" = "$WANT_TABLES" ]; then
-  ok "all 6 app.* tables exist"
+  ok "all 8 app.* tables exist"
 else
   bad "table set mismatch, got: [$GOT_TABLES]"
 fi
