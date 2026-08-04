@@ -44,9 +44,11 @@ import hmac
 import http.cookiejar
 import json
 import os
+import time
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -160,6 +162,21 @@ class NorthwindSession:
         return f"{self.tenant}/{self.username}"
 
 
+def _path_only(url: str) -> str:
+    """Strips scheme/host/port from a URL for use in model-facing error
+    text. base_url() resolves to a real container IP (e.g.
+    http://172.28.10.4:80) -- that's an infrastructure implementation
+    detail of THIS harness, not something a genuine external attacker
+    would ever see, and embedding it in an error message the model reads
+    leaks internal topology into the agent's own reasoning, contaminating
+    the measurement (confirmed live: a red-team session flagged the
+    resolved IP appearing in a 429 error as an "information disclosure"
+    finding about the TARGET, when it was actually this adapter's own
+    error formatting)."""
+    parsed = urllib.parse.urlparse(url)
+    return parsed.path + (f"?{parsed.query}" if parsed.query else "")
+
+
 def _post_json(
     opener: urllib.request.OpenerDirector | None, url: str, payload: dict, timeout: int = HTTP_TIMEOUT_S
 ) -> dict:
@@ -171,9 +188,11 @@ def _post_json(
         resp = opener_fn(req, timeout=timeout)
         return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        raise NorthwindAdapterError(f"POST {url} -> {e.code}: {e.read().decode(errors='replace')}") from e
+        raise NorthwindAdapterError(
+            f"POST {_path_only(url)} -> {e.code}: {e.read().decode(errors='replace')}"
+        ) from e
     except urllib.error.URLError as e:
-        raise NorthwindAdapterError(f"POST {url} failed: {e}") from e
+        raise NorthwindAdapterError(f"POST {_path_only(url)} failed: {e}") from e
 
 
 def _get_json(opener: urllib.request.OpenerDirector, url: str) -> dict:
@@ -182,9 +201,11 @@ def _get_json(opener: urllib.request.OpenerDirector, url: str) -> dict:
         resp = opener.open(req, timeout=HTTP_TIMEOUT_S)
         return json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        raise NorthwindAdapterError(f"GET {url} -> {e.code}: {e.read().decode(errors='replace')}") from e
+        raise NorthwindAdapterError(
+            f"GET {_path_only(url)} -> {e.code}: {e.read().decode(errors='replace')}"
+        ) from e
     except urllib.error.URLError as e:
-        raise NorthwindAdapterError(f"GET {url} failed: {e}") from e
+        raise NorthwindAdapterError(f"GET {_path_only(url)} failed: {e}") from e
 
 
 def _lookup_department(user_id: int) -> str | None:
@@ -211,6 +232,35 @@ def _lookup_department(user_id: int) -> str | None:
             return row[0] if row else None
     except Exception:
         return None
+    finally:
+        conn.close()
+
+
+def active_grants(user_id: int) -> list[dict]:
+    """For whoami's "visible grants" -- /auth/login and /auth/me don't
+    return grants either (same gap as department), so this is a second
+    direct read. Same best-effort failure posture as _lookup_department():
+    an empty list on any failure, never a raised exception -- whoami should
+    never crash a session over a missing nice-to-have."""
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(_postgres_database_url())
+    except Exception:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT d.name, g.expires_at FROM app.grants g "
+                "JOIN app.departments d ON d.id = g.department_id "
+                "WHERE g.user_id = %s AND g.revoked_at IS NULL "
+                "AND (g.expires_at IS NULL OR g.expires_at > now())",
+                (user_id,),
+            )
+            return [{"department": row[0], "expires_at": row[1].isoformat() if row[1] else None}
+                    for row in cur.fetchall()]
+    except Exception:
+        return []
     finally:
         conn.close()
 
@@ -310,6 +360,25 @@ def chat(conn, session_id: int, nw_session: NorthwindSession, message: str, mode
     )
     conn.commit()
     return response
+
+
+def probe(nw_session: NorthwindSession, message: str, model: str | None = None) -> tuple[dict, float]:
+    """A raw, one-shot POST /api/chat -- deliberately NOT going through
+    chat()'s history-threading/persistence. Probing is reconnaissance
+    noise, not a meaningful conversation turn: threading probe messages
+    into the same growing transcript would pollute every future real turn
+    with throwaway content the querying identity never actually said.
+    Returns (response_dict, latency_ms) -- latency is measured here, not
+    left to _progress_wrapper's generic per-tool timing, since that's
+    print-only and never reaches the model, and probe_refusal's result
+    needs it."""
+    payload = {"message": message}
+    if model:
+        payload["model"] = model
+    t0 = time.monotonic()
+    response = _post_json(nw_session.opener, f"{base_url()}/api/chat", payload, timeout=CHAT_TIMEOUT_S)
+    latency_ms = (time.monotonic() - t0) * 1000
+    return response, latency_ms
 
 
 def submit_to_ingestion(tenant: str, message: str, submitter: str | None = None) -> dict:

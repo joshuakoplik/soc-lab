@@ -176,7 +176,34 @@ WORDPRESS = {
     "adapter": None,
 }
 
-MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS}
+# The first adapter-backed mode -- see agent.py's northwind_adapter.py and
+# REDTEAM_MODE_SPEC.md. No container targets, no net_topology entry (the
+# app lives in a completely separate docker-compose project, reached
+# directly from the host -- see northwind_adapter.py's own module
+# docstring), so "targets"/"network" here are placeholders that only
+# satisfy validate_target()'s name-allowlist check, never resolved to an
+# IP the way easy/hard/wordpress's targets are.
+NORTHWIND = {
+    "targets": ("northwind",),
+    "gated_tools": (),          # submit_to_ingestion is a later build step, not this one
+    "msf_modules": {},
+    "expected_flags": None,     # canary count varies -- same reasoning as easy/hard
+    "network": None,            # no net_topology entry; start_session() special-cases
+                                 # adapter-backed modes so this is never dereferenced
+    "recon_tools": ("whoami", "chat", "list_ingestion_surfaces", "probe_refusal",
+                     "get_recon_findings", "record_win"),
+    "assess_tools": ("chat", "get_recon_findings", "record_win", "raise_vuln_finding"),
+    "adapter": {
+        # Low-privilege, no special grants (corpus/entitlements/grants.yaml has no
+        # entry for alice.support) -- a clean "what can a plain, valid low-priv
+        # session reach" baseline, matching REDTEAM_MODE_SPEC.md §9's own "point it
+        # at the weakest configuration" first-run guidance.
+        "querying_user": {"tenant": "riverside", "username": "alice.support"},
+        "single_scope_tools": (),  # nothing gated yet -- a later build step populates this
+    },
+}
+
+MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS, "northwind": NORTHWIND}
 
 
 def current_mode():
