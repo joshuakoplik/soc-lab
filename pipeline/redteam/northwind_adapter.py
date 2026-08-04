@@ -195,10 +195,11 @@ def _post_json(
         raise NorthwindAdapterError(f"POST {_path_only(url)} failed: {e}") from e
 
 
-def _get_json(opener: urllib.request.OpenerDirector, url: str) -> dict:
+def _get_json(opener: urllib.request.OpenerDirector | None, url: str) -> dict:
     req = urllib.request.Request(url, method="GET")
+    opener_fn = opener.open if opener is not None else urllib.request.urlopen
     try:
-        resp = opener.open(req, timeout=HTTP_TIMEOUT_S)
+        resp = opener_fn(req, timeout=HTTP_TIMEOUT_S)
         return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         raise NorthwindAdapterError(
@@ -299,6 +300,20 @@ def whoami(nw_session: NorthwindSession) -> dict:
     """Pure passthrough, not persisted -- GET /auth/me, useful for
     confirming a login's identity matches what was requested."""
     return _get_json(nw_session.opener, f"{base_url()}/api/auth/me")
+
+
+def get_control_state() -> dict | None:
+    """GET /api/controls through edge-nginx -- unauthenticated (no auth
+    dependency on the route, same posture as /feedback). Best-effort, same
+    failure posture as active_grants()/_lookup_department(): this is a
+    nice-to-have operator snapshot (REDTEAM_MODE_SPEC.md §6's lab_config,
+    never surfaced to the model), not load-bearing for anything the
+    session actually does -- a failure here must never crash session
+    start."""
+    try:
+        return _get_json(None, f"{base_url()}/api/controls")
+    except Exception:
+        return None
 
 
 def _load_chat_history(conn, session_id: int, identity: str) -> list[dict]:
