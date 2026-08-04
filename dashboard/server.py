@@ -51,6 +51,8 @@ TABLES = {
     "loot":                  ("loot",                  150),
     "captured_flags":        ("captured_flag",          60),
     "llm_calls":             ("llm_call",               40),
+    "northwind_identities":  ("northwind_identity",     100),
+    "northwind_chat_turns":  ("northwind_chat_turn",    300),
 }
 
 # These get UPDATEd in place after insert (candidates.status flips
