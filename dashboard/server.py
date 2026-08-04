@@ -10,7 +10,7 @@ This process opens soc.db with `mode=ro` in the connection URI -- it is
 physically incapable of writing to the lab's data, regardless of what a bug
 here might otherwise attempt.
 
-Run: python3 dashboard/server.py  (serves http://127.0.0.1:8090 by default)
+Run: python3 dashboard/server.py  (serves http://127.0.0.1:8095 by default)
 Override with SOC_DASHBOARD_HOST / SOC_DASHBOARD_PORT / SOC_DASHBOARD_DB /
 SOC_DASHBOARD_POLL_INTERVAL env vars -- e.g. bind to a Tailscale address so
 other devices on the tailnet can reach it:
@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 DB_PATH = Path(os.environ.get("SOC_DASHBOARD_DB", Path(__file__).resolve().parent.parent / "soc.db"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 POLL_INTERVAL_S = float(os.environ.get("SOC_DASHBOARD_POLL_INTERVAL", "1.5"))
-PORT = int(os.environ.get("SOC_DASHBOARD_PORT", "8090"))
+PORT = int(os.environ.get("SOC_DASHBOARD_PORT", "8095"))
 HOST = os.environ.get("SOC_DASHBOARD_HOST", "127.0.0.1")
 
 # table -> (message type tag, how many rows to hand a freshly-connected client)
