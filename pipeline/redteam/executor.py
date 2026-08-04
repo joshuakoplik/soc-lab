@@ -115,6 +115,18 @@ def in_whitelisted_network(target, mode=None):
     return any(ip in net for net in ALLOWED_NETWORKS)
 
 
+def in_single_scope_action(adapter_cfg, tool):
+    """True if `tool` is one of an adapter-backed mode's single-scope actions
+    (one chat turn, one ingestion write) and may auto-approve. The
+    adapter-mode analogue of in_whitelisted_network() above: that function
+    answers "is this target's IP inside our own lab subnet"; there is no IP
+    to check for an HTTP application reached through a target adapter rather
+    than a Docker-container address, so this checks tool scope instead.
+    Only called when the active mode's "adapter" is set (see lab_modes.py)
+    -- container-target modes keep using in_whitelisted_network() unchanged."""
+    return tool in adapter_cfg.get("single_scope_tools", ())
+
+
 @dataclass
 class ExecResult:
     argv: list

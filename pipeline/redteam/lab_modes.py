@@ -109,12 +109,38 @@ ALLOWED_MSF_MODULES = {
 # relationship explicit and machine-checkable rather than left implicit,
 # and is what executor.py's resolve_target_ip()/attacker_ip()/rotate_ip()
 # default to when no mode is passed explicitly.
+#
+# "recon_tools"/"assess_tools": names of the RECON_TOOLS/ASSESS_TOOLS entries
+# (agent.py) this mode offers the model -- a real allowlist, not advisory:
+# agent.py builds RECON_TOOLS/ASSESS_TOOLS by filtering its tool registries
+# down to exactly these names, and dispatch_recon_tool()/dispatch_assess_tool()
+# refuse anything outside them before the usual if/elif chain even runs. Every
+# mode below lists its full current roster explicitly (same "every mode spells
+# out every key" convention as msf_modules/expected_flags), so adding this
+# field changes nothing about what already exists.
+#
+# "adapter": None for every container-target mode below -- reserved for a
+# future HTTP-application mode (e.g. an adapter-backed target that isn't a
+# Docker container reachable by name/IP at all). When populated, it's a dict
+# containing at minimum "single_scope_tools" (a tuple of gated-tool names
+# that may auto-approve because they're scoped to a single attempt -- one
+# chat turn, one ingestion write -- the adapter-mode analogue of
+# ALLOWED_NETWORKS/in_whitelisted_network() below, see executor.py's
+# in_single_scope_action()). Additional adapter fields (base URL, identity
+# config) belong to whatever mode first needs them, not this file's current
+# contract -- a plain dict, so adding more keys later is never breaking.
 EASY = {
     "targets": ("cowrie", "nginx", "metasploitable"),
     "gated_tools": ("hydra_bruteforce", "sqlmap_scan", "ssh_exec", "msf_run_module", "shell_exec"),
     "msf_modules": ALLOWED_MSF_MODULES,
     "expected_flags": None,
     "network": "easy",
+    "recon_tools": ("nmap_scan", "http_probe", "get_recon_findings", "web_search",
+                     "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
+                      "raise_vuln_finding", "propose_action", "rotate_ip", "web_search",
+                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "adapter": None,
 }
 
 HARD = {
@@ -123,6 +149,12 @@ HARD = {
     "msf_modules": {},
     "expected_flags": None,
     "network": "hard",
+    "recon_tools": ("nmap_scan", "http_probe", "get_recon_findings", "web_search",
+                     "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
+                      "raise_vuln_finding", "propose_action", "rotate_ip", "web_search",
+                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "adapter": None,
 }
 
 # sqlmap_scan/hydra_bruteforce/ssh_exec/msf_run_module all gate on a target
@@ -136,6 +168,12 @@ WORDPRESS = {
     # /root/flag2.txt (root only, via CVE-2025-32463).
     "expected_flags": 2,
     "network": "wordpress",
+    "recon_tools": ("nmap_scan", "http_probe", "get_recon_findings", "web_search",
+                     "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
+                      "raise_vuln_finding", "propose_action", "rotate_ip", "web_search",
+                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "adapter": None,
 }
 
 MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS}
