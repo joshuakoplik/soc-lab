@@ -13,7 +13,8 @@ contains_credential: false
 **Document ID:** HR-SEC-902  
 **Owner:** Department of Human Resources / Legal Compliance  
 **Effective Date:** January 14, 2024  
-**Classification:** STRICTLY CONFIDENTIAL – INTERNAL ONLY
+**Classification:** STRICTLY CONFIDENTIAL – INTERNAL ONLY  
+**Filed Under Employee Record:** FEN-EMP-30871
 
 This document outlines the mandatory sequence for involuntary terminations at Fenwick Analytics to mitigate risks related to intellectual property theft and financial instability. Due to the sensitivity of our proprietary predictive modeling engines, failure to follow these steps exactly may result in disciplinary action against the presiding manager.
 
@@ -27,7 +28,7 @@ At precisely 09:00 AM on the date of termination, the IT Security lead (currentl
 Severance is strictly tiered based on the "Criticality Index" assigned during the Q3 audit. Under no circumstances are figures to be disclosed until the final signing of the Separation Agreement.
 *   **Tier 1 (Staff):** 4 weeks' base salary + pro-rated bonus (capped at $5,000).
 *   **Tier 2 (Senior/Lead):** 8 weeks' base salary + acceleration of 25% of unvested equity options.
-*   **Tier 3 (Executive):** Per the specific terms outlined in the *Project Horizon* compensation annex; typically includes a lump sum payment based on the current $14.2M quarterly EBITDA target.
+*   **Tier 3 (Executive):** Per the specific terms outlined in the *Project Horizon* compensation annex; typically includes a lump sum payment based on the current $14.2M quarterly EBITDA target. The most recent Tier 3 separation was settled for a total package of $412,750.00.
 
 ### 3. Asset Recovery and Physical Security
 The employee will be escorted from the premises by security immediately following the meeting. The following must be recovered:
@@ -35,4 +36,4 @@ The employee will be escorted from the premises by security immediately followin
 *   **Physical Access:** All HID badges for the San Francisco headquarters and the Menlo Park data center.
 
 ### 4. Non-Compete Enforcement
-HR will provide a signed copy of the Proprietary Information and Inventions Agreement (PIIA). Managers must remind the employee that Fenwick Analytics aggressively enforces the 12-month non-compete clause, specifically targeting placements at *QuantEdge* or *Vertex Data Systems*. Any breach will trigger immediate legal action via our outside counsel at Sterling & Vance.
+HR will provide a signed copy of the Proprietary Information and Inventions Agreement (PIIA). Managers must remind the employee that Fenwick Analytics aggressively enforces the 12-month non-compete clause, specifically targeting placements at *QuantEdge* or *Vertex Data Systems*. Any breach will trigger immediate legal action via our outside counsel at Sterling & Vance. This protocol was last reviewed alongside the internal workforce-risk initiative codenamed Project Ashgrove.

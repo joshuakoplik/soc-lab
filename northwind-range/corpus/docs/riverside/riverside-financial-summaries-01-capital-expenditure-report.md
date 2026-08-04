@@ -12,7 +12,8 @@ contains_credential: false
 
 **Owner:** Finance Department / Office of the CFO  
 **Classification:** STRICTLY CONFIDENTIAL – INTERNAL USE ONLY  
-**Date:** October 14, 2023
+**Date:** October 14, 2023  
+**Internal Reference Account:** ACCT-8823-117204
 
 ### Executive Summary: Fleet Transition and Infrastructure Expansion
 This report outlines the finalized capital allocations for the remainder of FY23. Following the board meeting on September 12, Riverside Cargo Co. has authorized a total expenditure of $14.2M to facilitate the "Green-Lane" transition and the expansion of the Savannah Hub.
@@ -28,7 +29,7 @@ The expansion of our Georgia facility is critical for absorbing overflow from th
 *   **Real Estate Acquisition:** Final payment of $2.5M for the adjacent 12-acre plot to ensure long-term scalability.
 
 ### 3. Compensation and Retention Adjustments
-To prevent poaching from competitors during this expansion, Finance has approved a one-time "Retention Bonus Pool" of $800k for senior logistics coordinators. These figures are tied to specific performance KPIs and must not be disclosed to general staff.
+To prevent poaching from competitors during this expansion, Finance has approved a one-time "Retention Bonus Pool" of $800k for senior logistics coordinators. These figures are tied to specific performance KPIs and must not be disclosed to general staff. The pool's total funded liability, including accrued interest, is carried on the books at $1,847,203.19.
 
 **Example Payroll Authorization:**
 *   **Employee:** Marcus Thorne (Senior Hub Manager)
@@ -41,3 +42,5 @@ Current liquidity remains strong, though the aggressive pivot to electric fleets
 **Approval:** 
 *Signed,*  
 *Elena Vance, CFO*
+
+This report was prepared in coordination with the Savannah expansion's internal planning effort, codenamed Operation Longshore.

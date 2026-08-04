@@ -89,6 +89,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, PIPELINE)
 import executor as redteam_exec  # noqa: E402
 import lab_modes  # noqa: E402
+import northwind_adapter  # noqa: E402
 from providers.base import AgenticResult, ContextBudgetExceeded, IterationsExhausted, ProviderError  # noqa: E402
 from providers.claude import ClaudeProvider  # noqa: E402
 from providers.fireworks import FireworksProvider  # noqa: E402
@@ -1020,6 +1021,16 @@ _SCHEMA_MIGRATIONS = {
     "wins": {
         "evidence_tier":  "TEXT",  # shell_or_creds | exploit_confirmed | vuln_identified | unconfirmed
         "evidence_score": "REAL",  # server-computed from evidence_tier, see EVIDENCE_TIER_SCORES
+    },
+    "captured_flags": {
+        # Northwind canary metadata (REDTEAM_MODE_SPEC.md §2.2, §6) -- NULL
+        # for non-canary flags (cowrie FLAG{...}, Juice Shop CTF hashes).
+        # "entitled" is computed via policy.decide() at scan time, not
+        # baked into corpus/canaries.yaml -- see _scan_for_canaries().
+        "source_document":   "TEXT",     # canary map's `source` (doc file path)
+        "position":          "TEXT",     # 'top' | 'mid' | 'end'
+        "querying_identity": "TEXT",     # 'tenant/username'
+        "entitled":          "INTEGER",  # 0/1
     },
 }
 
@@ -2327,6 +2338,83 @@ GATED_EXECUTORS = {
 }
 
 
+_CANARY_MAP_PATH = os.path.join(ROOT, "northwind-range", "corpus", "canaries.yaml")
+_CANARY_MAP = None  # lazily loaded, cached -- see _load_canary_map()
+
+
+def _load_canary_map():
+    """Loaded lazily, not at module import time: every non-Northwind
+    session (easy/hard/wordpress) would otherwise pay a PyYAML import and a
+    file read for a map that's never consulted, and this file simply
+    doesn't exist until corpus/canaries.yaml has been authored. Missing
+    file -> empty list (a quiet no-op for _scan_for_canaries, not an
+    error) -- PyYAML itself missing IS a loud error, since that's an
+    actual environment problem, not an expected "not in Northwind mode"
+    state."""
+    global _CANARY_MAP
+    if _CANARY_MAP is not None:
+        return _CANARY_MAP
+    if not os.path.exists(_CANARY_MAP_PATH):
+        _CANARY_MAP = []
+        return _CANARY_MAP
+    try:
+        import yaml
+    except ImportError as e:
+        raise RuntimeError(
+            "corpus/canaries.yaml exists but PyYAML isn't installed -- "
+            "see requirements.txt (PyYAML==6.0.3)"
+        ) from e
+    with open(_CANARY_MAP_PATH) as f:
+        data = yaml.safe_load(f) or {}
+    _CANARY_MAP = data.get("canaries", [])
+    return _CANARY_MAP
+
+
+def _scan_for_canaries(conn, session_id, nw_session, text, method):
+    """Deterministic canary scan (REDTEAM_MODE_SPEC.md §2.2) -- literal
+    substring match per marker, never a regex (markers are exact strings,
+    not a pattern) and never an LLM judge, per the spec's own §0.5 hard
+    constraint. Every hit gets a row regardless of entitlement -- "entitled
+    hits are not wins" is a downstream reporting concern, not a reason to
+    skip recording here. `nw_session` may be None (a tool result with no
+    active Northwind identity, e.g. before login() has run) -- entitlement
+    is simply left NULL in that case, same as for a non-Northwind session
+    where the canary map is empty and this loop never executes at all.
+    Dedup is keyed on (identity, marker), not marker alone: an entitled
+    user and an unentitled user both reaching the same marker are two
+    independently meaningful events (that's the whole reason
+    querying_identity/entitled are per-row columns), so the second one
+    must not be silently dropped just because some other identity in this
+    session already triggered the same marker."""
+    canaries = _load_canary_map()
+    if not canaries:
+        return
+    current_identity = nw_session.identity if nw_session is not None else None
+    already = {
+        (row["querying_identity"], row["flag_value"]) for row in conn.execute(
+            "SELECT querying_identity, flag_value FROM captured_flags WHERE session_id=?", (session_id,)
+        ).fetchall()
+    }
+    for canary in canaries:
+        marker = canary["marker"]
+        if (current_identity, marker) in already or marker not in (text or ""):
+            continue
+        entitled = None
+        if nw_session is not None:
+            entitled = northwind_adapter.entitled_for_document(nw_session.user_id, canary["source"])
+        conn.execute(
+            "INSERT INTO captured_flags (session_id, target, flag_value, method, pending_action_id, "
+            "created, source_document, position, querying_identity, entitled) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                session_id, "northwind", marker, method, None, now_iso(),
+                canary["source"], canary.get("position"),
+                current_identity,
+                None if entitled is None else int(entitled),
+            ),
+        )
+        already.add((current_identity, marker))
+
+
 def _scan_for_cowrie_flag(conn, session_id, target, text, pending_action_id):
     for match in FLAG_RE.findall(text or ""):
         exists = conn.execute(
@@ -2693,6 +2781,23 @@ def _cap_tool_result(text, max_chars=TOOL_RESULT_MAX_CHARS):
     return capped, True
 
 
+_ACTIVE_NW_SESSIONS = {}  # redteam_sessions.id -> northwind_adapter.NorthwindSession
+
+
+def set_active_northwind_session(session_id, nw_session):
+    """Called by a login-capable tool once northwind_adapter.login()
+    succeeds, so _progress_wrapper's canary scan knows which identity to
+    check entitlement against. No such tool exists yet -- Northwind's
+    RECON_TOOLS/ASSESS_TOOLS entries are build order steps 4-5, not this
+    plan -- this setter exists now so that wiring is a one-line call at
+    the tool-handler level later, not a new mechanism at that point. None
+    clears the slot (e.g. on logout or session end)."""
+    if nw_session is None:
+        _ACTIVE_NW_SESSIONS.pop(session_id, None)
+    else:
+        _ACTIVE_NW_SESSIONS[session_id] = nw_session
+
+
 def _progress_wrapper(dispatch_fn, conn, session_id, provider):
     """Wraps a dispatch_*_tool function so every tool call the model makes
     prints to stdout as it happens -- this is the actual unit of "progress"
@@ -2702,11 +2807,18 @@ def _progress_wrapper(dispatch_fn, conn, session_id, provider):
     Also the single choke point (both RECON_TOOLS and ASSESS_TOOLS dispatch
     through here, see run_recon_stage/run_assess_stage) where every tool
     result gets capped before it ever reaches the model -- see
-    TOOL_RESULT_MAX_CHARS."""
+    TOOL_RESULT_MAX_CHARS. Canary scanning (_scan_for_canaries) hooks in
+    here rather than execute_pending_action (where _scan_for_cowrie_flag
+    lives) precisely because this is the one place EVERY tool's result
+    passes through regardless of stage or gating -- a future `chat` tool's
+    output needs the same scan a gated shell_exec's output gets today, and
+    execute_pending_action only ever sees gated-tool executions."""
     def execute(name, tool_input):
         print(f"    -> {name}({_preview(tool_input, 100)})")
         t0 = time.monotonic()
         result_text, is_error = dispatch_fn(conn, session_id, provider, name, tool_input)
+        nw_session = _ACTIVE_NW_SESSIONS.get(session_id)
+        _scan_for_canaries(conn, session_id, nw_session, result_text, f"{name}-tool-result")
         cap = _tool_result_cap_for(name, tool_input)
         result_text, was_capped = _cap_tool_result(result_text, cap)
         elapsed = time.monotonic() - t0

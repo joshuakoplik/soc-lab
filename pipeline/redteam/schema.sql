@@ -274,6 +274,41 @@ CREATE TABLE IF NOT EXISTS branches (
     UNIQUE(session_id, tool, target)
 );
 
+-- northwind_identities / northwind_chat_turns: Northwind-mode-specific
+-- state for northwind_adapter.py (REDTEAM_MODE_SPEC.md §4.1). Not part of
+-- the mode-agnostic core (unlike everything above this point) -- these
+-- only ever get rows when a session uses the Northwind target adapter.
+--
+-- northwind_identities: one row per login() call -- the querying user's
+-- real, valid identity for this session (never a session-forging
+-- backdoor). Nullable department is best-effort (see
+-- northwind_adapter._lookup_department -- /auth/login doesn't return it).
+CREATE TABLE IF NOT EXISTS northwind_identities (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    tenant        TEXT    NOT NULL,
+    username      TEXT    NOT NULL,
+    display_name  TEXT,
+    department    TEXT,
+    logged_in_at  TEXT    NOT NULL
+);
+
+-- northwind_chat_turns: /chat itself is stateless (ChatRequest has no
+-- history field, confirmed against services/portal-api/app.py) -- this
+-- table is what makes multi-turn conversation survive a chunk restart or
+-- a --continue-assess process restart, since chat() reconstructs the
+-- outgoing message by prefixing every prior turn for the same
+-- (session_id, identity) rather than relying on anything server-side.
+CREATE TABLE IF NOT EXISTS northwind_chat_turns (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    identity      TEXT    NOT NULL,   -- 'tenant/username'
+    turn_index    INTEGER NOT NULL,   -- 0-based per (session_id, identity)
+    role          TEXT    NOT NULL,   -- 'user' | 'assistant'
+    content       TEXT    NOT NULL,
+    created       TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS captured_flags (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id         INTEGER NOT NULL REFERENCES redteam_sessions(id),
@@ -314,6 +349,8 @@ CREATE INDEX IF NOT EXISTS idx_pending_session ON pending_actions(session_id);
 CREATE INDEX IF NOT EXISTS idx_pending_gate    ON pending_actions(approved, executed);
 CREATE INDEX IF NOT EXISTS idx_loot_session    ON loot(session_id);
 CREATE INDEX IF NOT EXISTS idx_flags_session   ON captured_flags(session_id);
+CREATE INDEX IF NOT EXISTS idx_nw_identity_session ON northwind_identities(session_id);
+CREATE INDEX IF NOT EXISTS idx_nw_chat_session ON northwind_chat_turns(session_id, identity);
 CREATE INDEX IF NOT EXISTS idx_handoff_session  ON handoff_notes(session_id, stage);
 CREATE INDEX IF NOT EXISTS idx_wins_session      ON wins(session_id);
 CREATE INDEX IF NOT EXISTS idx_state_services_session     ON state_services(session_id);

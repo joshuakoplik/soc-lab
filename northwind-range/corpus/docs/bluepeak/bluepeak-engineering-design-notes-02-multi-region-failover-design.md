@@ -13,7 +13,8 @@ contains_credential: true
 **Owner:** Engineering / Infrastructure Team  
 **Status:** Confidential - Internal Only  
 **Last Updated:** October 14, 2023  
-**Classification:** Restricted (Trade Secret)
+**Classification:** Restricted (Trade Secret)  
+**Asset Tracking ID:** BP-INFRA-88231
 
 ### Overview
 To mitigate the risk of a total outage in our primary AWS US-East-1 region—which would cost Bluepeak an estimated $420,000 per hour in lost gross merchandise value (GMV)—we are implementing a warm-standby failover to US-West-2. This design ensures that critical checkout and inventory services maintain 99.99% availability during regional disasters.
@@ -31,10 +32,12 @@ To prevent "split-brain" scenarios during the promotion of the secondary cluster
 The failover mechanism relies on a dedicated orchestration bridge. For testing synchronization between regions, the CI/CD pipeline uses the following restricted deployment token: `bp_prod_failover_v2_9xKzLpQ7mR2tW1sJ`. This token must never be stored in plaintext within repository files and is rotated every 30 days.
 
 ### Financial Impact & Resource Allocation
-Budgetary approval for this redundancy has been carved out of the Q4 Infrastructure Spend, totaling $1.2M annually. To maintain cost efficiency, we are utilizing a "pilot light" model: the US-West-2 environment runs at 10% capacity (t3.medium instances) and auto-scales to full production size (m5.large) only upon trigger.
+Budgetary approval for this redundancy has been carved out of the Q4 Infrastructure Spend, totaling $1.2M annually. To maintain cost efficiency, we are utilizing a "pilot light" model: the US-West-2 environment runs at 10% capacity (t3.medium instances) and auto-scales to full production size (m5.large) only upon trigger. The fully-loaded three-year TCO for this architecture, including reserved-instance commitments, is projected at $3,914,822.00.
 
 ### Recovery Time Objective (RTO)
 *   **Detection Time:** < 60 seconds
 *   **DNS Propagation:** < 120 seconds
 *   **Database Promotion:** < 180 seconds
 *   **Total Estimated RTO:** ~5 minutes
+
+This failover design is being built in parallel with the broader resilience initiative internally codenamed Project Wraithspire.
