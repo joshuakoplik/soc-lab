@@ -5,12 +5,15 @@
 # only ever did the network part -- everything it did is still here under
 # --network.
 #
-#   ./reset.sh                    -- reset everything: network + db + queue + attacker + target (default)
+#   ./reset.sh                    -- reset everything: network + db + queue + attacker + target
+#                                     + northwind-controls (default)
 #   ./reset.sh --network          -- only undo block_ip rules
 #   ./reset.sh --db               -- only wipe soc.db and recreate empty schema
 #   ./reset.sh --queue            -- only reseed tail_state to each log's current EOF
 #   ./reset.sh --attacker         -- only rebuild soc-attacker and clear attacker/loot
 #   ./reset.sh --target           -- only rebuild the active lab-mode's target container(s)
+#   ./reset.sh --northwind-controls -- only reset Northwind's SPEC.md §5 control toggles
+#                                       to baseline (undoes harden_northwind_controls calls)
 #   ./reset.sh --network --queue  -- combine any subset
 #   ./reset.sh --status           -- report current state of all three, change nothing
 #   ./reset.sh --no-kill          -- modifier: don't kill running pipeline processes first
@@ -94,6 +97,7 @@ DO_DB=0
 DO_QUEUE=0
 DO_ATTACKER=0
 DO_TARGET=0
+DO_NORTHWIND_CONTROLS=0
 DO_STATUS=0
 KILL_FIRST=1
 ANY_FLAG=0
@@ -105,11 +109,12 @@ for arg in "$@"; do
     --queue)    DO_QUEUE=1;    ANY_FLAG=1 ;;
     --attacker) DO_ATTACKER=1; ANY_FLAG=1 ;;
     --target)   DO_TARGET=1;   ANY_FLAG=1 ;;
-    --all)      DO_NETWORK=1; DO_DB=1; DO_QUEUE=1; DO_ATTACKER=1; DO_TARGET=1; ANY_FLAG=1 ;;
+    --northwind-controls) DO_NORTHWIND_CONTROLS=1; ANY_FLAG=1 ;;
+    --all)      DO_NETWORK=1; DO_DB=1; DO_QUEUE=1; DO_ATTACKER=1; DO_TARGET=1; DO_NORTHWIND_CONTROLS=1; ANY_FLAG=1 ;;
     --status)   DO_STATUS=1 ;;
     --no-kill)  KILL_FIRST=0 ;;
     *)
-      echo "usage: $0 [--all] [--network] [--db] [--queue] [--attacker] [--target] [--status] [--no-kill]" >&2
+      echo "usage: $0 [--all] [--network] [--db] [--queue] [--attacker] [--target] [--northwind-controls] [--status] [--no-kill]" >&2
       exit 1
       ;;
   esac
@@ -123,6 +128,12 @@ if [ "$DO_STATUS" = "1" ]; then
     echo "[reset] soc-block-enforcer isn't running -- can't report block status" >&2
   fi
   echo
+  if docker inspect -f '{{.State.Running}}' nw-edge-nginx >/dev/null 2>&1; then
+    "$PY" pipeline/triage/northwind_enforcer.py --status
+  else
+    echo "[reset] northwind-range isn't running -- can't report control-toggle status" >&2
+  fi
+  echo
   "$PY" pipeline/reset_lab.py --status
   exit 0
 fi
@@ -133,6 +144,7 @@ if [ "$ANY_FLAG" = "0" ]; then
   DO_QUEUE=1
   DO_ATTACKER=1
   DO_TARGET=1
+  DO_NORTHWIND_CONTROLS=1
 fi
 
 if [ "$KILL_FIRST" = "1" ] && { [ "$DO_DB" = "1" ] || [ "$DO_QUEUE" = "1" ] || [ "$DO_ATTACKER" = "1" ] || [ "$DO_TARGET" = "1" ]; }; then
@@ -253,6 +265,24 @@ if [ "$DO_NETWORK" = "1" ]; then
       echo "[reset] confirmed: network back to baseline, nothing blocked"
     else
       echo "[reset] WARNING: still showing as blocked after reset:" >&2
+      echo "$remaining" >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [ "$DO_NORTHWIND_CONTROLS" = "1" ]; then
+  if ! docker inspect -f '{{.State.Running}}' nw-edge-nginx >/dev/null 2>&1; then
+    echo "[reset] northwind-range isn't running -- skipping Northwind control-toggle reset" >&2
+    echo "  (cd northwind-range && docker compose up -d to bring it up)" >&2
+  else
+    echo "[reset] resetting Northwind's SPEC.md §5 control toggles to baseline..."
+    "$PY" pipeline/triage/northwind_enforcer.py --reset
+    remaining="$("$PY" pipeline/triage/northwind_enforcer.py --status)"
+    if [ "$remaining" = "[northwind_enforcer] all hardening toggles at baseline (off)" ]; then
+      echo "[reset] confirmed: Northwind controls back to baseline"
+    else
+      echo "[reset] WARNING: Northwind controls did not return to baseline after reset:" >&2
       echo "$remaining" >&2
       exit 1
     fi

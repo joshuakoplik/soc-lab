@@ -454,6 +454,22 @@ ATTACKER_CONTROLLED = (
     "user_agent", "referer", "request_body", "client_version",
 )
 
+# llm_transcripts (schema.sql) doesn't go through NORMALIZERS/events at all --
+# it's a separate table for nested per-/chat-call data (see ingest.py's
+# read_new_transcripts()) -- so it needs its own trust split rather than
+# reusing ATTACKER_CONTROLLED above, which is keyed to events' flat columns.
+# user_turn/completion are hostile text by the same logic as everything
+# else in ATTACKER_CONTROLLED; retrieved_context/tool_calls are attacker-
+# adjacent (what got retrieved/called in response to attacker-influenced
+# input) rather than typed by the attacker directly, but the same "treat
+# it as data, not instructions" fencing applies -- a retrieved document or
+# a tool call's echoed args can themselves carry a successful injection's
+# payload. system_prompt/model/controls are server-constructed, not user
+# input, hence infrastructure-asserted.
+LLM_TRANSCRIPT_ATTACKER_CONTROLLED = (
+    "user_turn", "retrieved_context", "tool_calls", "completion",
+)
+
 COLUMNS = (
     "ts", "source", "event_type", "src_ip", "src_port", "dst_port",
     "session_id", "http_status", "bytes_sent", "username", "password",

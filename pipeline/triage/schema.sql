@@ -98,6 +98,27 @@ CREATE TABLE IF NOT EXISTS block_ip_calls (
 -- agent reaches for it at the right threshold -- not on every high-severity
 -- candidate (alert fatigue), not withheld when something really does look
 -- like an active intrusion -- is exactly the judgment this lab measures.
+-- Every harden_northwind_controls() call -- executed or rejected, same
+-- "always visible" contract as block_ip_calls above. NOT reusing that
+-- table: its src_ip is NOT NULL, structurally wrong for a toggle action
+-- with no IP involved. See reset.sh --northwind-controls to return every
+-- toggle this has ever set to baseline (northwind_enforcer.reset()); that
+-- path doesn't write here -- it's an operator-run bulk reset with no
+-- candidate_id to attach to, same as block_ip_calls has no row for
+-- reset.sh --network's own unblock_all() either.
+CREATE TABLE IF NOT EXISTS northwind_control_calls (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id  INTEGER NOT NULL REFERENCES candidates(id),
+    requested     TEXT    NOT NULL,   -- JSON: {toggle: true, ...} as requested
+    reason        TEXT    NOT NULL,
+    executed      INTEGER NOT NULL DEFAULT 0,  -- 1 = PUT sent+accepted, 0 = fence-rejected/HTTP error
+    applied       TEXT,               -- JSON: full post-call control state; NULL unless executed=1
+    error         TEXT,               -- rejection/HTTP-error detail; NULL on success
+    created       TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_nw_control_calls_candidate ON northwind_control_calls(candidate_id);
+
 CREATE TABLE IF NOT EXISTS human_pages (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     candidate_id  INTEGER NOT NULL REFERENCES candidates(id),

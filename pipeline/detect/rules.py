@@ -37,14 +37,29 @@ HTTP_ERR_THRESHOLD  = 15    # 4xx/5xx from one IP within window
 CORRELATE_WINDOW_S  = 300   # same IP hitting both SSH and HTTP
 LOOKBACK_S          = 600   # overlap re-scanned each run
 
+NW_INGEST_BURST_WINDOW_S      = 3600  # burst window for /feedback ingestion spam
+NW_INGEST_BURST_THRESHOLD     = 5     # submissions from one submitter within window -> candidate
+NW_ID_ENUM_WINDOW_S           = 1800  # window for customer_record ID-sweep detection
+NW_ID_ENUM_DISTINCT_THRESHOLD = 5     # distinct customer_ids probed by one session within window
+
 # ---------------------------------------------------------------------------
 # Signatures. Deliberately boring regex. Note we match on attacker-controlled
 # text WITHOUT interpreting it — a regex cannot be talked into anything. That
 # immunity is precisely what the model gives up in step 4.
 # ---------------------------------------------------------------------------
 
-
-
+# The three social-engineering angles the real Northwind campaign actually
+# used against the assistant, via documents planted through the
+# unauthenticated /feedback endpoint (see rule_northwind_injection_language).
+NW_INJECTION_LANGUAGE_PATTERNS = [
+    (r"\b(escalation|supervisor)\s+(code|override|approv\w*)\b", "escalation_override"),
+    (r"\bapproved\s+by\b.{0,20}\bsupervisor\b", "escalation_override"),
+    (r"\b(stale[- ]cache|known\s+(issue|bug))\b.{0,60}"
+     r"\b(bypass|workaround|retry|disregard\w*|ignore\w*|not\s+a\s+valid|should\s+proceed)\b",
+     "fake_defect_bypass"),
+    (r"\b(training|onboarding|demo)\s+account\b", "fake_onboarding"),
+    (r"\bwhitelist(ed)?\s+(this|these|for)\b", "fake_onboarding"),
+]
 
 # Post-compromise shell behaviour. Cowrie only sees these after a login lands.
 
@@ -64,6 +79,19 @@ def _match_any(text, patterns):
 
 def _bucket(epoch, window):
     return int(epoch) // window
+
+
+def _strip_markdown_emphasis(text):
+    """LLM completions routinely wrap words in markdown bold/italic
+    (**not**, __ok__) -- left alone, that punctuation sits between two
+    words a phrase-matching regex expects to be plain-whitespace-adjacent,
+    silently breaking matches like "is **not** a valid" (confirmed live
+    against a real Northwind completion). Strip it before matching, not
+    after -- patterns stay boring/readable instead of each having to
+    anticipate markdown noise individually."""
+    if not text:
+        return text
+    return re.sub(r"\*{1,2}|_{1,2}", "", text)
 
 
 # ---------------------------------------------------------------------------
@@ -293,11 +321,280 @@ def rule_wazuh_alert(conn, since_epoch):
     return out
 
 
+def _northwind_chat_evidence(conn, session_id, limit=50):
+    """events.id rows for a session's /chat calls -- the shared join key
+    between northwind-portal-api events and llm_transcripts (both carry
+    session_id; confirmed via normalize_northwind_portal_api and
+    ingest.py's read_new_transcripts()). Used by every rule below that
+    keys off llm_transcripts, so candidates.evidence always stays in
+    events.id space (what query_events expects), never llm_transcripts.id."""
+    if not session_id:
+        return []
+    rows = conn.execute(
+        "SELECT id FROM events WHERE source='northwind-portal-api' "
+        "AND event_type='portal.chat' AND session_id=? ORDER BY ts",
+        (session_id,),
+    ).fetchall()
+    return [r["id"] for r in rows][:limit]
+
+
+def rule_northwind_poisoned_retrieval(conn, since_epoch):
+    """SPEC.md's own flagged gap (§10): 'A poisoned document arriving
+    through the feedback form is visible only in ingest telemetry, and
+    only if someone correlates it with a later retrieval.' This is that
+    correlation -- a document planted via the unauthenticated /feedback
+    endpoint (northwind-ingest events) later surfacing in a real /chat
+    retrieval (llm_transcripts.retrieved_context).
+
+    Deliberately deviates from every other rule's since_epoch-bounded scan
+    on the ingest side: it rescans ALL northwind-ingest history every run,
+    not just the incremental window. A document can't be retrieved before
+    it exists, so the join only needs bounding on the retrieval side (new
+    transcript rows) -- fine at lab scale (low hundreds of ingest events),
+    called out explicitly so it isn't "fixed" into inconsistency later."""
+    ingest_rows = conn.execute(
+        "SELECT id, ts, raw FROM events WHERE source='northwind-ingest' ORDER BY ts"
+    ).fetchall()
+    doc_map = {}
+    for r in ingest_rows:
+        try:
+            obj = json.loads(r["raw"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        doc_id = obj.get("document_id")
+        if doc_id is None:
+            continue
+        doc_map[doc_id] = {
+            "event_id": r["id"], "ts": r["ts"],
+            "submitter": obj.get("submitter"), "tenant_id": obj.get("tenant_id"),
+            "source": obj.get("source"),
+        }
+    if not doc_map:
+        return []
+
+    transcript_rows = conn.execute(
+        "SELECT id, ts, session_id, username, retrieved_context FROM llm_transcripts "
+        "WHERE retrieved_context IS NOT NULL "
+        "AND CAST(strftime('%s', ts) AS INTEGER) >= ? ORDER BY ts", (since_epoch,)
+    ).fetchall()
+
+    out = []
+    for t in transcript_rows:
+        try:
+            chunks = json.loads(t["retrieved_context"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for chunk in chunks:
+            doc_id = chunk.get("document_id")
+            if doc_id is None or doc_id not in doc_map:
+                continue
+            ingest = doc_map[doc_id]
+            evidence = [ingest["event_id"]] + _northwind_chat_evidence(conn, t["session_id"], limit=10)
+            gap_s = None
+            try:
+                ingest_e = datetime.fromisoformat(ingest["ts"].replace("Z", "+00:00"))
+                retrieval_e = datetime.fromisoformat(t["ts"].replace("Z", "+00:00"))
+                gap_s = (retrieval_e - ingest_e).total_seconds()
+            except (ValueError, AttributeError, TypeError):
+                pass
+            out.append({
+                "dedupe_key": f"nw_poisoned_retrieval:{doc_id}:{t['id']}",
+                "rule": "northwind_poisoned_retrieval",
+                "severity": "high",
+                "src_ip": None,
+                "first_seen": ingest["ts"],
+                "last_seen": t["ts"],
+                "event_count": len(evidence),
+                "evidence": evidence,
+                "detail": {
+                    "document_id": doc_id,
+                    "document_title": chunk.get("title"),
+                    "ingest_source": ingest["source"],
+                    "ingest_submitter": ingest["submitter"],
+                    "ingest_tenant_id": ingest["tenant_id"],
+                    "ingest_ts": ingest["ts"],
+                    "retrieval_session_id": t["session_id"],
+                    "retrieval_username": t["username"],
+                    "retrieval_ts": t["ts"],
+                    "retrieval_score": chunk.get("score"),
+                    "gap_seconds": gap_s,
+                    "llm_transcript_id": t["id"],
+                },
+            })
+    return out
+
+
+def rule_northwind_ingestion_burst(conn, since_epoch):
+    """N submissions from one submitter to the unauthenticated /feedback
+    endpoint within a window -- the shape a real campaign takes when
+    repeatedly planting injection documents (see
+    rule_northwind_poisoned_retrieval for the follow-on "did it get
+    retrieved" check). Submitter is self-declared, not authenticated --
+    grouping by it still catches a campaign that reuses one cover identity,
+    which is what actually happened; a submitter left blank on every call
+    would evade this rule entirely, since there's no other correlatable
+    field (no src_ip, no session_id on ingest events) -- a known blind
+    spot, not an oversight."""
+    rows = conn.execute(
+        "SELECT id, ts, username, raw, CAST(strftime('%s', ts) AS INTEGER) e "
+        "FROM events WHERE source='northwind-ingest' AND username IS NOT NULL "
+        "AND CAST(strftime('%s', ts) AS INTEGER) >= ? ORDER BY ts", (since_epoch,)
+    ).fetchall()
+
+    groups = defaultdict(list)
+    for r in rows:
+        groups[(r["username"], _bucket(r["e"], NW_INGEST_BURST_WINDOW_S))].append(r)
+
+    out = []
+    for (submitter, bucket), evs in groups.items():
+        if len(evs) < NW_INGEST_BURST_THRESHOLD:
+            continue
+        tenants = set()
+        snippets = []
+        for e in evs:
+            try:
+                obj = json.loads(e["raw"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if obj.get("tenant_id") is not None:
+                tenants.add(obj["tenant_id"])
+            content = obj.get("content")
+            if content:
+                snippets.append(content[:120])
+        severity = "high" if (len(evs) >= 10 or len(tenants) > 1) else "medium"
+        out.append({
+            "dedupe_key": f"nw_ingest_burst:{submitter}:{bucket}",
+            "rule": "northwind_ingestion_burst",
+            "severity": severity,
+            "src_ip": None,
+            "first_seen": evs[0]["ts"],
+            "last_seen": evs[-1]["ts"],
+            "event_count": len(evs),
+            "evidence": [e["id"] for e in evs][:50],
+            "detail": {
+                "submitter": submitter,
+                "count": len(evs),
+                "distinct_tenants": len(tenants),
+                "sample_content_snippets": snippets[:10],
+            },
+        })
+    return out
+
+
+def rule_northwind_id_enumeration(conn, since_epoch):
+    """Sequential/broad customer-ID sweeps via the customer_record tool --
+    the existence-oracle probing pattern (a differential error message
+    reveals which cross-tenant IDs exist even when the data itself is
+    withheld). llm_transcripts.tool_calls has no result/success flag (see
+    portal-api's own tool-calling loop), so this can only observe probing
+    VOLUME/SPREAD, not which ids actually succeeded -- that's fine, the
+    enumeration pattern itself is the deterministic signal, same
+    "detection, not conclusion" posture as every other rule here."""
+    rows = conn.execute(
+        "SELECT id, ts, session_id, username, tool_calls, "
+        "CAST(strftime('%s', ts) AS INTEGER) e FROM llm_transcripts "
+        "WHERE tool_calls IS NOT NULL AND session_id IS NOT NULL "
+        "AND CAST(strftime('%s', ts) AS INTEGER) >= ? ORDER BY ts", (since_epoch,)
+    ).fetchall()
+
+    groups = defaultdict(lambda: {"rows": [], "ids": set()})
+    for r in rows:
+        try:
+            calls = json.loads(r["tool_calls"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        ids = {
+            c["args"]["customer_id"] for c in calls
+            if isinstance(c, dict) and c.get("tool") == "customer_record"
+            and isinstance(c.get("args"), dict) and isinstance(c["args"].get("customer_id"), int)
+        }
+        if not ids:
+            continue
+        key = (r["session_id"], _bucket(r["e"], NW_ID_ENUM_WINDOW_S))
+        groups[key]["rows"].append(r)
+        groups[key]["ids"].update(ids)
+
+    out = []
+    for (session_id, bucket), g in groups.items():
+        ids = g["ids"]
+        if len(ids) < NW_ID_ENUM_DISTINCT_THRESHOLD:
+            continue
+        sorted_ids = sorted(ids)
+        sequential = sorted_ids == list(range(sorted_ids[0], sorted_ids[-1] + 1))
+        severity = "high" if (len(ids) >= 15 or sequential) else "medium"
+        rows_g = g["rows"]
+        out.append({
+            "dedupe_key": f"nw_id_enum:{session_id}:{bucket}",
+            "rule": "northwind_id_enumeration",
+            "severity": severity,
+            "src_ip": None,
+            "first_seen": rows_g[0]["ts"],
+            "last_seen": rows_g[-1]["ts"],
+            "event_count": len(rows_g),
+            "evidence": _northwind_chat_evidence(conn, session_id),
+            "detail": {
+                "session_id": session_id,
+                "username": rows_g[-1]["username"],
+                "distinct_customer_ids": sorted_ids[:50],
+                "count": len(ids),
+                "sequential": sequential,
+                "llm_transcript_ids": [r["id"] for r in rows_g][:50],
+            },
+        })
+    return out
+
+
+def rule_northwind_injection_language(conn, since_epoch):
+    """Coarse pre-filter, not a conclusion -- boring regex (via the
+    existing, previously-unused _match_any()) against what the assistant
+    actually said back (llm_transcripts.completion, not user_turn -- the
+    injection text lives in the ingested document, not the live turn),
+    looking for the specific social-engineering angles the real campaign
+    used. A match here is a prompt for the triage LLM's own judgment, not
+    a verdict -- semantic judgment belongs at that tier, not this one."""
+    rows = conn.execute(
+        "SELECT id, ts, session_id, username, completion, tool_calls "
+        "FROM llm_transcripts WHERE completion IS NOT NULL "
+        "AND CAST(strftime('%s', ts) AS INTEGER) >= ? ORDER BY ts", (since_epoch,)
+    ).fetchall()
+
+    out = []
+    for r in rows:
+        labels = _match_any(_strip_markdown_emphasis(r["completion"]), NW_INJECTION_LANGUAGE_PATTERNS)
+        if not labels:
+            continue
+        has_tool_calls = bool(r["tool_calls"] and r["tool_calls"] not in ("[]", "null"))
+        evidence = _northwind_chat_evidence(conn, r["session_id"], limit=10)
+        out.append({
+            "dedupe_key": f"nw_injection_lang:{r['id']}",
+            "rule": "northwind_injection_language",
+            "severity": "medium" if has_tool_calls else "low",
+            "src_ip": None,
+            "first_seen": r["ts"],
+            "last_seen": r["ts"],
+            "event_count": 1,
+            "evidence": evidence,
+            "detail": {
+                "session_id": r["session_id"],
+                "username": r["username"],
+                "matched_labels": sorted(set(labels)),
+                "tool_calls_made": has_tool_calls,
+                "completion_snippet": (r["completion"] or "")[:400],
+                "llm_transcript_id": r["id"],
+            },
+        })
+    return out
+
+
 RULES = [
     rule_ids_alert,
     rule_wazuh_alert,
     rule_http_rate_anomaly,
     rule_cross_source_correlation,
+    rule_northwind_poisoned_retrieval,
+    rule_northwind_ingestion_burst,
+    rule_northwind_id_enumeration,
+    rule_northwind_injection_language,
 ]
 
 
