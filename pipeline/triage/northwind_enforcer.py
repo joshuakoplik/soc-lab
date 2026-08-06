@@ -18,12 +18,21 @@ adapted to this target's actual identity space (toggle names, not IPs):
      made. A rejected request never reaches the network.
   2. ALLOWED_TOGGLES itself excludes every control that already defaults
      ON and is load-bearing for the app's baseline function
-     (ENT_RETRIEVAL/ENT_TOOL/RET_PREFILTER/TOOL_ARG_VALIDATION/RATE_LIMIT)
-     and every enum-valued control with no generic "on" direction
-     (RET_PLACEMENT/SYS_PROMPT_VARIANT/TOOL_GATING_POLICY) -- so even a
-     successful call is structurally incapable of doing anything other
-     than strictly adding defensive controls the app already knows how to
-     enforce.
+     (ENT_RETRIEVAL/ENT_TOOL/RET_PREFILTER/TOOL_ARG_VALIDATION) and every
+     enum-valued control with no generic "on" direction (RET_PLACEMENT/
+     SYS_PROMPT_VARIANT/TOOL_GATING_POLICY) -- so even a successful call
+     is structurally incapable of doing anything other than strictly
+     adding defensive controls the app already knows how to enforce.
+
+RATE_LIMIT is IN this allowlist, deliberately, unlike the other
+load-bearing defaults above -- it now defaults OFF at the app level
+(portal-api/app.py's CONTROL_DEFAULTS), a deliberate change from a static
+always-on throttle to a defender-invoked response. A blunt rate limit
+firing on request volume alone, with no regard for whether anything
+malicious had actually happened, was cutting real campaigns short before
+they showed real behavior. Disabling it doesn't affect normal traffic --
+it only removes an abuse guardrail -- so it isn't "load-bearing for
+baseline function" the way entitlement/validation checks are.
 
 No timer-based auto-revert: durable-until-explicit-undo, same posture
 block_ip's iptables rules already have. See reset.sh --northwind-controls
@@ -53,6 +62,7 @@ ALLOWED_TOGGLES = {
     "ENT_PROMPT", "RET_SOURCE_ALLOWLIST", "RET_SCORE_THRESHOLD", "RET_PROVENANCE",
     "IN_INJECTION_CLASSIFIER", "IN_RETRIEVED_SCAN", "OUT_PII_FILTER",
     "OUT_SECRET_FILTER", "OUT_GROUNDING_CHECK", "OUT_STRUCTURED", "TOOL_GATING",
+    "RATE_LIMIT",
 }
 
 
@@ -153,12 +163,73 @@ def status_line():
     return f"[northwind_enforcer] {len(active)} toggle(s) active: {', '.join(active)}"
 
 
+# ---------------------------------------------------------------------------
+# Document quarantine -- the other real lever this module gives the
+# defender: render a document flagged as malicious inert (excluded from
+# every retrieval mode, see retrieval-svc/app.py's PREFILTER_SQL/
+# POSTFILTER_SQL) without deleting it, so the row survives for forensics.
+# No allowlist/fence needed here the way harden() has one -- there's no
+# "wrong direction" for quarantine the way there is for a control toggle
+# (turning a security control OFF would weaken the app; quarantining a
+# document only ever removes one specific document from retrieval, and
+# the worst case of getting the id wrong is a false-positive takedown of
+# one benign document, not a global weakening of every session's
+# protections). Idempotent either direction, same as portal-api's own
+# quarantine_document()/unquarantine_document().
+# ---------------------------------------------------------------------------
+
+def quarantine_document(document_id):
+    """POST {base_url()}/api/documents/{id}/quarantine."""
+    try:
+        url = base_url()
+    except NorthwindAdapterError as e:
+        raise ControlsError(str(e)) from e
+    return _request_json("POST", f"{url}/api/documents/{document_id}/quarantine", {})
+
+
+def unquarantine_document(document_id):
+    """POST {base_url()}/api/documents/{id}/unquarantine. What
+    reset.sh --northwind-controls calls (for every currently-quarantined
+    id, via list_quarantined()) -- not wired to any triage tool, same
+    "undoing a defensive action is an operator decision" posture as
+    reset()/block_enforcer.unblock()."""
+    try:
+        url = base_url()
+    except NorthwindAdapterError as e:
+        raise ControlsError(str(e)) from e
+    return _request_json("POST", f"{url}/api/documents/{document_id}/unquarantine", {})
+
+
+def list_quarantined():
+    """GET {base_url()}/api/documents/quarantined -- every currently
+    quarantined document, for reset.sh --status and --northwind-controls
+    (which unquarantines each one returned here)."""
+    try:
+        url = base_url()
+    except NorthwindAdapterError as e:
+        raise ControlsError(str(e)) from e
+    return _request_json("GET", f"{url}/api/documents/quarantined")["quarantined"]
+
+
+def quarantine_status_line():
+    """Same sentinel-string convention as status_line()."""
+    quarantined = list_quarantined()
+    if not quarantined:
+        return "[northwind_enforcer] no documents quarantined"
+    ids = ", ".join(str(d["id"]) for d in quarantined)
+    return f"[northwind_enforcer] {len(quarantined)} document(s) quarantined: {ids}"
+
+
 if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--status", action="store_true", help="print current toggle state, then exit")
     ap.add_argument("--reset", action="store_true", help="reset every control to baseline, then exit")
+    ap.add_argument("--quarantine-status", action="store_true",
+                     help="print currently-quarantined document ids, then exit")
+    ap.add_argument("--unquarantine-all", action="store_true",
+                     help="unquarantine every currently-quarantined document, then exit")
     args = ap.parse_args()
 
     try:
@@ -167,6 +238,12 @@ if __name__ == "__main__":
             print(status_line())
         elif args.status:
             print(status_line())
+        elif args.unquarantine_all:
+            for doc in list_quarantined():
+                unquarantine_document(doc["id"])
+            print(quarantine_status_line())
+        elif args.quarantine_status:
+            print(quarantine_status_line())
         else:
             ap.print_help()
             sys.exit(1)

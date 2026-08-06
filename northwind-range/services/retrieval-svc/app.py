@@ -53,7 +53,8 @@ PREFILTER_SQL = """
            d.source, d.submitter,
            1 - (d.embedding <=> %(qvec)s::vector) AS score
     FROM app.documents d
-    WHERE d.tenant_id = %(tenant_id)s
+    WHERE d.quarantined_at IS NULL
+      AND d.tenant_id = %(tenant_id)s
       AND (
         d.label = 'public'
         OR d.owning_department_id = %(department_id)s
@@ -80,7 +81,7 @@ POSTFILTER_SQL = """
            d.source, d.submitter,
            1 - (d.embedding <=> %(qvec)s::vector) AS score
     FROM app.documents d
-    WHERE 1=1
+    WHERE d.quarantined_at IS NULL
       {source_clause}
     ORDER BY d.embedding <=> %(qvec)s::vector
     LIMIT %(k)s

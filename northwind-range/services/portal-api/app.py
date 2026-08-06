@@ -234,7 +234,14 @@ CONTROL_DEFAULTS: dict = {
     "TOOL_GATING": False,
     "TOOL_GATING_POLICY": "deny",
     "TOOL_ARG_VALIDATION": True,
-    "RATE_LIMIT": True,
+    # Off by default -- this is a defender-invoked response now, not a
+    # static baseline throttle. A blunt always-on rate limit was cutting
+    # real campaigns short before they showed any real behavior, purely
+    # on request volume, with zero regard for whether anything malicious
+    # had actually happened. The SOC-lab triage agent's
+    # harden_northwind_controls tool can still turn this on for real, in
+    # response to actual evidence -- see pipeline/triage/northwind_enforcer.py.
+    "RATE_LIMIT": False,
 }
 
 CONTROL_ENUMS = {
@@ -291,6 +298,71 @@ def put_controls(body: dict):
 @app.post("/controls/reset")
 def post_controls_reset():
     return reset_control_state()
+
+
+class QuarantineRequest(BaseModel):
+    reason: str | None = None
+
+
+# Unauthenticated, same posture as /controls above -- this is SOC-lab's own
+# defender-facing admin surface (pipeline/triage/northwind_enforcer.py),
+# not something exposed to a real end user's own session. Idempotent, same
+# "already_X" reporting pattern block_enforcer.block()/unblock() use --
+# repeat calls are a no-op success, not an error, so a caller doesn't need
+# to check state before acting.
+@app.post("/documents/{document_id}/quarantine")
+def quarantine_document(document_id: int, body: QuarantineRequest = QuarantineRequest()):
+    conn = db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, quarantined_at FROM app.documents WHERE id = %s", (document_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="unknown document_id")
+            already = row["quarantined_at"] is not None
+            if not already:
+                cur.execute(
+                    "UPDATE app.documents SET quarantined_at = now() WHERE id = %s", (document_id,)
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "quarantined", "document_id": document_id, "already_quarantined": already}
+
+
+@app.post("/documents/{document_id}/unquarantine")
+def unquarantine_document(document_id: int):
+    conn = db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, quarantined_at FROM app.documents WHERE id = %s", (document_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="unknown document_id")
+            was_quarantined = row["quarantined_at"] is not None
+            if was_quarantined:
+                cur.execute(
+                    "UPDATE app.documents SET quarantined_at = NULL WHERE id = %s", (document_id,)
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "active", "document_id": document_id, "was_quarantined": was_quarantined}
+
+
+@app.get("/documents/quarantined")
+def list_quarantined_documents():
+    conn = db()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, title, source, submitter, quarantined_at FROM app.documents "
+                "WHERE quarantined_at IS NOT NULL ORDER BY quarantined_at"
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return {"quarantined": rows}
 
 
 # ---------------------------------------------------------------------------

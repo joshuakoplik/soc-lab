@@ -12,8 +12,9 @@
 #   ./reset.sh --queue            -- only reseed tail_state to each log's current EOF
 #   ./reset.sh --attacker         -- only rebuild soc-attacker and clear attacker/loot
 #   ./reset.sh --target           -- only rebuild the active lab-mode's target container(s)
-#   ./reset.sh --northwind-controls -- only reset Northwind's SPEC.md §5 control toggles
-#                                       to baseline (undoes harden_northwind_controls calls)
+#   ./reset.sh --northwind-controls -- only reset Northwind's SPEC.md §5 control toggles to
+#                                       baseline and unquarantine every document (undoes
+#                                       harden_northwind_controls/quarantine_northwind_document)
 #   ./reset.sh --network --queue  -- combine any subset
 #   ./reset.sh --status           -- report current state of all three, change nothing
 #   ./reset.sh --no-kill          -- modifier: don't kill running pipeline processes first
@@ -65,6 +66,15 @@
 # volumes, then rebuilds the image and re-runs wordpress-init -- a truly
 # fresh WP install, fresh DB, fresh admin password, fresh flags, every
 # time, not just a fresh container wrapped around old state.
+#
+# northwind mode is the wordpress case again, one level further: it's a
+# whole separate docker-compose project (northwind-range/), and
+# nw-postgres-data is a named volume holding every document ever planted
+# through the unauthenticated /feedback endpoint across every campaign
+# ever run, not just database rows a single exploit chain touched. `make
+# -C northwind-range reset` (not a plain force-recreate) is what actually
+# clears that -- down -v, fresh build, then reseed everything from the
+# committed corpus/entitlements fixtures.
 #
 # --db/--queue reset while ingest.py/detect/rules.py/triage/agent.py/
 # redteam/agent.py are still running would race their open connections
@@ -130,8 +140,9 @@ if [ "$DO_STATUS" = "1" ]; then
   echo
   if docker inspect -f '{{.State.Running}}' nw-edge-nginx >/dev/null 2>&1; then
     "$PY" pipeline/triage/northwind_enforcer.py --status
+    "$PY" pipeline/triage/northwind_enforcer.py --quarantine-status
   else
-    echo "[reset] northwind-range isn't running -- can't report control-toggle status" >&2
+    echo "[reset] northwind-range isn't running -- can't report control-toggle/quarantine status" >&2
   fi
   echo
   "$PY" pipeline/reset_lab.py --status
@@ -246,6 +257,33 @@ except Exception:
       docker compose --profile hard up -d --force-recreate --remove-orphans \
         juiceshop-hard nginx-hard juiceshop-netlock
       ;;
+    northwind)
+      # A separate docker-compose project (northwind-range/), not part of
+      # the main compose.yaml -- rm -sf/--force-recreate above don't apply
+      # here at all. Unlike the other three modes, this target ALSO has
+      # real accumulated state a plain container recreate wouldn't touch:
+      # nw-postgres-data is a named volume holding every document ever
+      # planted through /feedback across every campaign ever run (indirect
+      # prompt injections included -- confirmed live, they just keep
+      # piling up otherwise), plus entitlements/corpus/records. `make
+      # reset` (northwind-range/Makefile) is the only thing that actually
+      # clears that: down -v (drops the volume, so postgres/init/*.sql
+      # re-runs fresh) + up --build --wait, then reseed/load-corpus/
+      # embed-corpus/seed-records/harness-load from the committed
+      # fixtures. Also fixes any stale bind-mount path a container was
+      # created with (see northwind_enforcer.py's module docstring history
+      # -- confirmed live: containers created from a since-deleted
+      # worktree's docker-compose.yml kept writing telemetry into a path
+      # that no longer existed, silently losing it) since `make reset`
+      # runs docker compose from THIS checkout's northwind-range/, not
+      # wherever the containers happened to be created from originally.
+      echo "[reset] rebuilding the northwind-range stack clean (down -v + fresh build +"
+      echo "        reseed -- this also drops the RAG index, so every document ever"
+      echo "        planted through /feedback across every past campaign goes with it)..."
+      make -C northwind-range reset
+      echo "[reset] northwind-range rebuilt clean: fresh containers, fresh postgres volume,"
+      echo "        fresh entitlements/corpus/records, controls already at baseline (fresh Redis)"
+      ;;
     *)
       echo "[reset] lab_mode.json missing or unrecognized ($LAB_MODE) -- skipping target rebuild" >&2
       echo "  (run ./lab-mode.sh {easy|hard|wordpress} first)" >&2
@@ -273,7 +311,7 @@ fi
 
 if [ "$DO_NORTHWIND_CONTROLS" = "1" ]; then
   if ! docker inspect -f '{{.State.Running}}' nw-edge-nginx >/dev/null 2>&1; then
-    echo "[reset] northwind-range isn't running -- skipping Northwind control-toggle reset" >&2
+    echo "[reset] northwind-range isn't running -- skipping Northwind control-toggle/quarantine reset" >&2
     echo "  (cd northwind-range && docker compose up -d to bring it up)" >&2
   else
     echo "[reset] resetting Northwind's SPEC.md §5 control toggles to baseline..."
@@ -284,6 +322,17 @@ if [ "$DO_NORTHWIND_CONTROLS" = "1" ]; then
     else
       echo "[reset] WARNING: Northwind controls did not return to baseline after reset:" >&2
       echo "$remaining" >&2
+      exit 1
+    fi
+
+    echo "[reset] unquarantining every Northwind document quarantine_northwind_document has ever set..."
+    "$PY" pipeline/triage/northwind_enforcer.py --unquarantine-all
+    remaining_q="$("$PY" pipeline/triage/northwind_enforcer.py --quarantine-status)"
+    if [ "$remaining_q" = "[northwind_enforcer] no documents quarantined" ]; then
+      echo "[reset] confirmed: no documents quarantined"
+    else
+      echo "[reset] WARNING: documents still quarantined after reset:" >&2
+      echo "$remaining_q" >&2
       exit 1
     fi
   fi

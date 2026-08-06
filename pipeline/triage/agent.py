@@ -308,6 +308,32 @@ TOOLS = [
         },
     },
     {
+        "name": "quarantine_northwind_document",
+        "description": (
+            "Render a specific Northwind document inert RIGHT NOW -- excluded "
+            "from every retrieval mode (never deleted, so the row survives for "
+            "forensics). REAL, immediate, no human review, same posture as "
+            "block_ip/harden_northwind_controls. Use this once you've concluded "
+            "a specific document_id (from a northwind_suspicious_ingestion, "
+            "northwind_poisoned_retrieval, or northwind_ingestion_burst "
+            "candidate's detail) is actually malicious -- not speculatively. "
+            "Idempotent: quarantining an already-quarantined document is a "
+            "safe no-op, not an error. Getting the document_id right matters: "
+            "quarantining the wrong one is a false-positive takedown of "
+            "content a legitimate user may depend on, same 'get the target "
+            "right' caution as block_ip. Undone via "
+            "reset.sh --northwind-controls, not a tool available here."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_id": {"type": "integer"},
+                "reason": {"type": "string"},
+            },
+            "required": ["document_id", "reason"],
+        },
+    },
+    {
         "name": "page_oncall",
         "description": (
             "Wake a human analyst RIGHT NOW -- a pager/phone alert, not a "
@@ -872,6 +898,46 @@ def tool_harden_northwind_controls(conn, candidate_id, toggles, reason):
     return json.dumps({"ok": executed, "executed": executed, "applied": applied, "error": error})
 
 
+def tool_quarantine_northwind_document(conn, candidate_id, document_id, reason):
+    """REAL enforcement against a specific document -- ungated, same lane
+    as tool_block_ip/tool_harden_northwind_controls. No fence function the
+    way those two have one: there's no "wrong direction" for quarantine
+    (see quarantine_northwind_document's own TOOLS description) the way
+    turning a security control off would be, so northwind_enforcer.py
+    doesn't validate anything before the HTTP call here -- portal-api's
+    own 404 on an unknown document_id is the only rejection case, and
+    that's still logged below like any other outcome.
+
+    Every call is logged to northwind_quarantine_calls -- executed or
+    not -- same "always visible, always auditable" spirit as the other
+    two enforcement tools. See reset.sh --northwind-controls to
+    unquarantine every document this has ever quarantined."""
+    if document_id is None:
+        return json.dumps({"error": "document_id is required"})
+    ts = now_iso()
+    try:
+        result = northwind_enforcer.quarantine_document(document_id)
+        executed = True
+        already = result.get("already_quarantined")
+        error = None
+        print(f"  [quarantine_northwind_document] QUARANTINED document_id={document_id} "
+              f"(candidate_id={candidate_id}, already={already})")
+    except northwind_enforcer.ControlsError as e:
+        executed = False
+        already = None
+        error = str(e)
+        print(f"  [quarantine_northwind_document] FAILED document_id={document_id} "
+              f"(candidate_id={candidate_id}) -- {e}")
+    conn.execute(
+        "INSERT INTO northwind_quarantine_calls (candidate_id, document_id, reason, "
+        "executed, already_quarantined, error, created) VALUES (?,?,?,?,?,?,?)",
+        (candidate_id, document_id, reason, int(executed),
+         int(already) if already is not None else None, error, ts),
+    )
+    conn.commit()
+    return json.dumps({"ok": executed, "executed": executed, "already_quarantined": already, "error": error})
+
+
 def tool_page_oncall(conn, candidate_id, reason):
     """TEST-ONLY STAND-IN, same pattern as tool_block_ip: no pager, SMS, or
     phone system is ever touched. Every call is printed loudly and logged to
@@ -938,6 +1004,12 @@ def dispatch_tool(conn, candidate_id, name, tool_input):
             return tool_harden_northwind_controls(
                 conn, candidate_id,
                 tool_input.get("toggles"),
+                tool_input.get("reason", ""),
+            ), False
+        if name == "quarantine_northwind_document":
+            return tool_quarantine_northwind_document(
+                conn, candidate_id,
+                tool_input.get("document_id"),
                 tool_input.get("reason", ""),
             ), False
         if name == "page_oncall":

@@ -42,6 +42,18 @@ NW_INGEST_BURST_THRESHOLD     = 5     # submissions from one submitter within wi
 NW_ID_ENUM_WINDOW_S           = 1800  # window for customer_record ID-sweep detection
 NW_ID_ENUM_DISTINCT_THRESHOLD = 5     # distinct customer_ids probed by one session within window
 
+# The one northwind-ingest source reached with no auth check at all
+# (services/portal-api/app.py's /feedback route -- confirmed no
+# Depends(get_current_user)). ticket_feed/drive_sync are internal
+# background jobs (ingest-svc's own poll_tickets()/poll_drive()) with no
+# external caller at all, not merely "authenticated" -- there's no HTTP
+# request behind them to check credentials on in the first place. Used
+# ONLY as a cheap structural gate deciding what gets a baseline look
+# below, never as the sole judge of whether something IS malicious -- see
+# _northwind_injection_labels' own SCALING NOTE, and the rules below for
+# why content match still does the actual severity judgment.
+NW_UNAUTHENTICATED_INGEST_SOURCES = {"feedback_form"}
+
 # ---------------------------------------------------------------------------
 # Signatures. Deliberately boring regex. Note we match on attacker-controlled
 # text WITHOUT interpreting it — a regex cannot be talked into anything. That
@@ -49,8 +61,19 @@ NW_ID_ENUM_DISTINCT_THRESHOLD = 5     # distinct customer_ids probed by one sess
 # ---------------------------------------------------------------------------
 
 # The three social-engineering angles the real Northwind campaign actually
-# used against the assistant, via documents planted through the
-# unauthenticated /feedback endpoint (see rule_northwind_injection_language).
+# used against the assistant. Deliberately NOT keyed to any specific
+# ingestion channel (feedback_form vs. ticket_feed vs. drive_sync, etc.) --
+# northwind-ingest's source field distinguishes "this document arrived
+# through the app's one unauthenticated write surface" from "this is the
+# app's own trusted internal content sync" only by NAME, and hardcoding
+# that name into a rule means the rule only works because we already know
+# which door was left unlocked. It goes blind the moment that changes.
+# Matching the content itself instead -- does this document/completion
+# read like an instruction planted for an AI reader, regardless of which
+# channel it arrived through -- is what actually generalizes, and is
+# reused by rule_northwind_poisoned_retrieval and
+# rule_northwind_ingestion_burst below, not just rule_northwind_injection_
+# language (which was the first place this pattern set was written for).
 NW_INJECTION_LANGUAGE_PATTERNS = [
     (r"\b(escalation|supervisor)\s+(code|override|approv\w*)\b", "escalation_override"),
     (r"\bapproved\s+by\b.{0,20}\bsupervisor\b", "escalation_override"),
@@ -60,6 +83,31 @@ NW_INJECTION_LANGUAGE_PATTERNS = [
     (r"\b(training|onboarding|demo)\s+account\b", "fake_onboarding"),
     (r"\bwhitelist(ed)?\s+(this|these|for)\b", "fake_onboarding"),
 ]
+
+
+def _northwind_injection_labels(text):
+    """Shared by every Northwind rule that judges CONTENT rather than
+    channel -- strips markdown emphasis (see _strip_markdown_emphasis)
+    then matches NW_INJECTION_LANGUAGE_PATTERNS. Empty list means nothing
+    matched, not an error.
+
+    SCALING NOTE, not acted on here: this runs unconditionally over every
+    ingested document and every completion, which is fine at lab scale
+    (low hundreds of documents) but wouldn't be free at real-deployment
+    volume -- an ever-growing pattern library matched against 100% of
+    ingested content, every time, adds real cost and, more importantly,
+    real false-positive volume as the pattern set grows. A production
+    version would want a cheap, structural PRE-filter deciding what even
+    gets this check -- e.g. was the ingestion authenticated vs. anonymous,
+    is the submitter/channel new or established, is volume anomalous for
+    that channel -- and reserve the content check for whatever trips that.
+    Important distinction from the channel-NAME filtering this rule set
+    deliberately avoids elsewhere (see NW_INJECTION_LANGUAGE_PATTERNS'
+    comment above): "was this request authenticated" is a general,
+    transferable security property that applies to any future ingestion
+    surface, not foreknowledge of which specific one is vulnerable today
+    -- a legitimate triage signal, not the detection judgment itself."""
+    return _match_any(_strip_markdown_emphasis(text), NW_INJECTION_LANGUAGE_PATTERNS)
 
 # Post-compromise shell behaviour. Cowrie only sees these after a login lands.
 
@@ -342,9 +390,37 @@ def rule_northwind_poisoned_retrieval(conn, since_epoch):
     """SPEC.md's own flagged gap (§10): 'A poisoned document arriving
     through the feedback form is visible only in ingest telemetry, and
     only if someone correlates it with a later retrieval.' This is that
-    correlation -- a document planted via the unauthenticated /feedback
-    endpoint (northwind-ingest events) later surfacing in a real /chat
-    retrieval (llm_transcripts.retrieved_context).
+    correlation -- a document worth scrutiny later surfacing in a real
+    /chat retrieval (llm_transcripts.retrieved_context).
+
+    A document is worth scrutiny if EITHER it arrived through the app's
+    one unauthenticated write surface (NW_UNAUTHENTICATED_INGEST_SOURCES)
+    OR its content matches known injection-shaped language
+    (_northwind_injection_labels) -- not just the latter. Content matching
+    alone is brittle by construction: it only catches the specific
+    phrasings one real campaign happened to use, so an attacker who words
+    an injection differently sails through _northwind_injection_labels()
+    completely undetected -- and if THAT were the only thing gating
+    whether a candidate exists, that attempt would never even reach a
+    human or the triage LLM for a second, smarter look. Widening the net
+    to "came through the channel with no auth check at all" doesn't have
+    that blind spot: it doesn't require guessing the attacker's wording,
+    it just means anonymous, unverified content that made it into a live
+    response always gets looked at, known phrasing or not. Content match
+    still does real work -- it's what elevates severity to critical below
+    -- it's just not the sole gate anymore. Trusted internal channels
+    (ticket_feed, drive_sync) still only produce a candidate on a content
+    match, same defense-in-depth reasoning as before: don't treat routine
+    internal sync traffic as suspicious by default, but don't assume a
+    trusted channel can never be abused either.
+
+    (Confirmed live, the reason source/channel was ever excluded at all
+    here: an early version matched source='northwind-ingest' unconditionally
+    and flagged 37 ordinary synced support tickets as "poisoned" alongside
+    the 4 real plants -- gating on channel NAME as the sole judge of
+    maliciousness was wrong. Gating on channel TRUST as one of two
+    independent signals, with content still doing the severity judgment,
+    is a different thing.)
 
     Deliberately deviates from every other rule's since_epoch-bounded scan
     on the ingest side: it rescans ALL northwind-ingest history every run,
@@ -364,10 +440,16 @@ def rule_northwind_poisoned_retrieval(conn, since_epoch):
         doc_id = obj.get("document_id")
         if doc_id is None:
             continue
+        source = obj.get("source")
+        unauthenticated = source in NW_UNAUTHENTICATED_INGEST_SOURCES
+        labels = _northwind_injection_labels(obj.get("content"))
+        if not unauthenticated and not labels:
+            continue
         doc_map[doc_id] = {
             "event_id": r["id"], "ts": r["ts"],
             "submitter": obj.get("submitter"), "tenant_id": obj.get("tenant_id"),
-            "source": obj.get("source"),
+            "source": source, "unauthenticated_channel": unauthenticated,
+            "matched_labels": sorted(set(labels)),
         }
     if not doc_map:
         return []
@@ -397,10 +479,20 @@ def rule_northwind_poisoned_retrieval(conn, since_epoch):
                 gap_s = (retrieval_e - ingest_e).total_seconds()
             except (ValueError, AttributeError, TypeError):
                 pass
+            # Both signals present (anonymous origin AND known-shaped
+            # language) is the highest-confidence case: critical. Either
+            # signal alone, now confirmed live in a real response, is
+            # still "high" -- an anonymous document reaching a live
+            # answer is notable even without a content match (that's
+            # exactly the case a content-only gate would have missed
+            # entirely), and a content match from a nominally-trusted
+            # channel going live is notable even without the anonymous
+            # signal.
+            severity = "critical" if (ingest["unauthenticated_channel"] and ingest["matched_labels"]) else "high"
             out.append({
                 "dedupe_key": f"nw_poisoned_retrieval:{doc_id}:{t['id']}",
                 "rule": "northwind_poisoned_retrieval",
-                "severity": "high",
+                "severity": severity,
                 "src_ip": None,
                 "first_seen": ingest["ts"],
                 "last_seen": t["ts"],
@@ -413,6 +505,8 @@ def rule_northwind_poisoned_retrieval(conn, since_epoch):
                     "ingest_submitter": ingest["submitter"],
                     "ingest_tenant_id": ingest["tenant_id"],
                     "ingest_ts": ingest["ts"],
+                    "unauthenticated_channel": ingest["unauthenticated_channel"],
+                    "matched_labels": ingest["matched_labels"],
                     "retrieval_session_id": t["session_id"],
                     "retrieval_username": t["username"],
                     "retrieval_ts": t["ts"],
@@ -425,16 +519,25 @@ def rule_northwind_poisoned_retrieval(conn, since_epoch):
 
 
 def rule_northwind_ingestion_burst(conn, since_epoch):
-    """N submissions from one submitter to the unauthenticated /feedback
-    endpoint within a window -- the shape a real campaign takes when
-    repeatedly planting injection documents (see
-    rule_northwind_poisoned_retrieval for the follow-on "did it get
-    retrieved" check). Submitter is self-declared, not authenticated --
-    grouping by it still catches a campaign that reuses one cover identity,
-    which is what actually happened; a submitter left blank on every call
-    would evade this rule entirely, since there's no other correlatable
-    field (no src_ip, no session_id on ingest events) -- a known blind
-    spot, not an oversight."""
+    """N documents worth scrutiny from one submitter within a window -- the
+    shape a real campaign takes when repeatedly planting variations on an
+    attack. Same two-signal gate as rule_northwind_poisoned_retrieval
+    (see its docstring for the full reasoning): a document counts if it
+    came through the app's one unauthenticated write surface
+    (NW_UNAUTHENTICATED_INGEST_SOURCES) OR its content matches
+    _northwind_injection_labels, not only the latter -- content match
+    alone would miss a burst of differently-worded attempts that never
+    happen to say the phrases this pattern set knows about. Trusted
+    channels (ticket_feed, drive_sync) still only count on a content
+    match, so the app's own routine ticket/drive sync producing 5+
+    ordinary documents from one submitter in an hour doesn't trip this.
+
+    Submitter is self-declared, not authenticated -- grouping by it still
+    catches a campaign that reuses one cover identity, which is what
+    actually happened; a submitter left blank on every call would evade
+    this rule entirely, since there's no other correlatable field (no
+    src_ip, no session_id on ingest events) -- a known blind spot, not an
+    oversight."""
     rows = conn.execute(
         "SELECT id, ts, username, raw, CAST(strftime('%s', ts) AS INTEGER) e "
         "FROM events WHERE source='northwind-ingest' AND username IS NOT NULL "
@@ -443,39 +546,113 @@ def rule_northwind_ingestion_burst(conn, since_epoch):
 
     groups = defaultdict(list)
     for r in rows:
-        groups[(r["username"], _bucket(r["e"], NW_INGEST_BURST_WINDOW_S))].append(r)
+        try:
+            obj = json.loads(r["raw"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        unauthenticated = obj.get("source") in NW_UNAUTHENTICATED_INGEST_SOURCES
+        labels = _northwind_injection_labels(obj.get("content"))
+        if not unauthenticated and not labels:
+            continue
+        groups[(r["username"], _bucket(r["e"], NW_INGEST_BURST_WINDOW_S))].append((r, obj, unauthenticated, labels))
 
     out = []
-    for (submitter, bucket), evs in groups.items():
-        if len(evs) < NW_INGEST_BURST_THRESHOLD:
+    for (submitter, bucket), items in groups.items():
+        if len(items) < NW_INGEST_BURST_THRESHOLD:
             continue
         tenants = set()
         snippets = []
-        for e in evs:
-            try:
-                obj = json.loads(e["raw"])
-            except (json.JSONDecodeError, TypeError):
-                continue
+        all_labels = set()
+        any_unauthenticated = False
+        for r, obj, unauthenticated, labels in items:
             if obj.get("tenant_id") is not None:
                 tenants.add(obj["tenant_id"])
             content = obj.get("content")
             if content:
                 snippets.append(content[:120])
-        severity = "high" if (len(evs) >= 10 or len(tenants) > 1) else "medium"
+            all_labels.update(labels)
+            any_unauthenticated = any_unauthenticated or unauthenticated
+        severity = "high" if (len(items) >= 10 or len(tenants) > 1 or (any_unauthenticated and all_labels)) else "medium"
         out.append({
             "dedupe_key": f"nw_ingest_burst:{submitter}:{bucket}",
             "rule": "northwind_ingestion_burst",
             "severity": severity,
             "src_ip": None,
-            "first_seen": evs[0]["ts"],
-            "last_seen": evs[-1]["ts"],
-            "event_count": len(evs),
-            "evidence": [e["id"] for e in evs][:50],
+            "first_seen": items[0][0]["ts"],
+            "last_seen": items[-1][0]["ts"],
+            "event_count": len(items),
+            "evidence": [r["id"] for r, _, _, _ in items][:50],
             "detail": {
                 "submitter": submitter,
-                "count": len(evs),
+                "count": len(items),
                 "distinct_tenants": len(tenants),
+                "any_unauthenticated_channel": any_unauthenticated,
+                "matched_labels": sorted(all_labels),
                 "sample_content_snippets": snippets[:10],
+            },
+        })
+    return out
+
+
+def rule_northwind_suspicious_ingestion(conn, since_epoch):
+    """Fires at ingestion time, not retrieval -- closes the gap the other
+    two ingestion-side rules leave open by design: they only produce a
+    candidate once a flagged document is either retrieved
+    (rule_northwind_poisoned_retrieval) or part of a burst
+    (rule_northwind_ingestion_burst). A single document planted through
+    the unauthenticated channel that nobody happens to ask about, and
+    that never repeats, sits completely undetected under either of those
+    -- even though the vulnerability (an anonymous write reaching the
+    live index) is real the moment it lands. This rule doesn't wait for
+    either follow-on condition: every submission through
+    NW_UNAUTHENTICATED_INGEST_SOURCES becomes AT LEAST a low-severity
+    candidate on its own, content match or not -- see
+    rule_northwind_poisoned_retrieval's docstring for why content
+    matching is deliberately not the sole gate anywhere in this file
+    (three known phrasings from one campaign is not a complete detector).
+    Trusted channels (ticket_feed, drive_sync) still only produce a
+    candidate here on an actual content match, same defense-in-depth
+    posture as the other two rules -- routine internal sync traffic
+    isn't suspicious by default, but a trusted channel producing
+    injection-shaped content still is.
+
+    Normal since_epoch-bounded incremental scan, unlike
+    rule_northwind_poisoned_retrieval -- this rule doesn't correlate
+    across two tables, so there's no reason to rescan history each run."""
+    rows = conn.execute(
+        "SELECT id, ts, raw FROM events WHERE source='northwind-ingest' "
+        "AND CAST(strftime('%s', ts) AS INTEGER) >= ? ORDER BY ts", (since_epoch,)
+    ).fetchall()
+
+    out = []
+    for r in rows:
+        try:
+            obj = json.loads(r["raw"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        source = obj.get("source")
+        unauthenticated = source in NW_UNAUTHENTICATED_INGEST_SOURCES
+        labels = _northwind_injection_labels(obj.get("content"))
+        if not unauthenticated and not labels:
+            continue
+        severity = ("high" if len(set(labels)) > 1 else "medium") if labels else "low"
+        out.append({
+            "dedupe_key": f"nw_suspicious_ingest:{r['id']}",
+            "rule": "northwind_suspicious_ingestion",
+            "severity": severity,
+            "src_ip": None,
+            "first_seen": r["ts"],
+            "last_seen": r["ts"],
+            "event_count": 1,
+            "evidence": [r["id"]],
+            "detail": {
+                "document_id": obj.get("document_id"),
+                "ingest_source": source,
+                "unauthenticated_channel": unauthenticated,
+                "submitter": obj.get("submitter"),
+                "tenant_id": obj.get("tenant_id"),
+                "matched_labels": sorted(set(labels)),
+                "content_snippet": (obj.get("content") or "")[:300],
             },
         })
     return out
@@ -591,6 +768,7 @@ RULES = [
     rule_wazuh_alert,
     rule_http_rate_anomaly,
     rule_cross_source_correlation,
+    rule_northwind_suspicious_ingestion,
     rule_northwind_poisoned_retrieval,
     rule_northwind_ingestion_burst,
     rule_northwind_id_enumeration,

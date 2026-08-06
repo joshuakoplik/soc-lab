@@ -86,7 +86,20 @@ def reset_db():
 def reset_queue():
     conn = ingest.connect()
     seeded = 0
-    for source, path in ingest.SOURCES:
+    # SOURCES and TRANSCRIPT_SOURCES are separate lists (ingest.py's own
+    # split -- llm-transcripts.log is nested/transcript-shaped and goes
+    # into llm_transcripts, not the flat events table), each with their
+    # own tail_state row keyed by file path -- both need reseeding here,
+    # or a --db wipe leaves llm-transcripts.log's queue exactly where it
+    # was before the wipe. Confirmed live: this was missing here, so a
+    # fresh soc.db's first `ingest.py --follow` replayed the ENTIRE
+    # on-disk llm-transcripts.log history back in, including sessions
+    # from campaigns run hours earlier -- candidates.evidence for a
+    # northwind_injection_language row built from one of those stale
+    # transcripts pointed at a session_id no longer present in the fresh
+    # events table at all, so query_events came back empty and the triage
+    # model had nothing to correlate it against.
+    for source, path in ingest.SOURCES + ingest.TRANSCRIPT_SOURCES:
         if not os.path.exists(path):
             print(f"    {source:<8} {path}  [MISSING] -- nothing to seed")
             continue

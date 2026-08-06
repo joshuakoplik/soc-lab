@@ -119,6 +119,27 @@ CREATE TABLE IF NOT EXISTS northwind_control_calls (
 
 CREATE INDEX IF NOT EXISTS idx_nw_control_calls_candidate ON northwind_control_calls(candidate_id);
 
+-- Every quarantine_northwind_document() call -- executed or rejected, same
+-- "always visible" contract as the two tables above. Its own table rather
+-- than reused space in northwind_control_calls: this is a document_id-keyed
+-- action, not a toggle-keyed one -- different shape, same auditing
+-- discipline. See reset.sh --northwind-controls to unquarantine every
+-- document this has ever quarantined (northwind_enforcer.unquarantine_document(),
+-- via list_quarantined()); that path doesn't write here either, same
+-- operator-run-bulk-reset reasoning as the other two tables' own undo paths.
+CREATE TABLE IF NOT EXISTS northwind_quarantine_calls (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id  INTEGER NOT NULL REFERENCES candidates(id),
+    document_id   INTEGER NOT NULL,
+    reason        TEXT    NOT NULL,
+    executed      INTEGER NOT NULL DEFAULT 0,  -- 1 = quarantine call succeeded, 0 = HTTP/other error
+    already_quarantined INTEGER,               -- portal-api's own idempotency flag; NULL unless executed=1
+    error         TEXT,               -- HTTP-error detail; NULL on success
+    created       TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_nw_quarantine_calls_candidate ON northwind_quarantine_calls(candidate_id);
+
 CREATE TABLE IF NOT EXISTS human_pages (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     candidate_id  INTEGER NOT NULL REFERENCES candidates(id),
