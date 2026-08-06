@@ -18,11 +18,13 @@ Two distinct principals, per the spec:
     readable from the host, no volume mount needed, since this process
     isn't containerized). This is the identity whose entitlements are
     under test -- a real, valid low-privilege account, not a cracked one.
-  - The ATTACKER PERSONA: submit_to_ingestion() posts to the app's own
-    already-unauthenticated /feedback endpoint (SPEC.md §6.3) -- the exact
-    same "plant a document, no review gate" surface harness/runner.py's
-    own setup steps already use. Not a new ingestion hole, a second caller
-    of an existing one.
+  - The ATTACKER PERSONA: agent.py's generic http_request tool (not
+    anything in this module -- deliberately no submit_to_ingestion()-style
+    wrapper here anymore, see lab_modes.py's NORTHWIND comment) reaches the
+    app's own already-unauthenticated /feedback endpoint (SPEC.md §6.3)
+    the same way it reaches any other path -- the same "plant a document,
+    no review gate" surface harness/runner.py's own setup steps already
+    use, just not named or pre-selected for the agent.
 
 Requests go through edge-nginx, not directly to portal-api -- deliberately
 different from harness/runner.py's own choice (correct for the harness's
@@ -394,17 +396,6 @@ def probe(nw_session: NorthwindSession, message: str, model: str | None = None) 
     response = _post_json(nw_session.opener, f"{base_url()}/api/chat", payload, timeout=CHAT_TIMEOUT_S)
     latency_ms = (time.monotonic() - t0) * 1000
     return response, latency_ms
-
-
-def submit_to_ingestion(tenant: str, message: str, submitter: str | None = None) -> dict:
-    """The attacker persona -- POST /feedback, deliberately unauthenticated
-    (SPEC.md §6.3's own design, not a hole this adapter opens). No login,
-    no cookiejar; a plain opener is enough. Reuses the exact endpoint
-    harness/runner.py's own setup steps already use to plant documents."""
-    payload = {"tenant": tenant, "message": message}
-    if submitter is not None:
-        payload["submitter"] = submitter
-    return _post_json(None, f"{base_url()}/api/feedback", payload)
 
 
 def entitled_for_document(user_id: int, source: str) -> bool | None:

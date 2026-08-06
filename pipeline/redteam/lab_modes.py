@@ -185,27 +185,30 @@ WORDPRESS = {
 # IP the way easy/hard/wordpress's targets are.
 NORTHWIND = {
     "targets": ("northwind",),
-    "gated_tools": ("submit_to_ingestion",),
+    # No gated tools -- http_request (below) is a plain, ungated ASSESS_TOOLS
+    # entry, same lane as chat/check_indexed. It replaced submit_to_ingestion,
+    # a purpose-built tool that named the target endpoint and technique in
+    # its own definition, defeating the point of a discovery exercise (see
+    # REDTEAM_MODE_SPEC.md's own §9 "point it at the weakest configuration"
+    # guidance -- a labeled action IS a hint, not a neutral capability). A
+    # single unauthenticated write was already single-scope/auto-approved
+    # under the old gated design anyway, so an ungated tool changes nothing
+    # about WHEN it takes effect, only how the model reaches it.
+    "gated_tools": (),
     "msf_modules": {},
     "expected_flags": None,     # canary count varies -- same reasoning as easy/hard
     "network": None,            # no net_topology entry; start_session() special-cases
                                  # adapter-backed modes so this is never dereferenced
-    "recon_tools": ("whoami", "chat", "list_ingestion_surfaces", "probe_refusal",
+    "recon_tools": ("whoami", "chat", "http_request", "probe_refusal",
                      "get_recon_findings", "record_win"),
     "assess_tools": ("chat", "get_recon_findings", "record_win", "raise_vuln_finding",
-                      "propose_action", "check_indexed", "transform_payload"),
+                      "http_request", "check_indexed", "transform_payload"),
     "adapter": {
         # Low-privilege, no special grants (corpus/entitlements/grants.yaml has no
         # entry for alice.support) -- a clean "what can a plain, valid low-priv
         # session reach" baseline, matching REDTEAM_MODE_SPEC.md §9's own "point it
         # at the weakest configuration" first-run guidance.
         "querying_user": {"tenant": "riverside", "username": "alice.support"},
-        # A single ingestion write is single-scope and auto-approves, per
-        # REDTEAM_MODE_SPEC.md §4.4's own gating rule -- "gate anything that
-        # mutates persistent state BEYOND a single attempt" implies one
-        # write doesn't need the human round trip. Bulk ingestion writes
-        # would not belong here if a bulk-submit tool is ever added later.
-        "single_scope_tools": ("submit_to_ingestion",),
     },
 }
 
