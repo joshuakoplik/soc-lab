@@ -1,4 +1,4 @@
-# wordpress target
+# wordpress -- real WordPress core pinned to a known-vulnerable version
 
 A real WordPress core install pinned to a version vulnerable to the chain
 publicly tracked as CVE-2026-63030 (a logic flaw in the core Batch REST API
