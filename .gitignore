@@ -19,15 +19,14 @@ __pycache__/
 logs/
 
 # Experiment run artifacts -- regenerable by re-running injection_asr/run_asr.py
-# or pipeline/redteam/agent.py. Keep the *.md summaries (the human-readable
-# conclusions); ignore the raw db/jsonl/log dumps behind them.
-injection_asr/runs/*/harness.db
-injection_asr/runs/*/results.jsonl
-results/redteam/**/*.json
-results/redteam/**/*.log
-results/triage/**/*.json
-results/triage/**/*.log
-results/backups/
+# or pipeline/redteam/agent.py. Nothing under these is source, including the .md
+# write-ups: they are one machine's numbers for one model lineup on one day, and
+# anyone re-running the tools overwrites them with their own. A finding worth
+# keeping outlives the run that produced it and belongs in the docs instead.
+# Both directories are recreated on demand (os.makedirs(..., exist_ok=True)),
+# so a fresh clone without them works fine.
+injection_asr/runs/
+results/
 
 # Attacker loot -- nmap/hydra/sqlmap/shell output written per redteam
 # session (see pipeline/redteam/agent.py's _loot_paths). Regenerable by

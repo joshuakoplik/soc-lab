@@ -170,12 +170,14 @@ northwind-range/     the northwind mode: a full RAG app + control-ablation harne
 dashboard/           read-only real-time view over soc.db
 attacker/            Kali container, multi-homed onto every mode's network
 cowrie/ nginx/ juiceshop/ wordpress/ suricata/ wazuh/    per-service config
-results/             committed experiment write-ups
+results/             run write-ups (generated, not tracked)
 ```
 
-Anything under `logs/`, `attacker/loot/`, `results/**/*.json`, and
-`injection_asr/runs/*/harness.db` is **generated, not source** — see `.gitignore`. Only the
-human-readable `RESULTS.md` / `*.md` summaries are committed.
+Anything under `logs/`, `attacker/loot/`, `results/`, and `injection_asr/runs/` is
+**generated, not source** — see `.gitignore`. That includes the `.md` write-ups those
+runs produce: they are one machine's numbers for one model lineup on one day, and
+re-running the tools overwrites them. Both output directories are recreated on demand,
+so their absence in a fresh clone is expected.
 
 ---
 

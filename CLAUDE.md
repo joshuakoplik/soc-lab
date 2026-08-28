@@ -211,9 +211,9 @@ never mistaken for routine noise. Run `./reset.sh --network` after a run to
 undo anything it blocked (the harness's own DB is already isolated from
 soc.db, so a full `./reset.sh` isn't needed here). `recommend_block` never
 executes anywhere, harness or production. Runs live under
-`injection_asr/runs/<name>/`; only
-the `RESULTS.md` summaries are meant to be committed (see `.gitignore` —
-the raw `harness.db`/`results.jsonl` are regenerable).
+`injection_asr/runs/<name>/`, and
+none of it is committed — the whole directory is gitignored, `RESULTS.md`
+write-ups included, since every one of them is regenerable and machine-specific.
 
 Compare `--controls on` vs `--controls off` output when evaluating whether a
 prompt change actually improved injection resistance, not just whether verdicts
@@ -238,6 +238,8 @@ changed.
   into `pipeline/detect/`, `pipeline/triage/`, `pipeline/redteam/`, and
   `injection_asr/`. Trust the actual file layout over those comments; `AGENT_BRIEF.md`
   no longer exists in the repo.
-- `attacker/loot/` and `results/{redteam,triage}/` accumulate run artifacts
-  (nmap/hydra/sqlmap output, session logs) — these are generated, not source; see
-  `.gitignore` for exactly what's excluded.
+- `attacker/loot/`, `results/`, and `injection_asr/runs/` accumulate run artifacts
+  (nmap/hydra/sqlmap output, session logs, and the `.md` write-ups summarizing a
+  run) — all generated, not source, and all gitignored in full. If a result is
+  worth keeping, promote the conclusion into the docs; don't re-track the
+  directory.
