@@ -1,4 +1,4 @@
-# Attacker container
+# attacker -- Kali container, multi-homed onto every mode's network
 
 Kali, multi-homed onto every mode's own network at once (soclab-easy,
 soclab-hard, soclab-wordpress -- see pipeline/net_topology.py), not one
