@@ -47,7 +47,7 @@ MANIFEST_FILE = ROOT / "corpus" / "docs_manifest.yaml"
 DOCS_DIR = ROOT / "corpus" / "docs"
 
 MODEL = "gemma4:31b"
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://100.64.0.20:11434").rstrip("/")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
 
 TENANTS = [
     {"slug": "riverside", "name": "Riverside Cargo Co.", "industry": "freight logistics"},

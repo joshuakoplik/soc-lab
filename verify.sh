@@ -2,6 +2,17 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# Host bindings come from .env (see .env.example) so this script always
+# prints/probes the ports compose.yaml actually published. LAB_BIND_IP may be
+# 0.0.0.0 (bind-all), which is not a connectable address -- use loopback to
+# talk to it in that case.
+set -a; [ -f .env ] && . ./.env; set +a
+LAB_BIND_IP="${LAB_BIND_IP:-127.0.0.1}"
+LAB_NGINX_EASY_PORT="${LAB_NGINX_EASY_PORT:-8082}"
+LAB_COWRIE_SSH_PORT="${LAB_COWRIE_SSH_PORT:-2222}"
+case "$LAB_BIND_IP" in 0.0.0.0|::|"") LAB_HOST=127.0.0.1 ;; *) LAB_HOST="$LAB_BIND_IP" ;; esac
+
+
 PASS=0; FAIL=0
 ok()   { echo "  [PASS] $1"; PASS=$((PASS+1)); }
 bad()  { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
@@ -17,27 +28,27 @@ done
 
 echo
 echo "=== 2. Generate web traffic through nginx ==="
-curl -s -o /dev/null -w '  GET /            -> %{http_code}\n' http://localhost:8082/
+curl -s -o /dev/null -w '  GET /            -> %{http_code}\n' http://${LAB_HOST}:${LAB_NGINX_EASY_PORT}/
 # A benign-looking request with attacker-controlled fields, so you can see them land verbatim.
 curl -s -o /dev/null -w '  GET /?q=test     -> %{http_code}\n' \
      -A 'soc-lab-verify/1.0' \
-     'http://localhost:8082/rest/products/search?q=test'
+     "http://${LAB_HOST}:${LAB_NGINX_EASY_PORT}/rest/products/search?q=test"
 sleep 1
 
 echo
 echo "=== 3. Generate SSH traffic against Cowrie ==="
 if command -v sshpass >/dev/null 2>&1; then
   for i in 1 2 3; do
-    sshpass -p 'hunter2' ssh -p 2222 -o StrictHostKeyChecking=no \
+    sshpass -p 'hunter2' ssh -p "${LAB_COWRIE_SSH_PORT}" -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
-      root@localhost 'whoami' >/dev/null 2>&1
+      root@"${LAB_HOST}" 'whoami' >/dev/null 2>&1
   done
   echo "  3 login attempts sent"
 else
   # No sshpass? A bare TCP connect still produces a cowrie.session.connect event.
-  (exec 3<>/dev/tcp/localhost/2222 && head -c 40 <&3 >/dev/null) 2>/dev/null \
+  (exec 3<>/dev/tcp/${LAB_HOST}/${LAB_COWRIE_SSH_PORT} && head -c 40 <&3 >/dev/null) 2>/dev/null \
     && echo "  TCP connect sent (install sshpass for full login events)" \
-    || echo "  [WARN] could not reach localhost:2222"
+    || echo "  [WARN] could not reach ${LAB_HOST}:${LAB_COWRIE_SSH_PORT}"
 fi
 sleep 2
 

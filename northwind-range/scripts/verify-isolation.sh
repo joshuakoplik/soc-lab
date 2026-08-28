@@ -15,6 +15,13 @@ PASS=0; FAIL=0
 ok()  { echo "  [PASS] $1"; PASS=$((PASS+1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
 
+# Must match docker-compose.yml's edge-nginx publish. Loopback unless the
+# operator opted into a narrow private-interface bind via .env (SPEC.md §0.2).
+[ -f .env ] && . ./.env
+EDGE_BIND_IP="${NW_EDGE_BIND_IP:-127.0.0.1}"
+HARNESS_BIND_IP="${NW_HARNESS_BIND_IP:-127.0.0.1}"
+HARNESS_PORT="${NW_HARNESS_PORT:-8090}"
+
 if [ "${1:-}" = "--cold-start" ]; then
   echo "=== Cold start: down -v, rebuild, up ==="
   docker compose down -v
@@ -122,18 +129,18 @@ BAD_PUBLISH=0
 for c in $ALL_SERVICES; do
   ports="$(docker port "$c" 2>/dev/null || true)"
   if [ "$c" = "nw-harness" ]; then
-    if echo "$ports" | grep -q "127.0.0.1:8090"; then
-      ok "nw-harness: published on 127.0.0.1:8090"
+    if echo "$ports" | grep -q "${HARNESS_BIND_IP}:${HARNESS_PORT}"; then
+      ok "nw-harness: published on ${HARNESS_BIND_IP}:${HARNESS_PORT}"
     else
-      bad "nw-harness: expected 127.0.0.1:8090 published, got: ${ports:-none}"
+      bad "nw-harness: expected ${HARNESS_BIND_IP}:${HARNESS_PORT} published, got: ${ports:-none}"
     fi
   elif [ "$c" = "nw-edge-nginx" ]; then
-    if echo "$ports" | grep -q "100.64.0.10:8888"; then
-      ok "nw-edge-nginx: published on 100.64.0.10:8888 (Tailscale-only, not 0.0.0.0)"
+    if echo "$ports" | grep -q "${EDGE_BIND_IP}:8888"; then
+      ok "nw-edge-nginx: published on ${EDGE_BIND_IP}:8888 (narrow bind, not 0.0.0.0)"
     elif [ -z "$ports" ]; then
-      : # fine -- the tailnet exception is a working-session convenience, not mandatory
+      : # fine -- the published port is a working-session convenience, not mandatory
     else
-      bad "nw-edge-nginx: has an unexpected published port (not the Tailscale IP): $ports"
+      bad "nw-edge-nginx: has an unexpected published port (not ${EDGE_BIND_IP}): $ports"
       BAD_PUBLISH=1
     fi
   else
@@ -149,11 +156,11 @@ done
 
 echo
 echo "=== 4. Harness API actually reachable from the host ==="
-CODE="$(curl -m 5 -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/health 2>/dev/null)" || true
+CODE="$(curl -m 5 -s -o /dev/null -w '%{http_code}' http://${HARNESS_BIND_IP}:${HARNESS_PORT}/health 2>/dev/null)" || true
 if [ "$CODE" = "200" ]; then
-  ok "harness /health responded 200 on 127.0.0.1:8090"
+  ok "harness /health responded 200 on ${HARNESS_BIND_IP}:${HARNESS_PORT}"
 else
-  bad "harness /health returned '$CODE' on 127.0.0.1:8090 (want 200)"
+  bad "harness /health returned '$CODE' on ${HARNESS_BIND_IP}:${HARNESS_PORT} (want 200)"
 fi
 
 echo

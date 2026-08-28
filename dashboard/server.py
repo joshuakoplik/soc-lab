@@ -10,18 +10,37 @@ This process opens soc.db with `mode=ro` in the connection URI -- it is
 physically incapable of writing to the lab's data, regardless of what a bug
 here might otherwise attempt.
 
-Run: python3 dashboard/server.py  (serves http://100.64.0.10:8095 by default --
-this host's own Tailscale interface, so other tailnet devices can reach it
-without any extra flags)
-Override with SOC_DASHBOARD_HOST / SOC_DASHBOARD_PORT / SOC_DASHBOARD_DB /
-SOC_DASHBOARD_POLL_INTERVAL env vars -- e.g. to keep it host-local instead:
-    SOC_DASHBOARD_HOST=127.0.0.1 python3 dashboard/server.py
+Run: python3 dashboard/server.py  (serves http://127.0.0.1:8095 by default --
+loopback only, deliberately: this lab runs intentionally-vulnerable services
+and nothing here should become reachable off-host by accident)
+Set SOC_DASHBOARD_HOST / SOC_DASHBOARD_PORT / SOC_DASHBOARD_DB /
+SOC_DASHBOARD_POLL_INTERVAL in the repo-root .env (or export them) to override
+-- e.g. to reach it from another machine on a private WireGuard/Tailscale-style
+interface, bind that one specific interface address, never 0.0.0.0:
+    SOC_DASHBOARD_HOST=<your-tailnet-ip>
 """
 import asyncio
+import importlib.util
 import json
 import os
 import sqlite3
 from pathlib import Path
+
+# Read SOC_DASHBOARD_* (and everything else) out of the repo-root .env, the
+# same way the agents do. This module doesn't import pipeline.providers --
+# the one place load_dotenv() normally gets called -- so it has to ask
+# directly, or a host/port set in .env would be silently ignored here.
+#
+# Loaded by explicit path rather than `sys.path.insert(...); import dotenv`:
+# the venv also has the unrelated PyPI `python-dotenv` installed under that
+# same top-level name, and shadowing it process-wide (uvicorn/fastapi may
+# import the real one) to save three lines is not a trade worth making.
+_dotenv_spec = importlib.util.spec_from_file_location(
+    "_soclab_dotenv", Path(__file__).resolve().parent.parent / "pipeline" / "dotenv.py"
+)
+_dotenv = importlib.util.module_from_spec(_dotenv_spec)
+_dotenv_spec.loader.exec_module(_dotenv)
+_dotenv.load_dotenv()
 
 from contextlib import asynccontextmanager
 
@@ -33,7 +52,7 @@ DB_PATH = Path(os.environ.get("SOC_DASHBOARD_DB", Path(__file__).resolve().paren
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 POLL_INTERVAL_S = float(os.environ.get("SOC_DASHBOARD_POLL_INTERVAL", "1.5"))
 PORT = int(os.environ.get("SOC_DASHBOARD_PORT", "8095"))
-HOST = os.environ.get("SOC_DASHBOARD_HOST", "100.64.0.10")
+HOST = os.environ.get("SOC_DASHBOARD_HOST", "127.0.0.1")
 
 # table -> (message type tag, how many rows to hand a freshly-connected client)
 TABLES = {

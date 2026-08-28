@@ -20,7 +20,7 @@ executor.py, reset.sh, lab-mode.sh, and injection_asr/ don't each carry
 their own copy of the same CIDR and drift out of sync with each other --
 which is exactly what happened before this file existed: "10.211.0.0/24"
 was independently hardcoded in compose.yaml, compose.hard.yml, reset.sh,
-and attacker/README, four places that all had to be remembered and kept
+and attacker/README.md, four places that all had to be remembered and kept
 in lockstep by hand.
 
 Docker itself is the actual source of truth at runtime -- this registry

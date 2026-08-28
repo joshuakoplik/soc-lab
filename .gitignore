@@ -34,3 +34,8 @@ results/backups/
 # re-running a campaign; CLAUDE.md already documents this as generated,
 # not source -- this entry was just missing.
 attacker/loot/
+
+# Machine-local Claude Code permission allowlist -- per-developer, contains
+# absolute paths from whichever machine it was written on. Not source.
+.claude/settings.local.json
+.claude/worktrees/

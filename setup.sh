@@ -2,6 +2,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Host bindings come from .env (see .env.example) so this script always
+# prints/probes the ports compose.yaml actually published. LAB_BIND_IP may be
+# 0.0.0.0 (bind-all), which is not a connectable address -- use loopback to
+# talk to it in that case.
+set -a; [ -f .env ] && . ./.env; set +a
+LAB_BIND_IP="${LAB_BIND_IP:-127.0.0.1}"
+LAB_NGINX_EASY_PORT="${LAB_NGINX_EASY_PORT:-8082}"
+LAB_COWRIE_SSH_PORT="${LAB_COWRIE_SSH_PORT:-2222}"
+case "$LAB_BIND_IP" in 0.0.0.0|::|"") LAB_HOST=127.0.0.1 ;; *) LAB_HOST="$LAB_BIND_IP" ;; esac
+
 echo "[*] Ensuring per-mode lab networks exist (soclab-easy/hard/wordpress)..."
 python3 pipeline/net_topology.py --bootstrap
 
@@ -31,7 +41,7 @@ echo "[*] Waiting for services to settle (Juice Shop takes ~20s to boot)..."
 sleep 25
 docker compose ps
 echo
-echo "    Juice Shop (via nginx):  http://localhost:8082"
-echo "    Cowrie SSH:              ssh -p 2222 root@localhost   (any password, after a few tries)"
+echo "    Juice Shop (via nginx):  http://${LAB_HOST}:${LAB_NGINX_EASY_PORT}"
+echo "    Cowrie SSH:              ssh -p ${LAB_COWRIE_SSH_PORT} root@${LAB_HOST}   (any password, after a few tries)"
 echo
 echo "[*] Now run ./verify.sh to confirm telemetry is actually landing on disk."

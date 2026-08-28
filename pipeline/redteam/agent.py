@@ -224,11 +224,23 @@ FLAG_RE = re.compile(r"FLAG\{[^}]+\}")
 # tool_* functions below for that distinction. Two different host ports now
 # (nginx-easy/nginx-hard can both be up at once, see compose.yaml) -- keyed
 # by mode rather than a single constant.
-JUICESHOP_HOST_PORTS = {"easy": 8082, "hard": 8081}
+# Read from .env (LAB_NGINX_EASY_PORT/LAB_NGINX_HARD_PORT), the same values
+# compose.yaml publishes with -- so changing a port there can't leave this
+# pointing at a port nothing is listening on.
+JUICESHOP_HOST_PORTS = {
+    "easy": int(os.environ.get("LAB_NGINX_EASY_PORT", "8082")),
+    "hard": int(os.environ.get("LAB_NGINX_HARD_PORT", "8081")),
+}
 
 
 def _juiceshop_host_url():
-    return f"http://localhost:{JUICESHOP_HOST_PORTS.get(lab_modes.current_mode(), 8082)}"
+    # LAB_BIND_IP may be 0.0.0.0 (bind-all), which is not a connectable
+    # address -- fall back to loopback for the client side in that case.
+    host = os.environ.get("LAB_BIND_IP", "127.0.0.1")
+    if host in ("", "0.0.0.0", "::"):
+        host = "127.0.0.1"
+    port = JUICESHOP_HOST_PORTS.get(lab_modes.current_mode(), JUICESHOP_HOST_PORTS["easy"])
+    return f"http://{host}:{port}"
 
 
 # ---------------------------------------------------------------------------

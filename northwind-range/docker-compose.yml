@@ -25,13 +25,15 @@ services:
       - nw_ops
     volumes:
       - ./telemetry:/app/telemetry
-    # Operator-requested, deliberate exception to SPEC.md §0.2 ("no host
-    # port publishing except the harness API"), documented there --
-    # bound to this host's own Tailscale interface IP specifically, never
-    # 0.0.0.0, same "narrow bind, not a wide-open hole" discipline the
-    # harness's own 127.0.0.1-only port already uses.
+    # Deliberate exception to SPEC.md §0.2 ("no host port publishing except
+    # the harness API"), documented there. Loopback by default; set
+    # NW_EDGE_BIND_IP in northwind-range/.env to reach the chat app from
+    # another machine over a private WireGuard/Tailscale-style interface.
+    # Bind that one specific interface address -- never 0.0.0.0, same
+    # "narrow bind, not a wide-open hole" discipline the harness's own
+    # 127.0.0.1-only port already uses.
     ports:
-      - "100.64.0.10:8888:80"
+      - "${NW_EDGE_BIND_IP:-127.0.0.1}:8888:80"
     depends_on:
       chat-web:
         condition: service_healthy
@@ -98,8 +100,8 @@ services:
     # a hostname -- nw_llm_egress has no reachable DNS resolver under that
     # same lockdown.
     environment:
-      OLLAMA_UPSTREAM_HOST: "100.64.0.20"
-      OLLAMA_UPSTREAM_PORT: "11434"
+      OLLAMA_UPSTREAM_HOST: "${NW_OLLAMA_UPSTREAM_HOST:?set NW_OLLAMA_UPSTREAM_HOST in northwind-range/.env -- the operator-controlled inference host this range forwards to}"
+      OLLAMA_UPSTREAM_PORT: "${NW_OLLAMA_UPSTREAM_PORT:-11434}"
 
   retrieval-svc:
     # Repo-root context so the Dockerfile can COPY policy/ in -- same
@@ -234,7 +236,7 @@ services:
     # published port plus direct postgres access (harness's own results
     # schema, and target resolution against app.* for scoring).
     ports:
-      - "127.0.0.1:8090:8000"
+      - "${NW_HARNESS_BIND_IP:-127.0.0.1}:${NW_HARNESS_PORT:-8090}:8000"
 
 networks:
   nw_dmz:

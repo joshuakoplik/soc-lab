@@ -30,13 +30,14 @@ A build violating any of these is a failed build.
    prove every other container reaches no external address, that `llm-backend` reaches
    nothing *but* its configured upstream, and must pass on a cold start.
 2. **No host port publishing** except the operator harness API, bound to `127.0.0.1`. Never
-   `0.0.0.0`. **Post-build-order exception, operator-requested:** `edge-nginx` also publishes
-   on this host's own Tailscale interface IP (`100.64.0.10:8888 -> 80`) so the chat app is
-   reachable from the operator's other tailnet devices, not just this host. Same discipline as
-   the harness's own carve-out — bound to one specific, narrow interface address, never
-   `0.0.0.0` — just a tailnet IP instead of loopback. This widens the app's reachability
-   beyond this host (any device the operator has authorized onto their tailnet can now reach
-   it), which is a real, deliberate loosening of this constraint for operator convenience, not
+   `0.0.0.0`. **Post-build-order exception:** `edge-nginx` also publishes the chat app on
+   `${NW_EDGE_BIND_IP:-127.0.0.1}:8888 -> 80`. It is loopback by default; an operator who
+   wants to reach the app from another of their own machines sets `NW_EDGE_BIND_IP` in
+   `northwind-range/.env` to one specific private-interface address (a WireGuard/Tailscale-style
+   IP), never `0.0.0.0` — the same discipline as the harness's own carve-out, just a private
+   interface instead of loopback. Setting it widens the app's reachability beyond this host
+   (any device on that private network can then reach it), which is a real, deliberate
+   loosening of this constraint for operator convenience, not
    something `verify-isolation.sh` was written to expect; that script still asserts harness is
    the *only* published port and will need updating if this exception is meant to be permanent
    rather than a working-session convenience.

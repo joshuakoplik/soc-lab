@@ -180,7 +180,7 @@ if [ "$DO_ATTACKER" = "1" ]; then
   # Neither the provisioned toolkit (nmap/hydra/sqlmap/msf/curl/python3/...,
   # see provision.sh) nor the egress lockdown below survive a recreate --
   # both live only in the container's own writable layer/netns, on purpose
-  # (see attacker/README's "Egress lockdown" section), which means a fresh
+  # (see attacker/README.md's "Egress lockdown" section), which means a fresh
   # container is BOTH unprovisioned AND unlocked until both of these run,
   # in this exact order (provision needs real egress; the lockdown then
   # removes it). Skipping this step was a real, silent bug here before:

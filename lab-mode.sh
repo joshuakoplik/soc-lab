@@ -28,7 +28,7 @@
 # modes: easy (cowrie + metasploitable + juiceshop-easy + nginx-easy, planted creds),
 #        hard (juiceshop-hard + nginx-hard, hardened + network-locked, no leaked creds),
 #        wordpress (real WordPress core pinned to CVE-2026-63030/CVE-2026-60137 -- see
-#                   wordpress/README, a single-target scenario, not a difficulty rung).
+#                   wordpress/README.md, a single-target scenario, not a difficulty rung).
 #
 # Writes lab_mode.json (gitignored), which pipeline/redteam/lab_modes.py reads so the
 # red-team agent's target/tool config always matches whichever mode is PRIMARY -- there's
