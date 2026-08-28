@@ -173,6 +173,10 @@ cowrie/ nginx/ juiceshop/ wordpress/ suricata/ wazuh/    per-service config
 results/             run write-ups (generated, not tracked)
 ```
 
+Every one of those directories has its own `README.md` covering what it is, why
+it is shaped that way, and the traps specific to it — start there rather than
+here when you are working inside one.
+
 Anything under `logs/`, `attacker/loot/`, `results/`, and `injection_asr/runs/` is
 **generated, not source** — see `.gitignore`. That includes the `.md` write-ups those
 runs produce: they are one machine's numbers for one model lineup on one day, and
