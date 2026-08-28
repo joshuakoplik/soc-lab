@@ -20,7 +20,8 @@ product.
 
 ```bash
 ./setup.sh && ./verify.sh              # bring up cowrie+juiceshop+nginx, confirm telemetry lands
-./lab-mode.sh {easy|hard|wordpress|status}   # switch scenario; writes lab_mode.json
+./lab-mode.sh {up|down|switch} {easy|hard|wordpress|northwind}   # writes lab_mode.json
+./lab-mode.sh status                   # primary mode + live docker state for all four
 ./reset.sh [--network|--db|--queue|--status] [--no-kill]   # reset baseline; default (no flags) does all three
 docker compose ps / logs -f <svc> / down [-v]
 ```
@@ -33,9 +34,16 @@ docker compose ps / logs -f <svc> / down [-v]
   `lab_modes.py` like the others, but it's the first **adapter-backed** mode: its
   containers live in a separate docker-compose project (`northwind-range/`, own
   `Makefile`, own networks, no `net_topology.py` subnet), so the red-team agent
-  reaches it through `redteam/northwind_adapter.py` instead of nmap/hydra, and
-  `lab-mode.sh` does not manage its lifecycle. See `northwind-range/SPEC.md` and
-  `REDTEAM_MODE_SPEC.md`.
+  reaches it through `redteam/northwind_adapter.py` instead of nmap/hydra.
+  `lab-mode.sh` still drives its lifecycle like any other mode, but by
+  delegating to `northwind-range/Makefile` rather than to this repo's
+  `compose.yaml` — one definition of how the range comes up, not two. `up
+  northwind` skips the `net_topology.py` bootstrap (it has no subnet there)
+  and pre-checks `northwind-range/.env` for `NW_OLLAMA_UPSTREAM_HOST`, since
+  without it the containers start and then fail deep inside a chat request.
+  A `down` leaves the postgres volume alone; `make -C northwind-range reset`
+  is what re-seeds corpus/entitlements/records. See `northwind-range/SPEC.md`
+  and `REDTEAM_MODE_SPEC.md`.
 
 `lab_mode.json` (gitignored) is the single source of truth for which mode is
 *actually* running; `pipeline/redteam/lab_modes.py` reads it so the red-team agent's
@@ -166,8 +174,7 @@ before touching gating logic — the short version:
   means — which
   targets exist, which gated tools are reachable, which MSF modules are
   allowlisted — but never decides which one is active; `lab-mode.sh` does that,
-  via `lab_mode.json` (except `northwind`, whose containers `lab-mode.sh` does
-  not manage — see the mode list above). The model is never told which mode it's in or that a
+  via `lab_mode.json`, for all four modes. The model is never told which mode it's in or that a
   target is "hardened" — only what's factually reachable, so difficulty
   measurements aren't contaminated by the agent being coached.
 - Sessions do not persist across separate `propose_action` calls (no `msfrpcd`

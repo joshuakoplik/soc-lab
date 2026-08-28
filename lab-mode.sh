@@ -19,16 +19,26 @@
 #                                      something else.
 #   ./lab-mode.sh switch <mode>    -- down every OTHER mode, then up <mode> -- today's old
 #                                      mutually-exclusive behavior, kept as a convenience.
-#   ./lab-mode.sh easy|hard|wordpress
+#   ./lab-mode.sh easy|hard|wordpress|northwind
 #                                   -- bare aliases for `switch <mode>`, for backward
 #                                      compatibility with existing muscle memory/docs.
 #   ./lab-mode.sh status           -- lab_mode.json's primary mode, plus live docker state
-#                                      for ALL three modes (not just the primary one).
+#                                      for ALL four modes (not just the primary one).
 #
 # modes: easy (cowrie + metasploitable + juiceshop-easy + nginx-easy, planted creds),
 #        hard (juiceshop-hard + nginx-hard, hardened + network-locked, no leaked creds),
 #        wordpress (real WordPress core pinned to CVE-2026-63030/CVE-2026-60137 -- see
-#                   wordpress/README.md, a single-target scenario, not a difficulty rung).
+#                   wordpress/README.md, a single-target scenario, not a difficulty rung),
+#        northwind (a vulnerable AI application rather than a vulnerable service -- see
+#                   northwind-range/SPEC.md and REDTEAM_MODE_SPEC.md).
+#
+# northwind is the odd one out mechanically, and this script hides that rather than
+# pretending it isn't true. The other three are profiles in this repo's own compose.yaml
+# on net_topology.py subnets; northwind is a SEPARATE docker-compose project under
+# northwind-range/ with its own Makefile, its own networks, and its own .env. So every
+# verb below delegates northwind to that Makefile instead of reimplementing it -- one
+# definition of how the range comes up, not two that can drift. `bootstrap` still means
+# only the three net_topology networks, because northwind's compose creates its own.
 #
 # Writes lab_mode.json (gitignored), which pipeline/redteam/lab_modes.py reads so the
 # red-team agent's target/tool config always matches whichever mode is PRIMARY -- there's
@@ -66,6 +76,28 @@ bootstrap() {
   "$PY" pipeline/net_topology.py --bootstrap
 }
 
+# Always reached via `make -C` or an explicit `-f`/--project-directory, never a bare
+# `docker compose` from this script's cwd: with a compose project nested inside another
+# one, a stale working directory aims the command at the wrong stack, and `down` is not
+# a mistake you want to make twice.
+NORTHWIND_DIR="northwind-range"
+
+# northwind's containers can start without this and then fail confusingly deep in a
+# chat request, so fail here instead, where the cause is still obvious.
+northwind_precheck() {
+  if [ ! -f "$NORTHWIND_DIR/.env" ]; then
+    echo "[!] $NORTHWIND_DIR/.env does not exist. Copy $NORTHWIND_DIR/.env.example to it" >&2
+    echo "    and set NW_OLLAMA_UPSTREAM_HOST -- the range is air-gapped apart from that" >&2
+    echo "    one allow-listed inference host, and it must be a raw IP (no DNS resolver)." >&2
+    exit 1
+  fi
+  if ! grep -qE '^[[:space:]]*NW_OLLAMA_UPSTREAM_HOST=[^[:space:]]' "$NORTHWIND_DIR/.env"; then
+    echo "[!] NW_OLLAMA_UPSTREAM_HOST is empty or unset in $NORTHWIND_DIR/.env. The range" >&2
+    echo "    has no inference backend to forward to, so chat would fail. Set it to a raw IP." >&2
+    exit 1
+  fi
+}
+
 mode_up() {
   case "$1" in
     easy)
@@ -77,8 +109,12 @@ mode_up() {
     wordpress)
       docker compose --profile wordpress up -d wordpress-db wordpress wordpress-init wordpress-netlock
       ;;
+    northwind)
+      northwind_precheck
+      make -C "$NORTHWIND_DIR" up
+      ;;
     *)
-      echo "usage: $0 up {easy|hard|wordpress}" >&2
+      echo "usage: $0 up {easy|hard|wordpress|northwind}" >&2
       exit 1
       ;;
   esac
@@ -95,8 +131,14 @@ mode_down() {
     wordpress)
       docker compose --profile wordpress rm -sf wordpress wordpress-init wordpress-netlock wordpress-db
       ;;
+    northwind)
+      # `make down` is `docker compose down` -- containers and networks go, the postgres
+      # volume stays. Same semantics as the rm -sf above: `down` is not a data reset.
+      # Use `make -C northwind-range reset` for that.
+      make -C "$NORTHWIND_DIR" down
+      ;;
     *)
-      echo "usage: $0 down {easy|hard|wordpress}" >&2
+      echo "usage: $0 down {easy|hard|wordpress|northwind}" >&2
       exit 1
       ;;
   esac
@@ -106,17 +148,24 @@ case "$VERB" in
   bootstrap)
     bootstrap
     echo "[*] all three per-mode networks exist (soclab-easy/hard/wordpress)"
+    echo "[*] northwind is not included -- its own compose project creates its own networks"
     ;;
   up)
-    [ -n "$MODE" ] || { echo "usage: $0 up {easy|hard|wordpress}" >&2; exit 1; }
-    bootstrap
+    [ -n "$MODE" ] || { echo "usage: $0 up {easy|hard|wordpress|northwind}" >&2; exit 1; }
+    # northwind sits on none of the net_topology subnets, so bootstrapping them for it
+    # would create three networks it will never touch.
+    [ "$MODE" = "northwind" ] || bootstrap
     echo "[*] bringing $MODE mode up (other modes, if running, are left alone)"
     mode_up "$MODE"
     write_state "$MODE"
     echo "[*] $MODE mode up; lab_mode.json primary mode set to $MODE"
+    if [ "$MODE" = "northwind" ]; then
+      echo "[*] if this range has never been seeded, its corpus/entitlements/records are"
+      echo "    empty until you run: make -C $NORTHWIND_DIR reset"
+    fi
     ;;
   down)
-    [ -n "$MODE" ] || { echo "usage: $0 down {easy|hard|wordpress}" >&2; exit 1; }
+    [ -n "$MODE" ] || { echo "usage: $0 down {easy|hard|wordpress|northwind}" >&2; exit 1; }
     echo "[*] tearing $MODE mode down (other modes, if running, are left alone)"
     mode_down "$MODE"
     if [ "$(current_mode)" = "$MODE" ]; then
@@ -127,10 +176,10 @@ case "$VERB" in
     echo "[*] $MODE mode down"
     ;;
   switch)
-    [ -n "$MODE" ] || { echo "usage: $0 switch {easy|hard|wordpress}" >&2; exit 1; }
-    bootstrap
+    [ -n "$MODE" ] || { echo "usage: $0 switch {easy|hard|wordpress|northwind}" >&2; exit 1; }
+    [ "$MODE" = "northwind" ] || bootstrap
     echo "[*] switching to $MODE mode (tearing down every other mode first)"
-    for other in easy hard wordpress; do
+    for other in easy hard wordpress northwind; do
       [ "$other" = "$MODE" ] && continue
       mode_down "$other" 2>/dev/null || true
     done
@@ -138,7 +187,7 @@ case "$VERB" in
     write_state "$MODE"
     echo "[*] $MODE mode active (exclusively)"
     ;;
-  easy|hard|wordpress)
+  easy|hard|wordpress|northwind)
     # Bare mode name: back-compat alias for `switch <mode>`.
     exec "$0" switch "$VERB"
     ;;
@@ -146,9 +195,16 @@ case "$VERB" in
     echo "primary mode: $(current_mode)"
     echo
     docker compose --profile easy --profile hard --profile wordpress ps --format "table {{.Name}}\t{{.Status}}"
+    echo
+    echo "-- northwind (separate compose project: $NORTHWIND_DIR/) --"
+    # -f plus --project-directory rather than a cd, so this reads the nested project
+    # explicitly and can never be aimed at the outer stack by an inherited cwd.
+    docker compose -f "$NORTHWIND_DIR/docker-compose.yml" --project-directory "$NORTHWIND_DIR" \
+      ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null \
+      || echo "(northwind range not up, or $NORTHWIND_DIR/.env missing)"
     ;;
   *)
-    echo "usage: $0 {bootstrap|up|down|switch|status|easy|hard|wordpress} [mode]" >&2
+    echo "usage: $0 {bootstrap|up|down|switch|status|easy|hard|wordpress|northwind} [mode]" >&2
     exit 1
     ;;
 esac

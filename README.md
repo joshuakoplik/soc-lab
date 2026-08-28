@@ -112,10 +112,12 @@ Modes run on separate subnets and can coexist:
 ./lab-mode.sh status          # live state of every mode at once
 ```
 
-`lab-mode.sh` manages the first three. `northwind` is a mode as far as the agents are
-concerned — it is a full entry in `pipeline/redteam/lab_modes.py` with its own targets and
-tool list — but its containers are brought up through its own `Makefile` (below) rather
-than by `lab-mode.sh`.
+`lab-mode.sh` drives all four. `northwind` is the structural odd one out — its containers
+are a separate compose project rather than profiles in this repo's `compose.yaml` — so the
+script delegates it to `northwind-range/Makefile` instead of reimplementing it. That is
+invisible from the command line, with two caveats worth knowing: `up northwind` requires
+`northwind-range/.env` to set `NW_OLLAMA_UPSTREAM_HOST` (it fails fast and says so if not),
+and a freshly-built range holds no corpus until you run `make -C northwind-range reset`.
 
 **The model is never told which mode it's in**, or that a target is "hardened" — only what
 is factually reachable. Difficulty measurements would be worthless if the agent were being
