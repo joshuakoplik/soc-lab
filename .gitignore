@@ -34,6 +34,12 @@ results/
 # not source -- this entry was just missing.
 attacker/loot/
 
+# Host-local background-job state -- advisory lock files + supervisor logs
+# written per job by pipeline/redteam/jobs.py. Deliberately NOT under the loot
+# bind mount (the lock must be a plain host file for portable flock semantics);
+# regenerated per run, cleared by ./reset.sh.
+.jobs/
+
 # Machine-local Claude Code permission allowlist -- per-developer, contains
 # absolute paths from whichever machine it was written on. Not source.
 .claude/settings.local.json

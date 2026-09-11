@@ -343,6 +343,71 @@ CREATE TABLE IF NOT EXISTS staged_artifacts (
     status         TEXT    NOT NULL   -- ok | rejected_domain | too_large | fetch_failed
 );
 
+-- Background jobs: detached subprocesses (hash cracking today) whose
+-- lifecycle OUTLIVES the agent turn that launched them -- the agent submits
+-- one, moves on, and learns the settled result on a later turn, the way a
+-- person leaves a crack running in another window. Deliberately generic over
+-- job_type (only 'crack' is implemented, see jobs.py's JOB_TYPES) so the
+-- technique-ledger work and future job types slot in without reshaping this.
+--
+-- INPUT PROVENANCE: a job's material comes from a stored `loot` row
+-- (source_loot_id), never from model-supplied text -- a model that
+-- transcribes a hash out of a fetched writeup has nowhere to put it, so a
+-- "recovered" credential can't originate from anywhere but a real captured
+-- artifact. selector_json records HOW the material was picked from that
+-- file; a selection that matches nothing fails visibly at submit time and no
+-- row is ever written here.
+--
+-- LIVENESS is an advisory flock the supervisor holds on lock_path (a
+-- HOST-LOCAL file, never the bind mount -- see jobs.py on macOS) for its
+-- whole life; the kernel frees it on death for any reason, and testing it
+-- needs no PID (so a reused PID can never make a dead job look alive). The
+-- in-container process is reached for an orphan kill via container_pidfile
+-- (the pidfile executor._run_monitored's wrapper writes), consulted ONLY to
+-- kill a job the lock says is still alive -- never to decide liveness.
+CREATE TABLE IF NOT EXISTS jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES redteam_sessions(id),
+    job_type      TEXT    NOT NULL,            -- 'crack' | 'promoted'
+    status        TEXT    NOT NULL DEFAULT 'running',  -- running | completed | killed
+    dedup_key     TEXT,                        -- see jobs._dedup_key; NULL for promoted jobs
+    source_loot_id            INTEGER REFERENCES loot(id),       -- input provenance (NULL for promoted)
+    promoted_from_pending_action_id INTEGER REFERENCES pending_actions(id),  -- set only for promoted jobs
+    selector_json TEXT,                        -- how material was picked from the loot file
+    lock_path         TEXT NOT NULL,           -- host-local advisory-lock file (liveness)
+    stream_path       TEXT,                    -- host path the job's output streams to (under loot mount)
+    container_pidfile TEXT,                    -- in-container pidfile, for an orphan kill via _kill_remote
+    surfaced      INTEGER NOT NULL DEFAULT 0,  -- 1 once a terminal result has been pushed to the model
+    compute_s     REAL,                        -- job wall-clock; SEPARATE from session/agent time on purpose
+    launched_at   TEXT,                        -- when the subprocess actually started (supervisor-set)
+    finished_at   TEXT,
+    created       TEXT    NOT NULL
+);
+
+-- The system of record for a finished job: written by the HARNESS
+-- (jobs.py's supervisor / reaper) parsing the job's own output files, never
+-- summarized by the model. Any win claiming a credential recovered from a
+-- job must point at a row here -- audit_session() treats a 'cracked' row as
+-- the hard evidence, and flags a record_win that claims more than one here
+-- supports (the same overclaim check wins/captured_flags already get).
+--
+-- produced_new_information is DISTINCT from "completed": a crack that
+-- exhausts its wordlist and recovers nothing is a completed job that
+-- produced a real answer (this wordlist does not crack these hashes), and
+-- the technique-ledger work depends on that distinction existing here. The
+-- crack parser (jobs.CrackJobType.parse_output) sets it from john's actual
+-- output -- not its exit code, which does not tell you the outcome.
+CREATE TABLE IF NOT EXISTS job_results (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id        INTEGER NOT NULL REFERENCES jobs(id),
+    outcome       TEXT    NOT NULL,            -- crack: cracked | exhausted | interrupted; promoted: completed | interrupted
+    produced_new_information INTEGER NOT NULL DEFAULT 0,
+    terminal_verdict TEXT,                     -- the settled, human-readable sentence the model reads
+    detail_json   TEXT,                        -- job-type payload (crack: recovered {hash:plaintext}, counts, wordlist)
+    result_path   TEXT,                        -- the output/potfile the result was parsed from
+    created       TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_recon_session   ON recon_findings(session_id);
 CREATE INDEX IF NOT EXISTS idx_vuln_session    ON vuln_findings(session_id);
 CREATE INDEX IF NOT EXISTS idx_pending_session ON pending_actions(session_id);
@@ -358,3 +423,7 @@ CREATE INDEX IF NOT EXISTS idx_state_credentials_session  ON state_credentials(s
 CREATE INDEX IF NOT EXISTS idx_state_footholds_session    ON state_footholds(session_id);
 CREATE INDEX IF NOT EXISTS idx_branches_session           ON branches(session_id);
 CREATE INDEX IF NOT EXISTS idx_staged_artifacts_session    ON staged_artifacts(session_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_session                ON jobs(session_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_status                 ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_dedup                  ON jobs(dedup_key);
+CREATE INDEX IF NOT EXISTS idx_job_results_job             ON job_results(job_id);

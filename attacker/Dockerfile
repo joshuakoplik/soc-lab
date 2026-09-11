@@ -24,11 +24,21 @@
 # no longer a concern for the toolkit itself (it's part of the image now),
 # only for msfdb/postgres state, which provision.sh still (cheaply,
 # idempotently) reinitializes every boot -- see that script.
+# john + a PLAINTEXT rockyou are here because the red-team agent's background
+# hash-cracking jobs (pipeline/redteam/jobs.py) run `john --wordlist=...` inside
+# this container -- advertised in the agent's prompt all along, but the binary
+# was never actually installed until this. `wordlists` ships rockyou GZIPPED at
+# /usr/share/wordlists/rockyou.txt.gz; jobs.py defaults to the decompressed
+# path, so gunzip it once at build time (the container is air-gapped at runtime,
+# so this can't be a lazy first-run step). A rebuild (./reset.sh --attacker) is
+# required to pick john up.
 FROM kalilinux/kali-rolling:latest
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       iproute2 iptables \
-      nmap hydra sqlmap metasploit-framework lsof \
+      nmap hydra sqlmap metasploit-framework lsof john wordlists \
       curl jq hping3 netcat-traditional seclists sshpass ca-certificates \
       python3 python3-pip bc && \
+    ( [ -f /usr/share/wordlists/rockyou.txt ] || \
+      gunzip -kf /usr/share/wordlists/rockyou.txt.gz 2>/dev/null || true ) && \
     rm -rf /var/lib/apt/lists/*
