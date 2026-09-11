@@ -519,7 +519,19 @@ h1 .muted { color: var(--muted); font-weight: 400; }
    Still a single shared time axis, newest first. Tap a row for details.
    ============================================================ */
 
-.timeline-wrap { background: var(--surface-1); }
+/* .tab-panel.active forces display:flex, which defaults to row -- so the
+   toolbar and the timeline would sit SIDE BY SIDE, squeezing the stream into
+   a narrow right strip (observed live on a phone). Stack them vertically and
+   pin full width; min-width:0 lets the nowrap row labels ellipsize instead of
+   forcing horizontal page overflow. */
+.timeline-wrap {
+  background: var(--surface-1);
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+}
+.timeline { min-width: 0; }
 
 .tl-toolbar {
   position: sticky; top: 0; z-index: 5;
