@@ -47,12 +47,13 @@
   </section>
 
   <section class="timeline-wrap tab-panel active" data-tab="defense">
-    <div class="tl-colhead">
-      <div class="tl-col tl-col-def"><span class="tl-side-dot side-def"></span>Defender</div>
-      <div class="tl-mid">
-        <button id="legend-toggle" class="legend-toggle" aria-label="Toggle icon legend">?</button>
+    <div class="tl-toolbar">
+      <div class="seg" role="tablist" aria-label="Filter timeline by side">
+        <button class="seg-btn active" data-filter="all">All</button>
+        <button class="seg-btn" data-filter="def"><span class="tl-side-dot side-def"></span>Defender</button>
+        <button class="seg-btn" data-filter="atk"><span class="tl-side-dot side-atk"></span>Attacker</button>
       </div>
-      <div class="tl-col tl-col-atk">Attacker<span class="tl-side-dot side-atk"></span></div>
+      <button id="legend-toggle" class="legend-toggle" aria-label="Toggle icon legend">?</button>
     </div>
     <div id="legend" class="legend hidden">
       <div class="legend-group">

@@ -510,131 +510,101 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 }
 
 /* ============================================================
-   Time-synchronized Defender | Attacker timeline (mobile-first)
-   Replaces the old two-panel split. A single stream of activity
-   sorted newest-first by real UTC timestamp; each entry is an icon
-   chip on its own side (defender left, attacker right), the other
-   side left as whitespace so both columns line up on one time axis.
-   Tap any chip for the full record (same detail modal as before).
+   Defender + Attacker: one full-width, time-ordered stream.
+   (V2 -- the earlier fixed two-column split wasted half the screen
+   whenever the defender side was sparse and squeezed labels down to
+   nothing on a phone.) Every activity is a full-width row so its label
+   is readable; side is shown by a left accent bar + coloured icon + a
+   small DEF/ATK tag, and the segmented filter collapses to one side.
+   Still a single shared time axis, newest first. Tap a row for details.
    ============================================================ */
 
 .timeline-wrap { background: var(--surface-1); }
 
-/* 3-column grid shared by the header and every row, so chips and the
-   center time rail line up exactly down the page. */
-.tl-colhead,
-.tl-row {
-  display: grid;
-  grid-template-columns: 1fr 58px 1fr;
-  align-items: center;
-}
-
-.tl-colhead {
-  position: sticky;
-  top: 0;
-  z-index: 5;
+.tl-toolbar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px;
   background: var(--surface-2);
   border-bottom: 1px solid var(--gridline);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
 }
-.tl-col { padding: 8px 12px; display: flex; align-items: center; gap: 7px; }
-.tl-col-def { color: var(--side-def); justify-content: flex-end; }
-.tl-col-atk { color: var(--side-atk); justify-content: flex-start; }
-.tl-mid { display: flex; justify-content: center; }
+.seg { display: inline-flex; background: var(--surface-3); border-radius: 8px; padding: 2px; }
+.seg-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: none; background: transparent; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 600;
+  color: var(--muted); padding: 5px 11px; border-radius: 6px;
+}
+.seg-btn.active { background: var(--surface-1); color: var(--text-primary); box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
 .tl-side-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .side-def { background: var(--side-def); }
 .side-atk { background: var(--side-atk); }
 
 .legend-toggle {
-  width: 20px; height: 20px; border-radius: 50%;
+  width: 24px; height: 24px; border-radius: 50%; flex: none;
   border: 1px solid var(--border); background: var(--surface-3);
-  color: var(--muted); font-size: 12px; font-weight: 700;
-  cursor: pointer; line-height: 1; padding: 0;
+  color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; line-height: 1; padding: 0;
 }
 .legend {
-  display: flex; flex-wrap: wrap; gap: 14px;
-  padding: 10px 12px;
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--gridline);
-  font-size: 12px;
+  display: flex; flex-wrap: wrap; gap: 12px;
+  padding: 10px 12px; background: var(--surface-2);
+  border-bottom: 1px solid var(--gridline); font-size: 12px;
 }
 .legend-group { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .legend-title { font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; font-size: 11px; }
-.legend-title.side-def { color: var(--side-def); background: none; }
-.legend-title.side-atk { color: var(--side-atk); background: none; }
+.legend-title.side-def { color: var(--side-def); }
+.legend-title.side-atk { color: var(--side-atk); }
 .legend-item { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); }
 .legend-item .ic { font-size: 14px; }
 
 .timeline { display: flex; flex-direction: column; }
 
+/* Full-width row: [accent] [icon] [tag] [label ....] [time] */
 .tl-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 12px 9px 10px;
   border-bottom: 1px solid var(--gridline);
-  min-height: 40px;
-}
-.tl-row:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
-
-.tl-cell { padding: 5px 10px; min-width: 0; display: flex; }
-.tl-cell.def { justify-content: flex-end; }
-.tl-cell.atk { justify-content: flex-start; }
-
-.tl-time {
-  text-align: center;
-  font-size: 10px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-  padding: 0 2px;
-}
-
-/* The chip: icon + one-line label, colored by side, bordered by severity. */
-.tl-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  max-width: 100%;
-  padding: 5px 10px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  border-left: 3px solid var(--row-accent, transparent);
   cursor: pointer;
   min-width: 0;
 }
-.tl-chip:active { transform: scale(0.98); }
-.tl-cell.def .tl-chip { flex-direction: row-reverse; border-right: 3px solid var(--side-def); }
-.tl-cell.atk .tl-chip { border-left: 3px solid var(--side-atk); }
-.tl-chip .ic { font-size: 15px; line-height: 1; flex: none; }
-.tl-chip .lbl {
-  font-size: 12.5px;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
+.tl-row:active { background: color-mix(in srgb, var(--surface-2) 70%, transparent); }
+.tl-row.def { --row-accent: var(--side-def); }
+.tl-row.atk { --row-accent: var(--side-atk); }
+
+.tl-ic { font-size: 17px; line-height: 1; flex: none; width: 22px; text-align: center; }
+.tl-tag {
+  flex: none; font-size: 9.5px; font-weight: 800; letter-spacing: 0.4px;
+  padding: 2px 5px; border-radius: 4px; text-transform: uppercase;
 }
-.tl-cell.def .tl-chip .lbl { text-align: right; }
+.tl-row.def .tl-tag { color: var(--side-def); background: color-mix(in srgb, var(--side-def) 18%, transparent); }
+.tl-row.atk .tl-tag { color: var(--side-atk); background: color-mix(in srgb, var(--side-atk) 18%, transparent); }
+.tl-label {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 13px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-time {
+  flex: none; font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
 
-/* Severity overrides the side accent on the chip's inner edge so a
-   malicious verdict / real block / critical vuln pops on either column. */
-.tl-chip.st-critical { border-color: var(--status-critical); background: color-mix(in srgb, var(--status-critical) 16%, var(--surface-2)); }
-.tl-chip.st-serious  { border-color: var(--status-serious); }
-.tl-chip.st-warning  { border-color: var(--status-warning); }
-.tl-chip.st-good     { border-color: color-mix(in srgb, var(--status-good) 55%, var(--border)); }
-.tl-chip.st-muted    { opacity: 0.72; }
-.tl-cell.def .tl-chip.st-critical { border-right-color: var(--status-critical); }
-.tl-cell.atk .tl-chip.st-critical { border-left-color: var(--status-critical); }
+/* Severity: a critical row (malicious verdict, real block, crit vuln,
+   captured flag) overrides the side accent with red + a faint wash. */
+.tl-row.st-critical { --row-accent: var(--status-critical); background: color-mix(in srgb, var(--status-critical) 8%, transparent); }
+.tl-row.st-serious  { --row-accent: var(--status-serious); }
+.tl-row.st-warning  { --row-accent: var(--status-warning); }
+.tl-row.st-good     .tl-ic { filter: none; }
+.tl-row.st-muted    { opacity: 0.68; }
 
-.timeline .empty { padding: 24px 12px; color: var(--muted); font-style: italic; }
+/* Segmented filter: collapse to one side by hiding the other's rows. */
+.timeline[data-filter="def"] .tl-row.atk { display: none; }
+.timeline[data-filter="atk"] .tl-row.def { display: none; }
 
-/* Phone width: tighter rail + fonts, chips can use the full half-column. */
+.timeline .empty { padding: 26px 14px; color: var(--muted); font-style: italic; }
+
 @media (max-width: 560px) {
-  .tl-colhead, .tl-row { grid-template-columns: 1fr 42px 1fr; }
-  .tl-col { padding: 7px 8px; font-size: 11px; }
-  .tl-cell { padding: 4px 6px; }
-  .tl-chip { padding: 4px 8px; gap: 5px; }
-  .tl-chip .lbl { font-size: 12px; }
-  .tl-time { font-size: 9px; }
-  .legend { gap: 10px; }
+  .seg-btn { padding: 5px 9px; font-size: 11.5px; }
+  .tl-row { gap: 7px; padding: 9px 10px 9px 9px; }
+  .tl-label { font-size: 12.5px; }
 }

@@ -120,16 +120,15 @@ function addTimelineEntry(side, ts, icon, statusClass, label, detailKey) {
   if (placeholder) placeholder.remove();
 
   const row = document.createElement("div");
-  row.className = "tl-row";
+  row.className = `tl-row ${side}${statusClass ? " " + statusClass : ""}`;
   const epoch = ts != null ? toEpoch(ts) : Date.now();
   row.dataset.epoch = epoch;
-
-  const chip =
-    `<span class="tl-chip ${statusClass || ""}"${detailKey ? ` data-detail-key="${escapeHtml(detailKey)}"` : ""}>` +
-    `<span class="ic">${icon}</span><span class="lbl">${escapeHtml(label)}</span></span>`;
-  const defCell = `<div class="tl-cell def">${side === "def" ? chip : ""}</div>`;
-  const atkCell = `<div class="tl-cell atk">${side === "atk" ? chip : ""}</div>`;
-  row.innerHTML = defCell + `<div class="tl-time">${fmtClock(ts)}</div>` + atkCell;
+  if (detailKey) row.dataset.detailKey = detailKey;
+  row.innerHTML =
+    `<span class="tl-ic">${icon}</span>` +
+    `<span class="tl-tag">${side === "def" ? "DEF" : "ATK"}</span>` +
+    `<span class="tl-label">${escapeHtml(label)}</span>` +
+    `<span class="tl-time">${fmtClock(ts)}</span>`;
 
   // Insert by real timestamp, newest first -- defender/attacker streams and
   // bootstrap replays arrive out of order, so arrival order isn't time order.
@@ -575,16 +574,28 @@ detailModal.addEventListener("click", (e) => { if (e.target === detailModal) clo
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetailModal(); });
 
 document.body.addEventListener("click", (e) => {
-  // Telemetry feed lines and timeline chips both drill into the same modal.
-  const target = e.target.closest(".line.clickable, .tl-chip[data-detail-key]");
+  // Telemetry feed lines and timeline rows both drill into the same modal.
+  const target = e.target.closest(".line.clickable, .tl-row[data-detail-key]");
   if (!target) return;
   openDetailModal(target.dataset.detailKey);
 });
 
-// ---------- legend toggle ----------
+// ---------- legend + side filter ----------
 
 document.getElementById("legend-toggle").addEventListener("click", () => {
   document.getElementById("legend").classList.toggle("hidden");
+});
+
+// Segmented All / Defender / Attacker filter -- collapses the stream to one
+// side (CSS hides the other's rows via timeline[data-filter]). "all" clears
+// the attribute so both show.
+document.querySelectorAll(".seg-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    const f = btn.dataset.filter;
+    if (f === "all") timelineEl.removeAttribute("data-filter");
+    else timelineEl.setAttribute("data-filter", f);
+  });
 });
 
 // ---------- tabs ----------
