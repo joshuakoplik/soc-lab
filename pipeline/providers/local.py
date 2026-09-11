@@ -333,6 +333,10 @@ class LocalProvider:
             body["format"] = VERDICT_SCHEMA
         body = json.dumps(body).encode("utf-8")
 
+        # Fresh connection per call by design (no pooled session): requests can
+        # be minutes apart while a tool runs, long enough that a pooled idle
+        # socket gets closed by an intermediary and the next POST fails on a
+        # dead socket. One handshake per call is negligible.
         req = urllib.request.Request(
             f"{self.base_url}/api/chat",
             data=body,

@@ -108,6 +108,7 @@ DO_QUEUE=0
 DO_ATTACKER=0
 DO_TARGET=0
 DO_NORTHWIND_CONTROLS=0
+DO_JOBS=0
 DO_STATUS=0
 KILL_FIRST=1
 ANY_FLAG=0
@@ -120,11 +121,12 @@ for arg in "$@"; do
     --attacker) DO_ATTACKER=1; ANY_FLAG=1 ;;
     --target)   DO_TARGET=1;   ANY_FLAG=1 ;;
     --northwind-controls) DO_NORTHWIND_CONTROLS=1; ANY_FLAG=1 ;;
-    --all)      DO_NETWORK=1; DO_DB=1; DO_QUEUE=1; DO_ATTACKER=1; DO_TARGET=1; DO_NORTHWIND_CONTROLS=1; ANY_FLAG=1 ;;
+    --jobs)     DO_JOBS=1;     ANY_FLAG=1 ;;
+    --all)      DO_NETWORK=1; DO_DB=1; DO_QUEUE=1; DO_ATTACKER=1; DO_TARGET=1; DO_NORTHWIND_CONTROLS=1; DO_JOBS=1; ANY_FLAG=1 ;;
     --status)   DO_STATUS=1 ;;
     --no-kill)  KILL_FIRST=0 ;;
     *)
-      echo "usage: $0 [--all] [--network] [--db] [--queue] [--attacker] [--target] [--northwind-controls] [--status] [--no-kill]" >&2
+      echo "usage: $0 [--all] [--network] [--db] [--queue] [--attacker] [--target] [--northwind-controls] [--jobs] [--status] [--no-kill]" >&2
       exit 1
       ;;
   esac
@@ -156,13 +158,28 @@ if [ "$ANY_FLAG" = "0" ]; then
   DO_ATTACKER=1
   DO_TARGET=1
   DO_NORTHWIND_CONTROLS=1
+  DO_JOBS=1
 fi
 
-if [ "$KILL_FIRST" = "1" ] && { [ "$DO_DB" = "1" ] || [ "$DO_QUEUE" = "1" ] || [ "$DO_ATTACKER" = "1" ] || [ "$DO_TARGET" = "1" ]; }; then
+if [ "$KILL_FIRST" = "1" ] && { [ "$DO_DB" = "1" ] || [ "$DO_QUEUE" = "1" ] || [ "$DO_ATTACKER" = "1" ] || [ "$DO_TARGET" = "1" ] || [ "$DO_JOBS" = "1" ]; }; then
   echo "[reset] stopping any running pipeline processes first..."
-  for pattern in "pipeline/ingest.py" "pipeline/detect/rules.py" "pipeline/triage/agent.py" "pipeline/redteam/agent.py"; do
+  # jobs.py is the detached background-job supervisor -- killing it frees its
+  # advisory lock, so the reaper step below correctly sees its job as dead.
+  for pattern in "pipeline/ingest.py" "pipeline/detect/rules.py" "pipeline/triage/agent.py" "pipeline/redteam/agent.py" "pipeline/redteam/jobs.py"; do
     pkill -f "$pattern" 2>/dev/null && echo "    killed: $pattern" || true
   done
+fi
+
+# Background jobs: reap BEFORE any db wipe (the reaper reads job rows to find
+# the in-container processes it must kill) -- kills supervisors' orphaned
+# in-container john processes, reconciles their rows, then clears the
+# host-local lock/log dir. A session that died hours ago must not leave a
+# wordlist run competing with Ollama for the box.
+if [ "$DO_JOBS" = "1" ]; then
+  echo "[reset] reaping background jobs (killing orphaned in-container processes)..."
+  "$PY" pipeline/redteam/jobs.py reap --kill-orphans 2>/dev/null || \
+    echo "    (no reaper run -- db not present yet, nothing to reap)"
+  rm -rf .jobs 2>/dev/null || true
 fi
 
 if [ "$DO_ATTACKER" = "1" ]; then

@@ -39,6 +39,7 @@ running a single mode at a time behaves exactly as before.
 import ipaddress
 import os
 import random
+import shlex
 import subprocess
 import sys
 import time
@@ -64,6 +65,63 @@ ALLOWED_NETWORKS = [net.subnet for net in net_topology.LAB_NETWORKS]
 
 DEFAULT_TIMEOUT_S = 120
 DEFAULT_MAX_OUTPUT_CHARS = 16000
+
+# /loot inside soc-attacker IS ROOT/attacker/loot on the host (compose.yaml).
+# The monitored run() path streams a tool's output to a host file under here
+# and, to actually STOP the remote process on an idle kill, reads back a
+# pidfile the in-container wrapper writes under the same mount -- so it needs
+# to translate a host loot path into its container view. Same two-views-of-one
+# directory that agent.py's _loot_paths() deals in; duplicated (not imported)
+# because executor.py is deliberately import-light and agent.py imports IT,
+# not the other way round.
+ROOT = os.path.dirname(PIPELINE)
+LOOT_HOST_DIR = os.path.join(ROOT, "attacker", "loot")
+LOOT_CONTAINER_DIR = "/loot"
+
+
+def _to_container_path(host_path):
+    """Host loot path -> its view inside soc-attacker. Returns None if the
+    path isn't under the loot mount (so the caller falls back to a non-pidfile
+    kill rather than pointing the container at a path it can't see)."""
+    ap = os.path.abspath(host_path)
+    if ap.startswith(LOOT_HOST_DIR + os.sep):
+        return LOOT_CONTAINER_DIR + "/" + os.path.relpath(ap, LOOT_HOST_DIR).replace(os.sep, "/")
+    return None
+
+
+# Non-progress ("idle") detection policy for long-running tool calls. Time is
+# NOT a scarce resource in this lab -- a thorough scan is worth waiting for --
+# so the monitored run() path (see run(stream_path=...)) never kills a call
+# for elapsed wall-clock alone; it kills only a call that has produced no new
+# output for idle_timeout_s (a wedge that will never return), and the
+# in-container `timeout` is a generous BACKSTOP for the one case idle can't
+# catch: a retry loop that logs steadily forever (progresses by this metric).
+#   - idle_timeout_s: no output growth this long -> non-progress -> kill.
+#     Well above a "one line every 30s" cadence so honest slow-drip tools
+#     aren't killed; generous enough to absorb output-buffering jitter.
+#   - max_wall_s: absolute backstop, a backstop not a budget -- the one knob
+#     to raise if a legitimately thorough scan ever approaches it.
+#   - poll_interval_s: how often the host monitor samples output size.
+# CPU consumption is deliberately NOT a liveness signal: an infinite loop
+# burns CPU while producing nothing, so treating CPU as progress would let
+# exactly the wedge we care about walk straight through.
+#
+# VERSIONED: cross-session comparison is meaningless if a threshold silently
+# changed between runs, so every red-team session records the version it ran
+# under (redteam_sessions.hang_policy_version). Bump HANG_POLICY_VERSION on
+# ANY change to the values below.
+HANG_POLICY_VERSION = 1
+HANG_POLICY = {
+    "idle_timeout_s": int(os.environ.get("REDTEAM_IDLE_TIMEOUT_S", "120")),
+    "max_wall_s": int(os.environ.get("REDTEAM_MAX_WALL_S", "1800")),
+    "poll_interval_s": int(os.environ.get("REDTEAM_POLL_INTERVAL_S", "5")),
+}
+
+
+def hang_policy_snapshot():
+    """The resolved policy a session is about to run under, for recording on
+    the session row (see agent.start_session)."""
+    return {"version": HANG_POLICY_VERSION, **HANG_POLICY}
 
 
 class ScopeError(Exception):
@@ -136,6 +194,11 @@ class ExecResult:
     stderr: str
     truncated: bool
     elapsed_s: float
+    # Why a monitored call stopped: 'idle' (no output for idle_timeout_s),
+    # 'wall' (hit the absolute backstop), or None (ran to completion, or the
+    # simple unmonitored path). Purely observability -- callers still key off
+    # timed_out/exit_code the same as before.
+    kill_reason: "str | None" = None
 
 
 def _cap(text, max_chars):
@@ -144,49 +207,200 @@ def _cap(text, max_chars):
     return text[:max_chars] + f"\n...[truncated, {len(text) - max_chars} more chars]", True
 
 
-def run(argv, timeout_s=DEFAULT_TIMEOUT_S, max_output_chars=DEFAULT_MAX_OUTPUT_CHARS):
+def run(argv, timeout_s=DEFAULT_TIMEOUT_S, max_output_chars=DEFAULT_MAX_OUTPUT_CHARS,
+        stream_path=None, own_output_path=None,
+        idle_timeout_s=None, max_wall_s=None):
     """Run argv inside soc-attacker. Never raises for a nonzero exit or a
     timeout -- always returns an ExecResult, same "never raises, let the
     caller decide is_error" contract as agent.py's dispatch_tool(). Only
     raises for things that are the CALLER's bug: an out-of-scope target
     should be caught by validate_target() before this is ever called.
 
-    `timeout` wraps the command INSIDE the container (not just the local
-    subprocess) -- killing the local `docker exec` client process does not
-    reliably stop the remote process otherwise. Confirmed present in the
-    provisioned Kali image: `docker exec soc-attacker which timeout`.
+    Two execution modes:
+
+    - SIMPLE (stream_path is None): the historical path, unchanged. Used by
+      every short internal helper here (getent / ip addr / awk, timeout_s<=10)
+      and anything that doesn't need progress monitoring. `timeout` wraps the
+      command INSIDE the container (not just the local subprocess) -- killing
+      the local `docker exec` client process does not reliably stop the remote
+      process otherwise. Confirmed present in the provisioned Kali image:
+      `docker exec soc-attacker which timeout`.
+
+    - MONITORED (stream_path set, a HOST path under the loot mount): for the
+      long-running attack tools (nmap/hydra/sqlmap/msf/ssh/shell). Output is
+      STREAMED to stream_path as bytes arrive rather than buffered in memory
+      and returned at the end -- so a killed call still leaves everything it
+      wrote in loot instead of nothing. The call is killed only for
+      NON-PROGRESS (no output growth for idle_timeout_s), never for elapsed
+      wall-clock alone; max_wall_s is an in-container backstop for the one
+      wedge idle can't see (a retry loop that logs steadily forever). stdin is
+      closed (DEVNULL) so nothing can block waiting on a prompt. See
+      HANG_POLICY. `own_output_path` is an optional second host file the tool
+      writes directly (e.g. nmap -oN): its growth also counts as progress, in
+      case the tool block-buffers its stdout under a non-tty docker exec.
     """
-    full_argv = ["docker", "exec", CONTAINER, "timeout", f"{timeout_s}s", *argv]
-    t0 = time.monotonic()
+    if stream_path is None:
+        full_argv = ["docker", "exec", CONTAINER, "timeout", f"{timeout_s}s", *argv]
+        t0 = time.monotonic()
+        try:
+            proc = subprocess.run(
+                full_argv, capture_output=True, text=True, timeout=timeout_s + 10
+            )
+            elapsed_s = time.monotonic() - t0
+            stdout, out_trunc = _cap(proc.stdout, max_output_chars)
+            stderr, err_trunc = _cap(proc.stderr, max_output_chars)
+            return ExecResult(
+                argv=argv,
+                exit_code=proc.returncode,
+                timed_out=False,
+                stdout=stdout,
+                stderr=stderr,
+                truncated=out_trunc or err_trunc,
+                elapsed_s=elapsed_s,
+            )
+        except subprocess.TimeoutExpired as e:
+            elapsed_s = time.monotonic() - t0
+            stdout, out_trunc = _cap(e.stdout.decode("utf-8", "replace") if e.stdout else "", max_output_chars)
+            stderr, err_trunc = _cap(e.stderr.decode("utf-8", "replace") if e.stderr else "", max_output_chars)
+            return ExecResult(
+                argv=argv,
+                exit_code=None,
+                timed_out=True,
+                stdout=stdout,
+                stderr=stderr,
+                truncated=out_trunc or err_trunc,
+                elapsed_s=elapsed_s,
+            )
+
+    return _run_monitored(argv, max_output_chars, stream_path, own_output_path,
+                          idle_timeout_s if idle_timeout_s is not None else HANG_POLICY["idle_timeout_s"],
+                          max_wall_s if max_wall_s is not None else HANG_POLICY["max_wall_s"])
+
+
+def _observed_bytes(*paths):
+    """Total bytes across the streamed-output file and any tool-written file.
+    Growth in EITHER is progress -- summed (not maxed) so a tool that writes
+    only to its own -oN file while its stdout stays quiet still registers."""
+    total = 0
+    for p in paths:
+        if not p:
+            continue
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            pass
+    return total
+
+
+def _kill_remote(ctr_pidfile):
+    """Best-effort stop of the in-container process tree via the pidfile the
+    wrapper wrote (see _run_monitored). Killing the local `docker exec` client
+    does NOT reliably reach the remote process, so an idle kill has to reach in
+    and signal it; the in-container `timeout -s KILL` is the guaranteed backstop
+    if this misses (e.g. the pidfile hasn't been written yet)."""
+    if not ctr_pidfile:
+        return
+    script = (
+        f"p=$(cat {shlex.quote(ctr_pidfile)} 2>/dev/null); "
+        f'[ -n "$p" ] && {{ kill -TERM "$p" 2>/dev/null; sleep 2; kill -KILL "$p" 2>/dev/null; }}; :'
+    )
     try:
-        proc = subprocess.run(
-            full_argv, capture_output=True, text=True, timeout=timeout_s + 10
+        subprocess.run(["docker", "exec", CONTAINER, "sh", "-c", script],
+                       capture_output=True, text=True, timeout=20)
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+
+def _run_monitored(argv, max_output_chars, stream_path, own_output_path,
+                   idle_timeout_s, max_wall_s):
+    os.makedirs(os.path.dirname(stream_path), exist_ok=True)
+    ctr_pidfile = _to_container_path(stream_path)
+    ctr_pidfile = ctr_pidfile + ".pid" if ctr_pidfile else None
+
+    # In-container wrapper: record the wrapper's own PID (which `exec` then
+    # hands to `timeout`, so it's the right thing to signal on an idle kill),
+    # then self-limit at the wall backstop with a hard KILL and force
+    # line-buffered output so a live tool's stdout can't sit block-buffered
+    # long enough to look idle. shlex.quote each argv element -- argv can be
+    # arbitrary (shell_exec passes ["bash","-c",<command>]).
+    inner = " ".join(shlex.quote(a) for a in argv)
+    # mkdir -p the pidfile's dir first: if the write silently failed (the dir
+    # not existing in the container is the easy way for that to happen), the
+    # pidfile would be empty and an idle kill couldn't reach the remote
+    # process -- it would run on until the in-container `timeout` wall
+    # backstop, defeating idle-detection for exactly the wedge case it exists
+    # to stop.
+    if ctr_pidfile:
+        pid_stmt = (f"mkdir -p {shlex.quote(os.path.dirname(ctr_pidfile))} 2>/dev/null; "
+                    f"echo $$ > {shlex.quote(ctr_pidfile)}; ")
+    else:
+        pid_stmt = ""
+    wrapper = f"{pid_stmt}exec timeout -s KILL {int(max_wall_s)}s stdbuf -oL -eL {inner}"
+    full_argv = ["docker", "exec", CONTAINER, "sh", "-c", wrapper]
+
+    poll = max(1, HANG_POLICY["poll_interval_s"])
+    t0 = time.monotonic()
+    kill_reason = None
+    ret = None
+    with open(stream_path, "wb") as out:
+        proc = subprocess.Popen(
+            full_argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT
         )
-        elapsed_s = time.monotonic() - t0
-        stdout, out_trunc = _cap(proc.stdout, max_output_chars)
-        stderr, err_trunc = _cap(proc.stderr, max_output_chars)
-        return ExecResult(
-            argv=argv,
-            exit_code=proc.returncode,
-            timed_out=False,
-            stdout=stdout,
-            stderr=stderr,
-            truncated=out_trunc or err_trunc,
-            elapsed_s=elapsed_s,
-        )
-    except subprocess.TimeoutExpired as e:
-        elapsed_s = time.monotonic() - t0
-        stdout, out_trunc = _cap(e.stdout.decode("utf-8", "replace") if e.stdout else "", max_output_chars)
-        stderr, err_trunc = _cap(e.stderr.decode("utf-8", "replace") if e.stderr else "", max_output_chars)
-        return ExecResult(
-            argv=argv,
-            exit_code=None,
-            timed_out=True,
-            stdout=stdout,
-            stderr=stderr,
-            truncated=out_trunc or err_trunc,
-            elapsed_s=elapsed_s,
-        )
+        last_bytes = _observed_bytes(stream_path, own_output_path)
+        last_progress = t0
+        while True:
+            try:
+                ret = proc.wait(timeout=poll)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.monotonic()
+            seen = _observed_bytes(stream_path, own_output_path)
+            if seen != last_bytes:
+                last_bytes = seen
+                last_progress = now
+            if idle_timeout_s and (now - last_progress) >= idle_timeout_s:
+                kill_reason = "idle"
+                break
+            # Host-side backstop only -- the in-container `timeout` should have
+            # already fired at max_wall_s; this catches the case where it
+            # didn't (missing binary, wedged docker exec client).
+            if max_wall_s and (now - t0) >= max_wall_s + 15:
+                kill_reason = "wall"
+                break
+        if kill_reason:
+            _kill_remote(ctr_pidfile)
+            try:
+                proc.kill()
+                ret = proc.wait(timeout=10)
+            except (subprocess.SubprocessError, OSError):
+                ret = None
+
+    elapsed_s = time.monotonic() - t0
+    try:
+        with open(stream_path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except OSError:
+        raw = ""
+    stdout, out_trunc = _cap(raw, max_output_chars)
+
+    # GNU `timeout` reports 124 on a plain timeout and 128+9=137 when it had to
+    # SIGKILL; docker exec propagates that. Treat those (and our own kills) as
+    # timed_out regardless of exact code, and label the in-container-timeout
+    # case 'wall' so it reads the same as our host-side backstop.
+    if kill_reason is None and ret in (124, 137):
+        kill_reason = "wall"
+    timed_out = kill_reason is not None
+    return ExecResult(
+        argv=argv,
+        exit_code=None if timed_out else ret,
+        timed_out=timed_out,
+        stdout=stdout,
+        stderr="",  # stdout/stderr are merged into the single streamed log
+        truncated=out_trunc,
+        elapsed_s=elapsed_s,
+        kill_reason=kill_reason,
+    )
 
 
 def _iface_for_network(net):
