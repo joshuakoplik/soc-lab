@@ -168,6 +168,10 @@ class ClaudeProvider:
         }).encode("utf-8")
 
         for attempt in range(MAX_CALL_ATTEMPTS):
+            # Fresh connection per call by design (no pooled session): requests
+            # can be minutes apart while a tool runs, long enough that a pooled
+            # idle socket gets closed by an intermediary and the next POST
+            # fails on a dead socket. One handshake per call is negligible.
             req = urllib.request.Request(
                 API_URL,
                 data=body,

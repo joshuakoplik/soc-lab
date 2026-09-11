@@ -120,6 +120,16 @@ class OpenAICompatibleProvider:
                 # response -> close -> dispatch tools -> new request, never
                 # a tool executing while a connection to the provider is
                 # still open.
+                #
+                # LOAD-BEARING, do not "optimize" into dispatching a tool the
+                # moment its arguments finish parsing: tools now run for
+                # MINUTES (nmap/hydra/sqlmap on the monitored executor path,
+                # see redteam/executor.py). If a tool ran while this response
+                # stream were still open, the socket read-timeout would elapse
+                # mid-tool with no bytes arriving and kill the request in a
+                # confusing way. Read the whole response and close it first;
+                # the few seconds saved by overlapping are nothing against a
+                # multi-minute tool.
                 print(f"    [{_now_ts()}] provider connection closed; "
                       f"dispatching {len(requested)} tool call(s)")
                 for call in requested:
@@ -278,6 +288,12 @@ class OpenAICompatibleProvider:
         body = json.dumps(body).encode("utf-8")
 
         for attempt in range(MAX_CALL_ATTEMPTS):
+            # A fresh Request + urlopen per call, no pooled/persistent
+            # connection -- intentional, do not refactor into a shared
+            # session. Requests can be minutes apart (a tool runs long between
+            # them), and a pooled socket left idle that long is routinely
+            # closed by an intermediary, so the next POST would fail on a dead
+            # socket. One TCP+TLS handshake per call is noise next to that.
             req = urllib.request.Request(
                 f"{self.base_url}/chat/completions",
                 data=body,
