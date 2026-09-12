@@ -698,3 +698,21 @@ h1 .muted { color: var(--muted); font-weight: 400; }
    climax stands out from the running action/found lines. */
 .diary-kind.kind-milestone { color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 20%, transparent); }
 .diary-entry.kind-milestone { border-left-color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 9%, var(--surface-2)); }
+
+/* Recon/loot diary tiers. kind-recon = the attacker's own investigative beats
+   (its search query / fetch reason / staged exploit), aqua. kind-observed =
+   plain harness facts (nmap ran, a loot result), dimmed so they're secondary
+   to the model's own reasoning. .diary-got = a loot result folded onto the
+   action that produced it. */
+.diary-kind.kind-recon    { color: var(--series-suricata); background: color-mix(in srgb, var(--series-suricata) 16%, transparent); }
+.diary-kind.kind-observed { color: var(--muted); background: color-mix(in srgb, var(--muted) 20%, transparent); }
+.diary-entry.kind-recon    { border-left-color: var(--series-suricata); }
+.diary-entry.kind-observed { border-left-color: var(--gridline); opacity: 0.85; }
+.diary-entry.kind-observed .diary-text { color: var(--text-secondary); font-size: 13px; }
+.diary-got {
+  margin-top: 5px;
+  color: var(--muted);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}

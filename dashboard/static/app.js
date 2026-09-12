@@ -180,6 +180,64 @@ function addDiaryEntry(ts, kind, kindClass, context, text, detailKey) {
   while (feedDiary.children.length > 600) feedDiary.removeChild(feedDiary.lastChild);
 }
 
+// Recon/loot commentary is HARNESS-generated (deterministic templating of the
+// recorded fields -- no model call, no narrative construction). Two tiers,
+// kept visually distinct from the model's own voice:
+//   kind-recon    -- carries the attacker's OWN text (its search query, its
+//                    stated fetch reason, the exploit it chose to stage)
+//   kind-observed -- plain facts the harness logged (nmap ran, a loot result)
+function _parseDetail(s) { try { return JSON.parse(s || "{}"); } catch (e) { return {}; } }
+function _shortUrl(u) { return (u || "").replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, ""); }
+function _firstLine(s) {
+  const line = (s || "").split("\n").map((x) => x.trim()).find((x) => x.length);
+  return truncate(line || "", 100);
+}
+
+function addReconDiary(row) {
+  const d = _parseDetail(row.detail);
+  switch (row.finding_type) {
+    case "port_scan":
+      return addDiaryEntry(row.created, "scan", "kind-observed", row.target,
+        `Ran nmap against ${row.target}`, `recon_findings:${row.id}`);
+    case "web_search":
+      return addDiaryEntry(row.created, "search", "kind-recon", null,
+        `Searched: "${d.query || ""}"`, `recon_findings:${row.id}`);
+    case "fetch_url":
+      return addDiaryEntry(row.created, "fetch", "kind-recon", _shortUrl(d.url),
+        d.reason || `Fetched ${_shortUrl(d.url)}`, `recon_findings:${row.id}`);
+    case "stage_artifact":
+      return addDiaryEntry(row.created, "staged", "kind-recon", `${d.file_count || "?"} files`,
+        `Pulled in exploit code: ${_shortUrl(d.url)}`, `recon_findings:${row.id}`);
+    // http_path probes (dozens per run) stay on the timeline only -- too
+    // low-signal individually to belong in a readable diary.
+    default:
+      return;
+  }
+}
+
+// Attach a loot result to the diary entry of the action that produced it (its
+// rationale is already the diary line), so an action reads "why -> got what".
+// Falls back to a standalone observed line when there's no owning action
+// (recon-stage nmap loot) or its entry isn't present.
+function addLootDiary(row) {
+  const got = _firstLine(row.summary);
+  if (!got) return;
+  if (row.pending_action_id) {
+    const host = feedDiary.querySelector(`.diary-entry[data-detail-key="pending_actions:${row.pending_action_id}"]`);
+    if (host) {
+      const t = host.querySelector(".diary-text");
+      if (t && !t.querySelector(".diary-got")) {
+        const g = document.createElement("div");
+        g.className = "diary-got";
+        g.textContent = "→ got: " + got;
+        t.appendChild(g);
+      }
+      return;
+    }
+  }
+  addDiaryEntry(row.created, "loot", "kind-observed", row.tool, "→ got: " + got, `loot:${row.id}`);
+}
+
 // ---------- Live Telemetry (events table) ----------
 
 function eventDetail(row) {
@@ -283,6 +341,7 @@ function ensureCampaign(row) {
 function onReconFinding(row) {
   addTimelineEntry("atk", row.created, "\u{1F50D}", "",
     `S${row.session_id} recon: ${row.target} \u00b7 ${row.finding_type}`, `recon_findings:${row.id}`);
+  addReconDiary(row);
 }
 
 function onVulnFinding(row) {
@@ -312,6 +371,7 @@ function onPendingAction(row) {
 function onLoot(row) {
   addTimelineEntry("atk", row.created, "\u{1F4E6}", "",
     `S${row.session_id} loot: ${row.tool}${row.target ? " \u00b7 " + row.target : ""}`, `loot:${row.id}`);
+  addLootDiary(row);
 }
 
 function onCapturedFlag(row) {
