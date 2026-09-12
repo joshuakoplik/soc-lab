@@ -3,6 +3,8 @@
 
 const feedEvents = document.getElementById("feed-events");
 const timelineEl = document.getElementById("timeline");   // the unified defender|attacker time axis
+const feedDiary = document.getElementById("feed-diary");  // attacker's own reasoning, streamed unedited
+const diariedIds = new Set();  // pending_action ids already narrated (they re-fire on approve/execute)
 
 const candidatesById = new Map();   // id -> candidate row
 const sessionsById = new Map();     // id -> {row}  (kept for stats + correlation, no per-campaign DOM anymore)
@@ -145,6 +147,43 @@ const VERDICT_ICON = {
   needs_human: "\u{1F575}️", error: "❓",
 };
 
+// ---------- Attacker Diary (streamed rationales) ----------
+// The attacker's own reasoning, unedited, in the order it happened. Sourced
+// straight from pending_actions.rationale (the "why" it wrote before each
+// action) and vuln_findings.description (what it judged worth exploiting) --
+// no model call added, just surfacing text the agent already produces. Read
+// top-to-bottom like a diary (oldest first); tap a line for the real action.
+
+function addDiaryEntry(ts, kind, kindClass, context, text, detailKey) {
+  if (!text) return;
+  const placeholder = feedDiary.querySelector(".empty");
+  if (placeholder) placeholder.remove();
+
+  // Auto-follow only when the reader is already at the latest entry, so
+  // scrolling up to re-read history isn't yanked back down by a new arrival.
+  const atBottom = feedDiary.scrollHeight - feedDiary.scrollTop - feedDiary.clientHeight < 40;
+
+  const entry = document.createElement("div");
+  entry.className = "diary-entry";
+  const epoch = ts != null ? toEpoch(ts) : Date.now();
+  entry.dataset.epoch = epoch;
+  if (detailKey) { entry.dataset.detailKey = detailKey; entry.classList.add("clickable"); }
+  entry.innerHTML =
+    `<div class="diary-meta"><span class="diary-time">${fmtClock(ts)}</span>` +
+    `<span class="diary-kind ${kindClass || ""}">${escapeHtml(kind)}</span>` +
+    (context ? `<span class="diary-ctx">${escapeHtml(context)}</span>` : "") + `</div>` +
+    `<div class="diary-text">${escapeHtml(text)}</div>`;
+
+  // Oldest at top: walk from the end, insert after the last entry whose epoch
+  // is <= this one (bootstrap replays sorted, live pushes may interleave).
+  let ref = feedDiary.lastChild;
+  while (ref && ref.dataset && Number(ref.dataset.epoch) > epoch) ref = ref.previousSibling;
+  feedDiary.insertBefore(entry, ref ? ref.nextSibling : feedDiary.firstChild);
+
+  while (feedDiary.children.length > 600) feedDiary.removeChild(feedDiary.firstChild);
+  if (atBottom) feedDiary.scrollTop = feedDiary.scrollHeight;
+}
+
 // ---------- Live Telemetry (events table) ----------
 
 function eventDetail(row) {
@@ -253,6 +292,9 @@ function onReconFinding(row) {
 function onVulnFinding(row) {
   addTimelineEntry("atk", row.created, "\u{1F41B}", severityStatusClass(row.severity),
     `S${row.session_id} vuln ${row.severity}: ${row.category}`, `vuln_findings:${row.id}`);
+  // Diary: what it judged worth exploiting, in its own words.
+  addDiaryEntry(row.created, "found", "kind-found", `${row.severity} · ${row.category}`,
+    row.description, `vuln_findings:${row.id}`);
 }
 
 function onPendingAction(row) {
@@ -262,6 +304,13 @@ function onPendingAction(row) {
   else { icon = "\u{1F3AF}"; cls = "st-muted"; verb = "propose"; ts = row.created; }
   addTimelineEntry("atk", ts, icon, cls,
     `S${row.session_id} ${verb}: ${row.tool}\u2192${row.target}`, `pending_actions:${row.id}`);
+  // Diary: the "why" it wrote before acting. Once per action (pending_actions
+  // re-fire on approve/execute), timestamped at propose so it reads in order.
+  if (row.rationale && !diariedIds.has(row.id)) {
+    diariedIds.add(row.id);
+    addDiaryEntry(row.created, "action", "kind-action", `${row.tool} \u2192 ${row.target}`,
+      row.rationale, `pending_actions:${row.id}`);
+  }
 }
 
 function onLoot(row) {
@@ -390,6 +439,8 @@ function recomputeActiveCampaigns() {
 function resetLocalState() {
   feedEvents.innerHTML = "";
   timelineEl.innerHTML = "";
+  feedDiary.innerHTML = "";
+  diariedIds.clear();
   candidatesById.clear();
   sessionsById.clear();
   inflightById.clear();
@@ -535,9 +586,16 @@ function looksLikeJson(s) {
 }
 
 function renderDetailBody(row) {
+  // The attacker's rationale (or a finding's description) is the "why" behind
+  // the row -- pull it out and show it prominently at the top instead of
+  // buried alphabetically among input_json/result_json/etc.
+  const why = row.rationale || row.description || null;
+  const whyField = row.rationale ? "rationale" : row.description ? "description" : null;
+
   const dlRows = [];
   const blocks = [];
   for (const [k, v] of Object.entries(row)) {
+    if (k === whyField) continue;  // shown prominently below, don't repeat it in the field list
     if (v === null || v === undefined || v === "") { dlRows.push([k, "—"]); continue; }
     let sv = typeof v === "string" ? v : JSON.stringify(v);
     if (typeof v === "string" && looksLikeJson(sv)) {
@@ -546,7 +604,13 @@ function renderDetailBody(row) {
     if (sv.length > 160 || sv.includes("\n")) blocks.push([k, sv]);
     else dlRows.push([k, sv]);
   }
-  let html = "<dl>" + dlRows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join("") + "</dl>";
+  let html = "";
+  if (why) {
+    html += `<div class="detail-why"><div class="detail-why-label">` +
+      `${row.rationale ? "why the attacker did this" : "reasoning"}</div>` +
+      `<div class="detail-why-text">${escapeHtml(why)}</div></div>`;
+  }
+  html += "<dl>" + dlRows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join("") + "</dl>";
   for (const [k, v] of blocks) html += `<h4>${escapeHtml(k)}</h4><pre>${escapeHtml(v)}</pre>`;
   return html;
 }
@@ -575,7 +639,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetai
 
 document.body.addEventListener("click", (e) => {
   // Telemetry feed lines and timeline rows both drill into the same modal.
-  const target = e.target.closest(".line.clickable, .tl-row[data-detail-key]");
+  const target = e.target.closest(".line.clickable, .tl-row[data-detail-key], .diary-entry.clickable");
   if (!target) return;
   openDetailModal(target.dataset.detailKey);
 });
@@ -614,5 +678,6 @@ document.querySelectorAll(".feed").forEach((f) => {
   f.innerHTML = '<div class="empty">waiting for data\u2026</div>';
 });
 timelineEl.innerHTML = '<div class="empty">waiting for data\u2026</div>';
+feedDiary.innerHTML = '<div class="empty">waiting for the attacker to reason\u2026</div>';
 
 loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(connectWS);

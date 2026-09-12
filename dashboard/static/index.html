@@ -35,8 +35,17 @@
 <main class="page">
   <div class="tabs" role="tablist">
     <button class="tab-btn active" data-tab="defense" role="tab" aria-selected="true">Defender &amp; Attacker</button>
+    <button class="tab-btn" data-tab="diary" role="tab" aria-selected="false">Attacker Diary</button>
     <button class="tab-btn" data-tab="telemetry" role="tab" aria-selected="false">Live Telemetry</button>
   </div>
+
+  <section class="panel tab-panel" id="panel-diary" data-tab="diary">
+    <div class="panel-head">
+      <h2>Attacker Diary</h2>
+      <span class="panel-sub">the attacker's own reasoning as it happens &middot; unedited, oldest first &middot; tap a line for the action behind it</span>
+    </div>
+    <div class="diary" id="feed-diary"></div>
+  </section>
 
   <section class="panel tab-panel" id="panel-telemetry" data-tab="telemetry">
     <div class="panel-head">
