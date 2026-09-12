@@ -196,6 +196,21 @@ ALLOWED_MSF_MODULES = _MODE_CFG["msf_modules"]
 # not wrong, in a mode where neither web target is up.
 _HTTP_TARGETS = tuple(t for t in _TARGETS if t in ("nginx", "wordpress"))
 
+
+def _str_enum(values):
+    """A string tool-parameter schema constrained to `values` -- but with the
+    `enum` key OMITTED when `values` is empty. An empty `enum: []` is rejected
+    outright by strict tool-schema validators (Moonshot/kimi returns a GMI 400,
+    "enum array cannot be empty", killing the whole tool list) and a
+    zero-choice enum constrains nothing anyway. This bites in modes with no
+    matching surface -- e.g. _HTTP_TARGETS is empty in dealer mode (its target
+    is the alias 'target', not nginx/wordpress), so http_probe's schema would
+    otherwise ship `enum: []`. The runtime tool impls still validate the
+    argument (see tool_http_probe's _HTTP_TARGETS check), so dropping the
+    advisory enum keeps the schema valid without loosening any real control."""
+    values = list(values)
+    return {"type": "string", "enum": values} if values else {"type": "string"}
+
 # shell_exec is deliberately unconstrained at the Python level -- no target
 # allowlist, no module allowlist, arbitrary shell string. That's only safe
 # because containment moved to a layer this file doesn't control: soc-attacker
@@ -685,7 +700,7 @@ _RECON_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "enum": _TARGETS},
+                "target": _str_enum(_TARGETS),
                 "ports": {"type": "string", "description": "e.g. '2222' or '1-1000'; omit for nmap's default"},
                 "service_detection": {"type": "boolean", "default": True},
             },
@@ -698,7 +713,7 @@ _RECON_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "enum": list(_HTTP_TARGETS)},
+                "target": _str_enum(_HTTP_TARGETS),
                 "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 25},
                 "method": {"type": "string", "enum": ["GET", "POST"], "default": "GET"},
             },
@@ -719,7 +734,7 @@ _RECON_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "enum": _TARGETS},
+                "target": _str_enum(_TARGETS),
                 "ids": {"type": "array", "items": {"type": "integer"},
                          "description": "specific finding ids to retrieve in full, bypassing the usual preview"},
             },
@@ -821,7 +836,7 @@ _ASSESS_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "enum": _TARGETS},
+                "target": _str_enum(_TARGETS),
                 "ids": {"type": "array", "items": {"type": "integer"},
                          "description": "specific finding ids to retrieve in full, bypassing the usual preview"},
             },
@@ -844,7 +859,7 @@ _ASSESS_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "enum": _TARGETS},
+                "target": _str_enum(_TARGETS),
                 "category": {"type": "string"},
                 "severity": {"type": "string", "enum": ["info", "low", "medium", "high", "critical"]},
                 "description": {"type": "string"},
@@ -859,8 +874,8 @@ _ASSESS_TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "tool": {"type": "string", "enum": list(GATED_TOOLS)},
-                "target": {"type": "string", "enum": _TARGETS + ["lab"]},
+                "tool": _str_enum(GATED_TOOLS),
+                "target": _str_enum(_TARGETS + ["lab"]),
                 "params": {"type": "object", "description": "tool-specific; validated at execution time, not here"},
                 "rationale": {"type": "string"},
                 "based_on": {"type": "array", "items": {"type": "integer"}, "description": "vuln_findings ids"},
