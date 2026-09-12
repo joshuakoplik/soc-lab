@@ -21,7 +21,8 @@ product.
 ```bash
 ./setup.sh && ./verify.sh              # bring up cowrie+juiceshop+nginx, confirm telemetry lands
 ./lab-mode.sh {up|down|switch} {easy|hard|wordpress|northwind}   # writes lab_mode.json
-./lab-mode.sh status                   # primary mode + live docker state for all four
+./lab-mode.sh {up|switch} dealer <vulhub-target>   # e.g. struts2/CVE-2017-5638 (dealer needs a target arg)
+./lab-mode.sh status                   # primary mode + live docker state for all modes
 ./reset.sh [--network|--db|--queue|--status] [--no-kill]   # reset baseline; default (no flags) does all three
 docker compose ps / logs -f <svc> / down [-v]
 ```
@@ -44,6 +45,22 @@ docker compose ps / logs -f <svc> / down [-v]
   A `down` leaves the postgres volume alone; `make -C northwind-range reset`
   is what re-seeds corpus/entitlements/records. See `northwind-range/SPEC.md`
   and `REDTEAM_MODE_SPEC.md`.
+- **dealer**: "dealer's choice" — an ephemeral, docker-based vulnerable target
+  **live-fetched from Vulhub** (`github.com/vulhub/vulhub`, the docker analog of
+  VulnHub; VulnHub's own VM images can't run here — the host has no
+  virtualization). Unlike the fixed modes it takes a **target argument**
+  (`up dealer <software>/<CVE>` or a docker image ref) — picking one is the
+  operator's/assistant's call, not an in-code selection engine. Like northwind
+  it's an externally-managed range (`dealer-range/`, own `Makefile`,
+  lab-mode.sh delegates via `make -C`), but UNLIKE northwind it's a plain
+  network target (`adapter: None`, attacked via `shell_exec`) on a real
+  `net_topology` subnet — a new **internal** bridge `soclab-dealer`
+  (`10.211.40.0/24`) giving the untrusted image structural no-egress with no
+  iptables. The chosen target is exposed to soc-attacker only as the alias
+  `target`; what it actually is stays in `dealer-range/.run/state.json` (never
+  told to the agent — recon from zero). Defender visibility is Suricata-only (no
+  wazuh agent in a fetched image). Teardown on switch/down is complete. See
+  `dealer-range/README.md`.
 
 `lab_mode.json` (gitignored) is the single source of truth for which mode is
 *actually* running; `pipeline/redteam/lab_modes.py` reads it so the red-team agent's

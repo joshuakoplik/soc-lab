@@ -51,6 +51,14 @@ class LabNetwork:
     subnet: ipaddress.IPv4Network
     gateway: ipaddress.IPv4Address
     bridge_iface: str      # <=15 chars (IFNAMSIZ) -- pinned via com.docker.network.bridge.name at create time
+    # Create the bridge with --internal (no route off-host). Default False,
+    # and it MUST stay False for easy/hard/wordpress -- internal silently
+    # disables Docker host port publishing for every container on the net (the
+    # reverted first-attempt; see bootstrap()). It's opt-in True only for a net
+    # whose targets publish NO host ports, where structural no-egress is a
+    # feature, not a breakage -- the `dealer` range (untrusted, live-fetched
+    # images that must not phone home).
+    internal: bool = False
 
 
 # All three inside 10.211.0.0/16 on purpose -- suricata/overrides.yaml's
@@ -83,6 +91,23 @@ LAB_NETWORKS = (
         subnet=ipaddress.ip_network("10.211.30.0/24"),
         gateway=ipaddress.ip_address("10.211.30.1"),
         bridge_iface="soclab-wp0",
+    ),
+    # The "dealer's choice" range's network (see dealer-range/ and
+    # lab_modes.DEALER). INTERNAL on purpose: the dealer target is a
+    # live-fetched, untrusted Vulhub container reached only over this bridge by
+    # soc-attacker (which is multi-homed onto it), publishing no host ports --
+    # so an internal bridge gives it structural no-internet containment with
+    # zero iptables. Docker's embedded DNS still resolves target.soclab-dealer,
+    # and suricata's /16 HOME_NET already covers this subnet, so the attack is
+    # still reachable and still watched. bridge_iface "soclab-dealer0" is 15
+    # bytes, exactly at the IFNAMSIZ limit.
+    LabNetwork(
+        mode="dealer",
+        compose_name="soclab-dealer",
+        subnet=ipaddress.ip_network("10.211.40.0/24"),
+        gateway=ipaddress.ip_address("10.211.40.1"),
+        bridge_iface="soclab-dealer0",
+        internal=True,
     ),
 )
 
@@ -147,7 +172,8 @@ def bootstrap():
         if _network_exists(net.compose_name):
             print(f"[net_topology] {net.compose_name} already exists")
             continue
-        print(f"[net_topology] creating {net.compose_name} ({net.subnet})")
+        internal_flag = " [internal]" if net.internal else ""
+        print(f"[net_topology] creating {net.compose_name} ({net.subnet}){internal_flag}")
         subprocess.run(
             [
                 "docker", "network", "create",
@@ -155,6 +181,7 @@ def bootstrap():
                 "--subnet", str(net.subnet),
                 "--gateway", str(net.gateway),
                 "--opt", f"com.docker.network.bridge.name={net.bridge_iface}",
+                *(["--internal"] if net.internal else []),
                 net.compose_name,
             ],
             check=True,
