@@ -26,6 +26,8 @@ The target is chosen **by argument**, not by an in-code discovery/random engine
    **`target`** so `soc-attacker` reaches it as `target.soclab-dealer`.
 3. `docker compose -p dealer-range up -d --build` brings it up; `make wait`
    health-gates it (fail loud → pick another).
+4. `make wire` (`wire.py`) makes the healthy target **observable to the
+   defender** — see below. Best-effort: a wiring hiccup never fails `up`.
 
 ## Containment
 
@@ -34,12 +36,46 @@ untrusted, live-fetched target has **no route off-host** — structural, zero
 iptables. It publishes no host ports. Inter-service DNS (app→db) still works on
 the bridge; `soc-attacker` (multi-homed onto it) reaches `target`.
 
-## Telemetry note
+## Making the target observable (`wire.py`)
 
-A Vulhub container has no wazuh agent or log bind-mount, so the **defender's
-only visibility is Suricata network IDS** on `soclab-dealer` (its `/16`
-`HOME_NET` already covers the subnet). `dealer` is a rich red-team-variety play
-but a thin blue-team one.
+A Vulhub container has no wazuh agent and logs to unknown places/formats, and it
+joins `soclab-dealer` *after* Suricata discovered its interfaces — so out of the
+box the defender is blind on both legs. `make wire` (run automatically at the end
+of `make up`) fixes both:
+
+- **Network (Suricata)** — deterministic, no model. Suricata self-discovers
+  `soclab-*0` bridges only at entrypoint, so a later bridge is missed. If
+  `soc-suricata` isn't already capturing `soclab-dealer0`, `wire.py` restarts it
+  to re-run discovery. `HOME_NET` (`/16`) already covers `10.211.40.0/24`, so no
+  config edit.
+- **Logs (Wazuh)** — a deterministic baseline plus one LLM refinement turn.
+  Wazuh reads only real files under `/lab-logs` and copies `ossec.conf` only at
+  boot (no live reload), so two **permanent** dealer buckets live in
+  `wazuh/ossec.conf` — `/lab-logs/dealer/dealer.log` (`syslog`: plain text + HTTP
+  access logs, which get the `web_accesslog` decoder / 31100 web ruleset for
+  free) and `/lab-logs/dealer/dealer.json` (`json`). All per-image work is then
+  host-side: `wire.py` tails each service's stdout into the syslog bucket
+  (baseline — never blind even if the model turn fails), then runs **one LLM turn**
+  (`WIRE_PROVIDER`, default `local`/qwen; `WIRE_MODEL`) that, additively,
+  re-routes a JSON-on-stdout service to the json bucket and exec-tails
+  in-container log files the app writes to disk. Every model-proposed entry is
+  validated; bad ones are dropped. Wazuh's logcollector tolerates the
+  not-yet-existing bucket paths and picks them up once the tailers create them.
+
+Spawned tailers are detached and recorded in `.run/tailers.json`; `make down`
+kills them and clears `logs/dealer/` so a target stays ephemeral. The permanent
+ossec.conf buckets remain, harmlessly pointing at absent files.
+
+> **One-time setup:** the two dealer `<localfile>` stanzas were added to
+> `wazuh/ossec.conf` — since Wazuh copies its config in only at boot, run
+> `docker restart soc-wazuh` once to activate them. After that, no dealer target
+> ever needs a Wazuh restart.
+>
+> An alert still only fires if a shipped decoder/rule matches the target's log
+> format (access logs are the rich case) — the plumbing is format-agnostic, the
+> detection content is not. And the defender pipeline (`ingest.py`/`detect`/
+> `triage`) must be running for the telemetry to reach `soc.db`; `wire.py` only
+> guarantees the sensors *produce* it.
 
 ## The agent's view
 

@@ -58,9 +58,16 @@ docker compose ps / logs -f <svc> / down [-v]
   (`10.211.40.0/24`) giving the untrusted image structural no-egress with no
   iptables. The chosen target is exposed to soc-attacker only as the alias
   `target`; what it actually is stays in `dealer-range/.run/state.json` (never
-  told to the agent — recon from zero). Defender visibility is Suricata-only (no
-  wazuh agent in a fetched image). Teardown on switch/down is complete. See
-  `dealer-range/README.md`.
+  told to the agent — recon from zero). A fetched image has no wazuh agent and
+  joins the bridge after Suricata's interface discovery, so on standup
+  `dealer-range/wire.py` (`make wire`, run at the end of `make up`) makes it
+  observable: it restarts Suricata if needed to pick up `soclab-dealer0`
+  (network leg) and runs one LLM turn to tail the target's container logs into
+  two **permanent** dealer buckets in `wazuh/ossec.conf`
+  (`/lab-logs/dealer/dealer.{log,json}`) so logs reach Wazuh (log leg) — a
+  deterministic stdout→syslog baseline guarantees the defender is never fully
+  blind even if the model turn fails. Teardown on switch/down is complete
+  (tailers killed, `logs/dealer/` cleared). See `dealer-range/README.md`.
 
 `lab_mode.json` (gitignored) is the single source of truth for which mode is
 *actually* running; `pipeline/redteam/lab_modes.py` reads it so the red-team agent's
