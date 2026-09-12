@@ -14,7 +14,7 @@ COMPOSE := .run/compose.yml
 
 -include .env
 
-.PHONY: up down reset refresh cache net wait purge
+.PHONY: up down reset refresh cache net wait wire purge
 
 # Shallow clone of the Vulhub repo -- the only "connect to the source" step, so
 # a given <software>/<CVE> path resolves to files. Picking WHICH target is the
@@ -37,6 +37,7 @@ up: cache net
 	  echo "[dealer] bringing target up on $(PROJECT) ..."; \
 	  docker compose -f "$(COMPOSE)" --project-directory "$$PROJECT_DIR" -p "$(PROJECT)" up -d --build
 	@$(MAKE) --no-print-directory wait
+	@$(MAKE) --no-print-directory wire
 
 wait:
 	@echo "[dealer] waiting for the target to come up ..."; \
@@ -48,16 +49,29 @@ wait:
 	  done; \
 	  echo "[dealer] WARNING: nothing came up running -- the image may be broken; pick another target." >&2
 
+# Wire the (now-running) target into the defender: restart Suricata if it isn't
+# already sniffing soclab-dealer0, then gather facts + one LLM turn to tail the
+# target's logs into logs/dealer/ (picked up by wazuh's permanent dealer
+# buckets). Best-effort by design -- never fail `up` over a wiring hiccup; the
+# deterministic baseline inside wire.py keeps the defender from going blind.
+# Uses the venv python if present (provider stack), else python3.
+wire:
+	@PY=python3; [ -x ../.venv/bin/python3 ] && PY=../.venv/bin/python3; \
+	  "$$PY" wire.py || echo "[dealer] WARNING: wiring step reported a problem (see above)." >&2
+
 # down -v: containers AND volumes go, then wipe .run -- "like it was never
 # there". The soclab-dealer bridge persists (it's a net_topology network, torn
-# down by nobody, same as the other three).
+# down by nobody, same as the other three). First kill the host-side log tailers
+# wire.py spawned and clear the dealer log buckets, so no orphaned `docker
+# logs -f` survives and the next target starts from empty files.
 down:
+	@python3 wire.py --teardown 2>/dev/null || true
 	@if [ -f "$(COMPOSE)" ]; then \
 	  PROJECT_DIR=$$(cat .run/project_dir 2>/dev/null || echo .); \
 	  docker compose -f "$(COMPOSE)" --project-directory "$$PROJECT_DIR" -p "$(PROJECT)" down -v 2>/dev/null || true; \
 	fi
 	@rm -rf .run
-	@echo "[dealer] target torn down; .run cleared"
+	@echo "[dealer] target torn down; tailers killed, logs/dealer cleared, .run removed"
 
 # Re-provision the CURRENT target (from state.json) or a new DEALER_TARGET.
 reset:
