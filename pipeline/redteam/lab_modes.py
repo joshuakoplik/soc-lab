@@ -176,6 +176,32 @@ WORDPRESS = {
     "adapter": None,
 }
 
+# "Dealer's choice": an ephemeral, docker-based vulnerable target live-fetched
+# from Vulhub (github.com/vulhub/vulhub), stood up by dealer-range/ and reached
+# as the single alias "target" on the internal soclab-dealer bridge (see
+# net_topology.DEALER). Shaped like WORDPRESS: a lone network target attacked
+# through shell_exec -- the other gated tools are hardcoded to specific stock
+# targets (hydra->cowrie, sqlmap->nginx) and mean nothing against an arbitrary
+# box, whereas shell_exec is the universal "run any tool against target" lane
+# (nmap/curl/exploit chains, exactly how wordpress was rooted). The model is
+# never told WHAT the target is -- dealer's choice is recon-from-zero, and the
+# actual image is recorded only in dealer-range/.run/state.json for the
+# operator. expected_flags is None: Vulhub envs aren't CTF flag boxes, so
+# success is a foothold/RCE (state_footholds/wins), not a captured FLAG{...}.
+DEALER = {
+    "targets": ("target",),
+    "gated_tools": ("shell_exec",),
+    "msf_modules": {},
+    "expected_flags": None,
+    "network": "dealer",
+    "recon_tools": ("nmap_scan", "http_probe", "get_recon_findings", "web_search",
+                     "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
+                      "raise_vuln_finding", "propose_action", "rotate_ip", "web_search",
+                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "adapter": None,
+}
+
 # The first adapter-backed mode -- see agent.py's northwind_adapter.py and
 # REDTEAM_MODE_SPEC.md. No container targets, no net_topology entry (the
 # app lives in a completely separate docker-compose project, reached
@@ -212,7 +238,7 @@ NORTHWIND = {
     },
 }
 
-MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS, "northwind": NORTHWIND}
+MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS, "dealer": DEALER, "northwind": NORTHWIND}
 
 
 def current_mode():

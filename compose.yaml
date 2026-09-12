@@ -484,7 +484,7 @@ services:
       # The attack scripts, and a place to drop loot/output back on the host.
       - ./attacker/scripts:/scripts:ro
       - ./attacker/loot:/loot
-    networks: [soclab-easy, soclab-hard, soclab-wordpress]
+    networks: [soclab-easy, soclab-hard, soclab-wordpress, soclab-dealer]
     # No ports published. The attacker reaches whichever mode's targets are
     # up over that mode's bridge by service name (cowrie:2222, nginx:80,
     # wordpress:80); nothing is exposed to the host. Real internet access
@@ -508,6 +508,13 @@ networks:
   soclab-hard:
     external: true
   soclab-wordpress:
+    external: true
+  # The "dealer's choice" range's bridge (see dealer-range/, lab_modes.DEALER).
+  # Also external + bootstrap-created, but net_topology creates THIS one with
+  # --internal (structural no-egress for the untrusted live-fetched target,
+  # which publishes no host ports -- so internal costs nothing here). soc-attacker
+  # is multi-homed onto it above to reach `target`.
+  soclab-dealer:
     external: true
 
 volumes:

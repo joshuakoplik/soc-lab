@@ -1,0 +1,5 @@
+# Shallow Vulhub clone (the discoverable source) and the per-run rewritten
+# compose + state -- all regenerable, none of it source.
+.cache/
+.run/
+.env

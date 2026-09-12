@@ -44,3 +44,8 @@ attacker/loot/
 # absolute paths from whichever machine it was written on. Not source.
 .claude/settings.local.json
 .claude/worktrees/
+
+# Dealer-range runtime: shallow Vulhub clone + per-run rewritten compose/state.
+# Regenerable, not source (see dealer-range/README.md).
+dealer-range/.cache/
+dealer-range/.run/
