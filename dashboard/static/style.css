@@ -627,17 +627,17 @@ h1 .muted { color: var(--muted); font-weight: 400; }
    vuln_findings.description the agent already writes -- no new data.
    ============================================================ */
 
-#panel-diary { height: 74vh; min-height: 340px; }
+/* Diary flows with the PAGE -- no inner scrollbox (a nested scroll area is
+   awkward on mobile). Newest entries insert at the top (see addDiaryEntry). */
+#panel-diary { height: auto; }
 .diary {
-  flex: 1 1 auto;
-  overflow-y: auto;
+  flex: none;
+  overflow: visible;
   padding: 10px 14px 18px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-.diary::-webkit-scrollbar { width: 8px; }
-.diary::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 4px; }
 
 .diary-entry {
   border-left: 3px solid var(--side-atk);

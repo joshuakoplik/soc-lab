@@ -159,10 +159,6 @@ function addDiaryEntry(ts, kind, kindClass, context, text, detailKey) {
   const placeholder = feedDiary.querySelector(".empty");
   if (placeholder) placeholder.remove();
 
-  // Auto-follow only when the reader is already at the latest entry, so
-  // scrolling up to re-read history isn't yanked back down by a new arrival.
-  const atBottom = feedDiary.scrollHeight - feedDiary.scrollTop - feedDiary.clientHeight < 40;
-
   const entry = document.createElement("div");
   entry.className = "diary-entry";
   const epoch = ts != null ? toEpoch(ts) : Date.now();
@@ -174,14 +170,14 @@ function addDiaryEntry(ts, kind, kindClass, context, text, detailKey) {
     (context ? `<span class="diary-ctx">${escapeHtml(context)}</span>` : "") + `</div>` +
     `<div class="diary-text">${escapeHtml(text)}</div>`;
 
-  // Oldest at top: walk from the end, insert after the last entry whose epoch
-  // is <= this one (bootstrap replays sorted, live pushes may interleave).
-  let ref = feedDiary.lastChild;
-  while (ref && ref.dataset && Number(ref.dataset.epoch) > epoch) ref = ref.previousSibling;
-  feedDiary.insertBefore(entry, ref ? ref.nextSibling : feedDiary.firstChild);
+  // Newest at top, inserted by real timestamp (bootstrap replays sorted, live
+  // pushes interleave). No inner scrollbox -- the whole page scrolls, so a new
+  // entry appears at the top without moving the reader's scroll position.
+  let ref = feedDiary.firstChild;
+  while (ref && ref.dataset && Number(ref.dataset.epoch) > epoch) ref = ref.nextSibling;
+  feedDiary.insertBefore(entry, ref);
 
-  while (feedDiary.children.length > 600) feedDiary.removeChild(feedDiary.firstChild);
-  if (atBottom) feedDiary.scrollTop = feedDiary.scrollHeight;
+  while (feedDiary.children.length > 600) feedDiary.removeChild(feedDiary.lastChild);
 }
 
 // ---------- Live Telemetry (events table) ----------
