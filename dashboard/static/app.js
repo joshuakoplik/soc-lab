@@ -160,7 +160,7 @@ function addDiaryEntry(ts, kind, kindClass, context, text, detailKey) {
   if (placeholder) placeholder.remove();
 
   const entry = document.createElement("div");
-  entry.className = "diary-entry";
+  entry.className = "diary-entry" + (kindClass ? " " + kindClass : "");
   const epoch = ts != null ? toEpoch(ts) : Date.now();
   entry.dataset.epoch = epoch;
   if (detailKey) { entry.dataset.detailKey = detailKey; entry.classList.add("clickable"); }
@@ -321,6 +321,23 @@ function onCapturedFlag(row) {
   updateStat("stat-flags", flagsTotal);
 }
 
+// wins are the attacker's OWN milestone claims (record_win) -- the diary's
+// climax, in its own words. Shown as-is: the whole point is to see them next
+// to the hard facts, overclaims and all, not to reconcile them.
+function winTierClass(tier) {
+  return { shell_or_creds: "st-critical", exploit_confirmed: "st-serious",
+    vuln_identified: "st-warning", unconfirmed: "st-muted" }[tier] || "st-muted";
+}
+
+function onWin(row) {
+  const cls = winTierClass(row.evidence_tier);
+  addTimelineEntry("atk", row.created, "\u{1F3C6}", cls,
+    `S${row.session_id} WIN [${row.evidence_tier}]: ${truncate(row.description, 70)}`,
+    `wins:${row.id}`);
+  addDiaryEntry(row.created, "milestone", "kind-milestone",
+    `claims: ${row.evidence_tier}`, row.description, `wins:${row.id}`);
+}
+
 // ---------- In-Flight LLM Calls ----------
 // llm_calls rows come from pipeline/llm_call_tracker.py: 'running' the
 // instant a provider.complete()/run_stage_turn() call starts, flipped to
@@ -469,6 +486,7 @@ function handleMessage(msg) {
     case "pending_actions": onPendingAction(row); break;
     case "loot": onLoot(row); break;
     case "captured_flags": onCapturedFlag(row); break;
+    case "wins": onWin(row); break;
     case "llm_calls": onLlmCall(row); break;
     case "_error": console.error("poll error:", row.detail); break;
   }
@@ -495,7 +513,7 @@ async function loadBootstrap() {
   for (const row of data.redteam_sessions.rows) handleMessage({ table: "redteam_sessions", row });
 
   const campaignRows = [];
-  for (const t of ["recon_findings", "vuln_findings", "pending_actions", "loot", "captured_flags"]) {
+  for (const t of ["recon_findings", "vuln_findings", "pending_actions", "loot", "captured_flags", "wins"]) {
     for (const row of data[t].rows) campaignRows.push({ table: t, row });
   }
   campaignRows.sort(byCreatedAsc);
@@ -573,7 +591,7 @@ const TABLE_LABELS = {
   human_pages: "Page On-Call", block_recommendations: "Block Recommendation",
   block_ip_calls: "Block IP Call", redteam_sessions: "Campaign Session",
   recon_findings: "Recon Finding", vuln_findings: "Vuln Finding", pending_actions: "Pending Action",
-  loot: "Loot", captured_flags: "Captured Flag", llm_calls: "In-Flight LLM Call",
+  loot: "Loot", captured_flags: "Captured Flag", wins: "Milestone / Win", llm_calls: "In-Flight LLM Call",
 };
 
 function looksLikeJson(s) {

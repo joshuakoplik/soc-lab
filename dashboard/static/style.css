@@ -693,3 +693,8 @@ h1 .muted { color: var(--muted); font-weight: 400; }
      little closer to it than the full column edge. */
   .tl-row .tl-label { max-width: 68ch; }
 }
+
+/* wins = the attacker's milestone claims -- gold accent so the diary's
+   climax stands out from the running action/found lines. */
+.diary-kind.kind-milestone { color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 20%, transparent); }
+.diary-entry.kind-milestone { border-left-color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 9%, var(--surface-2)); }
