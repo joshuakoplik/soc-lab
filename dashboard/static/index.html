@@ -46,23 +46,36 @@
     <div class="feed" id="feed-events"></div>
   </section>
 
-  <div class="split-row tab-panel active" data-tab="defense">
-    <section class="panel" id="panel-defender">
-      <div class="panel-head">
-        <h2>Defender Log</h2>
-        <span class="panel-sub">triage reasoning &middot; alerts &middot; block actions</span>
+  <section class="timeline-wrap tab-panel active" data-tab="defense">
+    <div class="tl-toolbar">
+      <div class="seg" role="tablist" aria-label="Filter timeline by side">
+        <button class="seg-btn active" data-filter="all">All</button>
+        <button class="seg-btn" data-filter="def"><span class="tl-side-dot side-def"></span>Defender</button>
+        <button class="seg-btn" data-filter="atk"><span class="tl-side-dot side-atk"></span>Attacker</button>
       </div>
-      <div class="feed" id="feed-defender"></div>
-    </section>
-
-    <section class="panel" id="panel-attacker">
-      <div class="panel-head">
-        <h2>Attacker Campaigns</h2>
-        <span class="panel-sub">red-team sessions against this lab</span>
+      <button id="legend-toggle" class="legend-toggle" aria-label="Toggle icon legend">?</button>
+    </div>
+    <div id="legend" class="legend hidden">
+      <div class="legend-group">
+        <span class="legend-title side-def">Defender</span>
+        <span class="legend-item"><span class="ic">&#x1F9E0;</span>triage</span>
+        <span class="legend-item"><span class="ic">&#x1F6A8;</span>alert</span>
+        <span class="legend-item"><span class="ic">&#x26D4;</span>IP blocked</span>
+        <span class="legend-item"><span class="ic">&#x1F6A7;</span>block rec</span>
+        <span class="legend-item"><span class="ic">&#x1F4DF;</span>page</span>
       </div>
-      <div class="feed" id="feed-attacker"></div>
-    </section>
-  </div>
+      <div class="legend-group">
+        <span class="legend-title side-atk">Attacker</span>
+        <span class="legend-item"><span class="ic">&#x2694;&#xFE0F;</span>campaign</span>
+        <span class="legend-item"><span class="ic">&#x1F50D;</span>recon</span>
+        <span class="legend-item"><span class="ic">&#x1F41B;</span>vuln</span>
+        <span class="legend-item"><span class="ic">&#x1F4A5;</span>exploit</span>
+        <span class="legend-item"><span class="ic">&#x1F4E6;</span>loot</span>
+        <span class="legend-item"><span class="ic">&#x1F6A9;</span>flag</span>
+      </div>
+    </div>
+    <div id="timeline" class="timeline"></div>
+  </section>
 </main>
 
 <div id="detail-modal" class="modal-backdrop hidden">

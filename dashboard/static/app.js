@@ -2,11 +2,10 @@
 // /api/bootstrap + the /ws stream hand it, never writes anything back.
 
 const feedEvents = document.getElementById("feed-events");
-const feedDefender = document.getElementById("feed-defender");
-const feedAttacker = document.getElementById("feed-attacker");
+const timelineEl = document.getElementById("timeline");   // the unified defender|attacker time axis
 
 const candidatesById = new Map();   // id -> candidate row
-const sessionsById = new Map();     // id -> {row, recon, vuln, loot, flags, cardEl, headerEl, timelineEl, lastActivity}
+const sessionsById = new Map();     // id -> {row}  (kept for stats + correlation, no per-campaign DOM anymore)
 const inflightById = new Map();     // llm_calls.id -> {row, cardEl}
 
 // Every row this client has seen, so a click on any rendered line can pull
@@ -101,6 +100,51 @@ function badgeClassForStatus(status) {
   return "badge-incomplete";
 }
 
+// ---------- unified Defender | Attacker timeline ----------
+// One time-sorted stream (newest at top). Each activity is an icon chip on
+// its own side; the other side is left blank so both columns read against a
+// single UTC time axis. Tap a chip -> the same generic detail modal.
+
+const TL_CAP = 500;
+
+function fmtClock(ts) {
+  // Compact HH:MM:SS for the center rail (full timestamp is in the modal).
+  if (!ts) return "--:--:--";
+  const d = new Date(toEpoch(ts));
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+
+function addTimelineEntry(side, ts, icon, statusClass, label, detailKey) {
+  const placeholder = timelineEl.querySelector(".empty");
+  if (placeholder) placeholder.remove();
+
+  const row = document.createElement("div");
+  row.className = `tl-row ${side}${statusClass ? " " + statusClass : ""}`;
+  const epoch = ts != null ? toEpoch(ts) : Date.now();
+  row.dataset.epoch = epoch;
+  if (detailKey) row.dataset.detailKey = detailKey;
+  row.innerHTML =
+    `<span class="tl-ic">${icon}</span>` +
+    `<span class="tl-tag">${side === "def" ? "DEF" : "ATK"}</span>` +
+    `<span class="tl-label">${escapeHtml(label)}</span>` +
+    `<span class="tl-time">${fmtClock(ts)}</span>`;
+
+  // Insert by real timestamp, newest first -- defender/attacker streams and
+  // bootstrap replays arrive out of order, so arrival order isn't time order.
+  let ref = timelineEl.firstChild;
+  while (ref && ref.dataset && Number(ref.dataset.epoch) > epoch) ref = ref.nextSibling;
+  timelineEl.insertBefore(row, ref);
+
+  while (timelineEl.children.length > TL_CAP) timelineEl.removeChild(timelineEl.lastChild);
+}
+
+// Defender-side verdict icon (colour comes from the chip's status class).
+const VERDICT_ICON = {
+  benign: "✅", suspicious: "⚠️", malicious: "⛔",
+  needs_human: "\u{1F575}️", error: "❓",
+};
+
 // ---------- Live Telemetry (events table) ----------
 
 function eventDetail(row) {
@@ -140,171 +184,96 @@ function candidateCtx(candidateId) {
   return `#${candidateId} ${escapeHtml(c.src_ip || "?")} \u00b7 ${escapeHtml(c.rule || "")}`;
 }
 
+function candShort(candidateId) {
+  const c = candidatesById.get(candidateId);
+  return c ? (c.src_ip || `#${candidateId}`) : `#${candidateId}`;
+}
+
 function renderDefenderRow(table, row) {
-  let statusClass, head, body, ts = row.created;
+  let icon, statusClass, label, ts = row.created;
 
   if (table === "triage") {
     statusClass = verdictStatusClass(row.verdict);
+    icon = VERDICT_ICON[row.verdict] || "\u{1F9E0}";
     const conf = row.confidence != null ? Math.round(row.confidence * 100) + "%" : "\u2014";
-    head = `<span class="action-icon">\u{1F9E0}</span><span class="tag ${statusClass}">${escapeHtml(row.verdict)}</span>` +
-      `<span class="ctx">${candidateCtx(row.candidate_id)} \u00b7 conf ${conf}${row.attack_technique ? " \u00b7 " + escapeHtml(row.attack_technique) : ""}</span>`;
-    body = escapeHtml(row.rationale || row.error || "");
+    label = `${row.verdict} \u00b7 ${candShort(row.candidate_id)} \u00b7 ${conf}`;
   } else if (table === "agent_alerts") {
     statusClass = severityStatusClass(row.severity);
-    head = `<span class="action-icon">\u{1F514}</span><span class="tag ${statusClass}">alert \u00b7 ${escapeHtml(row.severity)}</span>` +
-      `<span class="ctx">${candidateCtx(row.candidate_id)} \u00b7 raise_alert() \u2014 safe, no gate</span>`;
-    body = escapeHtml(row.summary || "");
+    icon = "\u{1F514}";
+    label = `alert \u00b7 ${row.severity} \u00b7 ${candShort(row.candidate_id)}`;
     alertTimes.push(toEpoch(row.created));
   } else if (table === "human_pages") {
-    // page_oncall() -- the loudest tool the agent has. Distinct from
-    // agent_alerts/raise_alert above: this is a test stand-in claiming a
-    // human would be woken up RIGHT NOW, not a queued/logged record. See
-    // tool_page_oncall's docstring in triage/agent.py.
+    // page_oncall() -- loudest tool the defender has (test stand-in, no real page).
     statusClass = "st-critical";
-    head = `<span class="action-icon">\u{1F4DF}</span><span class="tag st-critical">PAGING ON-CALL</span>` +
-      `<span class="ctx">${candidateCtx(row.candidate_id)} \u00b7 page_oncall() \u2014 test stand-in, no real page sent</span>`;
-    body = escapeHtml(row.reason || "");
+    icon = "\u{1F4DF}";
+    label = `PAGE on-call \u00b7 ${candShort(row.candidate_id)}`;
     alertTimes.push(toEpoch(row.created));
   } else if (table === "block_recommendations") {
     statusClass = "st-warning";
-    head = `<span class="action-icon">\u{1F6E1}</span><span class="tag st-warning">block recommended</span>` +
-      `<span class="ctx">${escapeHtml(row.src_ip)} \u00b7 awaiting human approval</span>`;
-    body = escapeHtml(row.reason || "");
+    icon = "\u{1F6A7}";
+    label = `block rec \u00b7 ${row.src_ip || ""}`;
   } else if (table === "block_ip_calls") {
-    // REAL enforcement -- an actual iptables DROP rule, hard-fenced to the
-    // soclab bridge only (see block_enforcer.py). `executed` distinguishes
-    // that from a call the fencing rejected outright (src_ip outside the
-    // lab's own docker subnet) -- still logged, nothing blocked.
+    // REAL enforcement (iptables DROP, hard-fenced to the lab subnet). executed
+    // vs a call the fence rejected (src_ip outside the lab's own docker subnet).
     const executed = !!row.executed;
     statusClass = executed ? "st-critical" : "st-muted";
-    head = `<span class="action-icon">${executed ? "\u26D4" : "\ud83d\udeab"}</span>` +
-      `<span class="tag ${statusClass}">${executed ? "IP BLOCKED (real)" : "block_ip rejected"}</span>` +
-      `<span class="ctx">${escapeHtml(row.src_ip)} \u00b7 ${executed ? "real firewall rule inserted" : "outside lab subnet -- nothing blocked"}</span>`;
-    body = escapeHtml(row.reason || "");
+    icon = executed ? "\u26D4" : "\ud83d\udeab";
+    label = executed ? `IP BLOCKED \u00b7 ${row.src_ip || ""}` : `block rejected \u00b7 ${row.src_ip || ""}`;
   } else {
     return;
   }
-  appendLine(feedDefender, buildEntry(ts, head, body), statusClass, 400, ts, `${table}:${row.id}`);
+  addTimelineEntry("def", ts, icon, statusClass, label, `${table}:${row.id}`);
 }
 
 // ---------- Attacker Campaigns (redteam_sessions + children) ----------
 
-function correlationBadge(attackerIp) {
-  if (!attackerIp) return "";
-  let match = null;
-  for (const c of candidatesById.values()) {
-    if (c.src_ip === attackerIp && (!match || c.id > match.id)) match = c;
-  }
-  if (!match) return "";
-  return `<span class="badge flagged-badge">\u{1F50E} flagged: ${escapeHtml(match.rule)} (${escapeHtml(match.severity)})</span>`;
-}
-
-function renderCampaignHeader(s) {
-  const r = s.row;
-  s.headerEl.innerHTML =
-    `<span class="campaign-id">#${r.id}</span>` +
-    `<span class="badge ${badgeClassForStatus(r.status)}">${escapeHtml(r.stage)} \u00b7 ${escapeHtml(r.status)}</span>` +
-    `<span class="campaign-meta">${escapeHtml(r.provider)}/${escapeHtml(r.model)}</span>` +
-    `<span class="campaign-meta">ip ${escapeHtml(r.attacker_ip || "?")}</span>` +
-    `<span class="campaign-meta">started ${fmtTime(r.started || r.created)}</span>` +
-    correlationBadge(r.attacker_ip);
-}
+// Each attacker activity is one chip on the right column, labelled with its
+// session (S<id>) so campaign context survives without grouping the stream
+// into per-campaign cards (which is what cost the time-alignment before).
 
 function ensureCampaign(row) {
-  let s = sessionsById.get(row.id);
-  if (!s) {
-    const placeholder = feedAttacker.querySelector(".empty");
-    if (placeholder) placeholder.remove();
-    const card = document.createElement("div");
-    card.className = "campaign";
-    card.innerHTML = `<div class="campaign-header"></div><div class="campaign-timeline"></div>`;
-    s = {
-      row, recon: [], vuln: [], loot: [], flags: [],
-      cardEl: card,
-      headerEl: card.querySelector(".campaign-header"),
-      timelineEl: card.querySelector(".campaign-timeline"),
-      lastActivity: Date.now(),
-    };
-    sessionsById.set(row.id, s);
-    feedAttacker.appendChild(card);
-    appendLine(s.timelineEl, buildEntry(row.created,
-      `<span class="tag badge-running">campaign started</span><span class="ctx">${escapeHtml(row.provider)}/${escapeHtml(row.model)}</span>`, null),
-      null, Infinity, row.created);
-  } else {
-    const old = s.row;
-    if (old.stage !== row.stage || old.status !== row.status) {
-      const now = new Date().toISOString();
-      appendLine(s.timelineEl, buildEntry(now,
-        `<span class="tag ${badgeClassForStatus(row.status)}">${escapeHtml(old.stage)}/${escapeHtml(old.status)} \u2192 ${escapeHtml(row.stage)}/${escapeHtml(row.status)}</span>`, null),
-        null, Infinity, now);
-    }
-    s.row = row;
-    s.lastActivity = Date.now();
+  const prev = sessionsById.get(row.id);
+  if (!prev) {
+    addTimelineEntry("atk", row.created, "\u2694\ufe0f", "badge-running",
+      `S${row.id} campaign \u00b7 ${row.model}`, `redteam_sessions:${row.id}`);
+  } else if (prev.row.stage !== row.stage || prev.row.status !== row.status) {
+    const cls = row.status === "completed" ? "st-good"
+      : (row.status === "error" || row.status === "incomplete") ? "st-critical" : "";
+    addTimelineEntry("atk", new Date().toISOString(), "\u{1F504}", cls,
+      `S${row.id} ${row.stage}/${row.status}`, `redteam_sessions:${row.id}`);
   }
-  renderCampaignHeader(s);
+  sessionsById.set(row.id, { row });
 }
 
 function onReconFinding(row) {
-  const s = sessionsById.get(row.session_id);
-  if (!s) return;
-  s.recon.push(row);
-  s.lastActivity = Date.now();
-  const head = `<span class="tag detection">recon</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.finding_type)} \u00b7 ${escapeHtml(row.source_tool)}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.detail, 220))), null, Infinity, row.created, `recon_findings:${row.id}`);
+  addTimelineEntry("atk", row.created, "\u{1F50D}", "",
+    `S${row.session_id} recon: ${row.target} \u00b7 ${row.finding_type}`, `recon_findings:${row.id}`);
 }
 
 function onVulnFinding(row) {
-  const s = sessionsById.get(row.session_id);
-  if (!s) return;
-  s.vuln.push(row);
-  s.lastActivity = Date.now();
-  const cls = severityStatusClass(row.severity);
-  const head = `<span class="tag ${cls}">vuln \u00b7 ${escapeHtml(row.severity)}</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.category)}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.description || "")), cls, Infinity, row.created, `vuln_findings:${row.id}`);
+  addTimelineEntry("atk", row.created, "\u{1F41B}", severityStatusClass(row.severity),
+    `S${row.session_id} vuln ${row.severity}: ${row.category}`, `vuln_findings:${row.id}`);
 }
 
 function onPendingAction(row) {
-  const s = sessionsById.get(row.session_id);
-  if (!s) return;
-  s.lastActivity = Date.now();
-  let label, cls, ts;
-  if (row.executed) { label = "executed"; cls = "st-critical"; ts = row.executed_at || row.created; }
-  else if (row.approved) { label = "approved"; cls = "st-warning"; ts = row.approved_at || row.created; }
-  else { label = "proposed"; cls = "st-muted"; ts = row.created; }
-  const approver = row.approved_by ? ` \u00b7 ${escapeHtml(row.approved_by)}` : "";
-  const head = `<span class="tag ${cls}">${label}</span><span class="ctx">${escapeHtml(row.tool)} \u2192 ${escapeHtml(row.target)}${approver}</span>`;
-  appendLine(s.timelineEl, buildEntry(ts, head, escapeHtml(row.rationale || "")), cls, Infinity, ts, `pending_actions:${row.id}`);
+  let icon, cls, verb, ts;
+  if (row.executed) { icon = "\u{1F4A5}"; cls = "st-critical"; verb = "exec"; ts = row.executed_at || row.created; }
+  else if (row.approved) { icon = "\u2705"; cls = "st-warning"; verb = "approved"; ts = row.approved_at || row.created; }
+  else { icon = "\u{1F3AF}"; cls = "st-muted"; verb = "propose"; ts = row.created; }
+  addTimelineEntry("atk", ts, icon, cls,
+    `S${row.session_id} ${verb}: ${row.tool}\u2192${row.target}`, `pending_actions:${row.id}`);
 }
 
 function onLoot(row) {
-  const s = sessionsById.get(row.session_id);
-  if (!s) return;
-  s.loot.push(row);
-  s.lastActivity = Date.now();
-  const head = `<span class="tag detection">loot</span><span class="ctx">${escapeHtml(row.tool)} \u00b7 ${escapeHtml(row.target || "")} \u00b7 exit ${row.exit_code}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(truncate(row.summary, 220))), null, Infinity, row.created, `loot:${row.id}`);
+  addTimelineEntry("atk", row.created, "\u{1F4E6}", "",
+    `S${row.session_id} loot: ${row.tool}${row.target ? " \u00b7 " + row.target : ""}`, `loot:${row.id}`);
 }
 
 function onCapturedFlag(row) {
-  const s = sessionsById.get(row.session_id);
-  if (!s) return;
-  s.flags.push(row);
-  s.lastActivity = Date.now();
   flagsTotal++;
-  const head = `<span class="tag st-critical">\u{1F6A9} flag captured</span><span class="ctx">${escapeHtml(row.target)} \u00b7 ${escapeHtml(row.method || "")}</span>`;
-  appendLine(s.timelineEl, buildEntry(row.created, head, escapeHtml(row.flag_value || "")), "st-critical", Infinity, row.created, `captured_flags:${row.id}`);
+  addTimelineEntry("atk", row.created, "\u{1F6A9}", "st-critical",
+    `S${row.session_id} FLAG: ${row.target}`, `captured_flags:${row.id}`);
   updateStat("stat-flags", flagsTotal);
-}
-
-function resortCampaigns() {
-  const arr = [...sessionsById.values()];
-  arr.sort((a, b) => {
-    const aRun = a.row.status === "running" ? 0 : 1;
-    const bRun = b.row.status === "running" ? 0 : 1;
-    if (aRun !== bRun) return aRun - bRun;
-    return (b.lastActivity || 0) - (a.lastActivity || 0);
-  });
-  for (const s of arr) feedAttacker.appendChild(s.cardEl);
 }
 
 // ---------- In-Flight LLM Calls ----------
@@ -420,8 +389,7 @@ function recomputeActiveCampaigns() {
 // than let old and new rows with the same id overwrite each other.
 function resetLocalState() {
   feedEvents.innerHTML = "";
-  feedDefender.innerHTML = "";
-  feedAttacker.innerHTML = "";
+  timelineEl.innerHTML = "";
   candidatesById.clear();
   sessionsById.clear();
   inflightById.clear();
@@ -490,7 +458,6 @@ async function loadBootstrap() {
 
   recomputeOpenCandidates();
   recomputeActiveCampaigns();
-  resortCampaigns();
 }
 
 // ---------- periodic recompute (rates, sort order) ----------
@@ -504,8 +471,6 @@ setInterval(() => {
   alertTimes = alertTimes.filter((t) => t >= cutoff1h);
   updateStat("stat-alerts-1h", alertTimes.length);
 }, 2000);
-
-setInterval(resortCampaigns, 3000);
 
 // ---------- websocket ----------
 
@@ -609,9 +574,28 @@ detailModal.addEventListener("click", (e) => { if (e.target === detailModal) clo
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetailModal(); });
 
 document.body.addEventListener("click", (e) => {
-  const line = e.target.closest(".line.clickable");
-  if (!line) return;
-  openDetailModal(line.dataset.detailKey);
+  // Telemetry feed lines and timeline rows both drill into the same modal.
+  const target = e.target.closest(".line.clickable, .tl-row[data-detail-key]");
+  if (!target) return;
+  openDetailModal(target.dataset.detailKey);
+});
+
+// ---------- legend + side filter ----------
+
+document.getElementById("legend-toggle").addEventListener("click", () => {
+  document.getElementById("legend").classList.toggle("hidden");
+});
+
+// Segmented All / Defender / Attacker filter -- collapses the stream to one
+// side (CSS hides the other's rows via timeline[data-filter]). "all" clears
+// the attribute so both show.
+document.querySelectorAll(".seg-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    const f = btn.dataset.filter;
+    if (f === "all") timelineEl.removeAttribute("data-filter");
+    else timelineEl.setAttribute("data-filter", f);
+  });
 });
 
 // ---------- tabs ----------
@@ -629,5 +613,6 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 document.querySelectorAll(".feed").forEach((f) => {
   f.innerHTML = '<div class="empty">waiting for data\u2026</div>';
 });
+timelineEl.innerHTML = '<div class="empty">waiting for data\u2026</div>';
 
 loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(connectWS);

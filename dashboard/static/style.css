@@ -19,6 +19,12 @@
   --status-serious:  #ec835a;
   --status-critical: #d03b3b;
   --status-muted:    #6b6a64;
+
+  /* Timeline side identity: defender = cool blue, attacker = warm orange.
+     Kept distinct from --status-critical (red) so a critical-severity chip
+     still reads as red on either side. */
+  --side-def: #3987e5;
+  --side-atk: #d95926;
 }
 
 @media (prefers-color-scheme: light) {
@@ -501,4 +507,116 @@ h1 .muted { color: var(--muted); font-weight: 400; }
   letter-spacing: 0.4px;
   color: var(--muted);
   margin: 0 0 6px;
+}
+
+/* ============================================================
+   Defender + Attacker: one full-width, time-ordered stream.
+   (V2 -- the earlier fixed two-column split wasted half the screen
+   whenever the defender side was sparse and squeezed labels down to
+   nothing on a phone.) Every activity is a full-width row so its label
+   is readable; side is shown by a left accent bar + coloured icon + a
+   small DEF/ATK tag, and the segmented filter collapses to one side.
+   Still a single shared time axis, newest first. Tap a row for details.
+   ============================================================ */
+
+/* .tab-panel.active forces display:flex, which defaults to row -- so the
+   toolbar and the timeline would sit SIDE BY SIDE, squeezing the stream into
+   a narrow right strip (observed live on a phone). Stack them vertically and
+   pin full width; min-width:0 lets the nowrap row labels ellipsize instead of
+   forcing horizontal page overflow. */
+.timeline-wrap {
+  background: var(--surface-1);
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+}
+.timeline { min-width: 0; }
+
+.tl-toolbar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--gridline);
+}
+.seg { display: inline-flex; background: var(--surface-3); border-radius: 8px; padding: 2px; }
+.seg-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: none; background: transparent; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 600;
+  color: var(--muted); padding: 5px 11px; border-radius: 6px;
+}
+.seg-btn.active { background: var(--surface-1); color: var(--text-primary); box-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+.tl-side-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.side-def { background: var(--side-def); }
+.side-atk { background: var(--side-atk); }
+
+.legend-toggle {
+  width: 24px; height: 24px; border-radius: 50%; flex: none;
+  border: 1px solid var(--border); background: var(--surface-3);
+  color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; line-height: 1; padding: 0;
+}
+.legend {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  padding: 10px 12px; background: var(--surface-2);
+  border-bottom: 1px solid var(--gridline); font-size: 12px;
+}
+.legend-group { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.legend-title { font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; font-size: 11px; }
+.legend-title.side-def { color: var(--side-def); }
+.legend-title.side-atk { color: var(--side-atk); }
+.legend-item { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); }
+.legend-item .ic { font-size: 14px; }
+
+.timeline { display: flex; flex-direction: column; }
+
+/* Full-width row: [accent] [icon] [tag] [label ....] [time] */
+.tl-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 12px 9px 10px;
+  border-bottom: 1px solid var(--gridline);
+  border-left: 3px solid var(--row-accent, transparent);
+  cursor: pointer;
+  min-width: 0;
+}
+.tl-row:active { background: color-mix(in srgb, var(--surface-2) 70%, transparent); }
+.tl-row.def { --row-accent: var(--side-def); }
+.tl-row.atk { --row-accent: var(--side-atk); }
+
+.tl-ic { font-size: 17px; line-height: 1; flex: none; width: 22px; text-align: center; }
+.tl-tag {
+  flex: none; font-size: 9.5px; font-weight: 800; letter-spacing: 0.4px;
+  padding: 2px 5px; border-radius: 4px; text-transform: uppercase;
+}
+.tl-row.def .tl-tag { color: var(--side-def); background: color-mix(in srgb, var(--side-def) 18%, transparent); }
+.tl-row.atk .tl-tag { color: var(--side-atk); background: color-mix(in srgb, var(--side-atk) 18%, transparent); }
+.tl-label {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 13px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-time {
+  flex: none; font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Severity: a critical row (malicious verdict, real block, crit vuln,
+   captured flag) overrides the side accent with red + a faint wash. */
+.tl-row.st-critical { --row-accent: var(--status-critical); background: color-mix(in srgb, var(--status-critical) 8%, transparent); }
+.tl-row.st-serious  { --row-accent: var(--status-serious); }
+.tl-row.st-warning  { --row-accent: var(--status-warning); }
+.tl-row.st-good     .tl-ic { filter: none; }
+.tl-row.st-muted    { opacity: 0.68; }
+
+/* Segmented filter: collapse to one side by hiding the other's rows. */
+.timeline[data-filter="def"] .tl-row.atk { display: none; }
+.timeline[data-filter="atk"] .tl-row.def { display: none; }
+
+.timeline .empty { padding: 26px 14px; color: var(--muted); font-style: italic; }
+
+@media (max-width: 560px) {
+  .seg-btn { padding: 5px 9px; font-size: 11.5px; }
+  .tl-row { gap: 7px; padding: 9px 10px 9px 9px; }
+  .tl-label { font-size: 12.5px; }
 }

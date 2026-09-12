@@ -259,7 +259,14 @@ async def index():
     for asset in ("style.css", "app.js"):
         mtime = int((STATIC_DIR / asset).stat().st_mtime)
         html = html.replace(f"/static/{asset}", f"/static/{asset}?v={mtime}")
-    return HTMLResponse(html)
+    # The asset URLs above are cache-busted by mtime, but that only helps if
+    # the browser actually re-fetches THIS document to see the new URLs --
+    # otherwise a cached index.html keeps pointing at the old ?v= assets and
+    # edits never show (observed live: a phone browser served a stale page for
+    # a whole redesign iteration). no-store forces a fresh document every load;
+    # the document is tiny and served locally, so there's nothing to save by
+    # caching it.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
