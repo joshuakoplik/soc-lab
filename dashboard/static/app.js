@@ -3,6 +3,8 @@
 
 const feedEvents = document.getElementById("feed-events");
 const timelineEl = document.getElementById("timeline");   // the unified defender|attacker time axis
+const feedDiary = document.getElementById("feed-diary");  // attacker's own reasoning, streamed unedited
+const diariedIds = new Set();  // pending_action ids already narrated (they re-fire on approve/execute)
 
 const candidatesById = new Map();   // id -> candidate row
 const sessionsById = new Map();     // id -> {row}  (kept for stats + correlation, no per-campaign DOM anymore)
@@ -145,6 +147,97 @@ const VERDICT_ICON = {
   needs_human: "\u{1F575}️", error: "❓",
 };
 
+// ---------- Attacker Diary (streamed rationales) ----------
+// The attacker's own reasoning, unedited, in the order it happened. Sourced
+// straight from pending_actions.rationale (the "why" it wrote before each
+// action) and vuln_findings.description (what it judged worth exploiting) --
+// no model call added, just surfacing text the agent already produces. Read
+// top-to-bottom like a diary (oldest first); tap a line for the real action.
+
+function addDiaryEntry(ts, kind, kindClass, context, text, detailKey) {
+  if (!text) return;
+  const placeholder = feedDiary.querySelector(".empty");
+  if (placeholder) placeholder.remove();
+
+  const entry = document.createElement("div");
+  entry.className = "diary-entry" + (kindClass ? " " + kindClass : "");
+  const epoch = ts != null ? toEpoch(ts) : Date.now();
+  entry.dataset.epoch = epoch;
+  if (detailKey) { entry.dataset.detailKey = detailKey; entry.classList.add("clickable"); }
+  entry.innerHTML =
+    `<div class="diary-meta"><span class="diary-time">${fmtClock(ts)}</span>` +
+    `<span class="diary-kind ${kindClass || ""}">${escapeHtml(kind)}</span>` +
+    (context ? `<span class="diary-ctx">${escapeHtml(context)}</span>` : "") + `</div>` +
+    `<div class="diary-text">${escapeHtml(text)}</div>`;
+
+  // Newest at top, inserted by real timestamp (bootstrap replays sorted, live
+  // pushes interleave). No inner scrollbox -- the whole page scrolls, so a new
+  // entry appears at the top without moving the reader's scroll position.
+  let ref = feedDiary.firstChild;
+  while (ref && ref.dataset && Number(ref.dataset.epoch) > epoch) ref = ref.nextSibling;
+  feedDiary.insertBefore(entry, ref);
+
+  while (feedDiary.children.length > 600) feedDiary.removeChild(feedDiary.lastChild);
+}
+
+// Recon/loot commentary is HARNESS-generated (deterministic templating of the
+// recorded fields -- no model call, no narrative construction). Two tiers,
+// kept visually distinct from the model's own voice:
+//   kind-recon    -- carries the attacker's OWN text (its search query, its
+//                    stated fetch reason, the exploit it chose to stage)
+//   kind-observed -- plain facts the harness logged (nmap ran, a loot result)
+function _parseDetail(s) { try { return JSON.parse(s || "{}"); } catch (e) { return {}; } }
+function _shortUrl(u) { return (u || "").replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, ""); }
+function _firstLine(s) {
+  const line = (s || "").split("\n").map((x) => x.trim()).find((x) => x.length);
+  return truncate(line || "", 100);
+}
+
+function addReconDiary(row) {
+  const d = _parseDetail(row.detail);
+  switch (row.finding_type) {
+    case "port_scan":
+      return addDiaryEntry(row.created, "scan", "kind-observed", row.target,
+        `Ran nmap against ${row.target}`, `recon_findings:${row.id}`);
+    case "web_search":
+      return addDiaryEntry(row.created, "search", "kind-recon", null,
+        `Searched: "${d.query || ""}"`, `recon_findings:${row.id}`);
+    case "fetch_url":
+      return addDiaryEntry(row.created, "fetch", "kind-recon", _shortUrl(d.url),
+        d.reason || `Fetched ${_shortUrl(d.url)}`, `recon_findings:${row.id}`);
+    case "stage_artifact":
+      return addDiaryEntry(row.created, "staged", "kind-recon", `${d.file_count || "?"} files`,
+        `Pulled in exploit code: ${_shortUrl(d.url)}`, `recon_findings:${row.id}`);
+    // http_path probes (dozens per run) stay on the timeline only -- too
+    // low-signal individually to belong in a readable diary.
+    default:
+      return;
+  }
+}
+
+// Attach a loot result to the diary entry of the action that produced it (its
+// rationale is already the diary line), so an action reads "why -> got what".
+// Falls back to a standalone observed line when there's no owning action
+// (recon-stage nmap loot) or its entry isn't present.
+function addLootDiary(row) {
+  const got = _firstLine(row.summary);
+  if (!got) return;
+  if (row.pending_action_id) {
+    const host = feedDiary.querySelector(`.diary-entry[data-detail-key="pending_actions:${row.pending_action_id}"]`);
+    if (host) {
+      const t = host.querySelector(".diary-text");
+      if (t && !t.querySelector(".diary-got")) {
+        const g = document.createElement("div");
+        g.className = "diary-got";
+        g.textContent = "→ got: " + got;
+        t.appendChild(g);
+      }
+      return;
+    }
+  }
+  addDiaryEntry(row.created, "loot", "kind-observed", row.tool, "→ got: " + got, `loot:${row.id}`);
+}
+
 // ---------- Live Telemetry (events table) ----------
 
 function eventDetail(row) {
@@ -248,11 +341,15 @@ function ensureCampaign(row) {
 function onReconFinding(row) {
   addTimelineEntry("atk", row.created, "\u{1F50D}", "",
     `S${row.session_id} recon: ${row.target} \u00b7 ${row.finding_type}`, `recon_findings:${row.id}`);
+  addReconDiary(row);
 }
 
 function onVulnFinding(row) {
   addTimelineEntry("atk", row.created, "\u{1F41B}", severityStatusClass(row.severity),
     `S${row.session_id} vuln ${row.severity}: ${row.category}`, `vuln_findings:${row.id}`);
+  // Diary: what it judged worth exploiting, in its own words.
+  addDiaryEntry(row.created, "found", "kind-found", `${row.severity} · ${row.category}`,
+    row.description, `vuln_findings:${row.id}`);
 }
 
 function onPendingAction(row) {
@@ -262,11 +359,19 @@ function onPendingAction(row) {
   else { icon = "\u{1F3AF}"; cls = "st-muted"; verb = "propose"; ts = row.created; }
   addTimelineEntry("atk", ts, icon, cls,
     `S${row.session_id} ${verb}: ${row.tool}\u2192${row.target}`, `pending_actions:${row.id}`);
+  // Diary: the "why" it wrote before acting. Once per action (pending_actions
+  // re-fire on approve/execute), timestamped at propose so it reads in order.
+  if (row.rationale && !diariedIds.has(row.id)) {
+    diariedIds.add(row.id);
+    addDiaryEntry(row.created, "action", "kind-action", `${row.tool} \u2192 ${row.target}`,
+      row.rationale, `pending_actions:${row.id}`);
+  }
 }
 
 function onLoot(row) {
   addTimelineEntry("atk", row.created, "\u{1F4E6}", "",
     `S${row.session_id} loot: ${row.tool}${row.target ? " \u00b7 " + row.target : ""}`, `loot:${row.id}`);
+  addLootDiary(row);
 }
 
 function onCapturedFlag(row) {
@@ -274,6 +379,23 @@ function onCapturedFlag(row) {
   addTimelineEntry("atk", row.created, "\u{1F6A9}", "st-critical",
     `S${row.session_id} FLAG: ${row.target}`, `captured_flags:${row.id}`);
   updateStat("stat-flags", flagsTotal);
+}
+
+// wins are the attacker's OWN milestone claims (record_win) -- the diary's
+// climax, in its own words. Shown as-is: the whole point is to see them next
+// to the hard facts, overclaims and all, not to reconcile them.
+function winTierClass(tier) {
+  return { shell_or_creds: "st-critical", exploit_confirmed: "st-serious",
+    vuln_identified: "st-warning", unconfirmed: "st-muted" }[tier] || "st-muted";
+}
+
+function onWin(row) {
+  const cls = winTierClass(row.evidence_tier);
+  addTimelineEntry("atk", row.created, "\u{1F3C6}", cls,
+    `S${row.session_id} WIN [${row.evidence_tier}]: ${truncate(row.description, 70)}`,
+    `wins:${row.id}`);
+  addDiaryEntry(row.created, "milestone", "kind-milestone",
+    `claims: ${row.evidence_tier}`, row.description, `wins:${row.id}`);
 }
 
 // ---------- In-Flight LLM Calls ----------
@@ -390,6 +512,8 @@ function recomputeActiveCampaigns() {
 function resetLocalState() {
   feedEvents.innerHTML = "";
   timelineEl.innerHTML = "";
+  feedDiary.innerHTML = "";
+  diariedIds.clear();
   candidatesById.clear();
   sessionsById.clear();
   inflightById.clear();
@@ -422,6 +546,7 @@ function handleMessage(msg) {
     case "pending_actions": onPendingAction(row); break;
     case "loot": onLoot(row); break;
     case "captured_flags": onCapturedFlag(row); break;
+    case "wins": onWin(row); break;
     case "llm_calls": onLlmCall(row); break;
     case "_error": console.error("poll error:", row.detail); break;
   }
@@ -448,7 +573,7 @@ async function loadBootstrap() {
   for (const row of data.redteam_sessions.rows) handleMessage({ table: "redteam_sessions", row });
 
   const campaignRows = [];
-  for (const t of ["recon_findings", "vuln_findings", "pending_actions", "loot", "captured_flags"]) {
+  for (const t of ["recon_findings", "vuln_findings", "pending_actions", "loot", "captured_flags", "wins"]) {
     for (const row of data[t].rows) campaignRows.push({ table: t, row });
   }
   campaignRows.sort(byCreatedAsc);
@@ -526,7 +651,7 @@ const TABLE_LABELS = {
   human_pages: "Page On-Call", block_recommendations: "Block Recommendation",
   block_ip_calls: "Block IP Call", redteam_sessions: "Campaign Session",
   recon_findings: "Recon Finding", vuln_findings: "Vuln Finding", pending_actions: "Pending Action",
-  loot: "Loot", captured_flags: "Captured Flag", llm_calls: "In-Flight LLM Call",
+  loot: "Loot", captured_flags: "Captured Flag", wins: "Milestone / Win", llm_calls: "In-Flight LLM Call",
 };
 
 function looksLikeJson(s) {
@@ -535,9 +660,16 @@ function looksLikeJson(s) {
 }
 
 function renderDetailBody(row) {
+  // The attacker's rationale (or a finding's description) is the "why" behind
+  // the row -- pull it out and show it prominently at the top instead of
+  // buried alphabetically among input_json/result_json/etc.
+  const why = row.rationale || row.description || null;
+  const whyField = row.rationale ? "rationale" : row.description ? "description" : null;
+
   const dlRows = [];
   const blocks = [];
   for (const [k, v] of Object.entries(row)) {
+    if (k === whyField) continue;  // shown prominently below, don't repeat it in the field list
     if (v === null || v === undefined || v === "") { dlRows.push([k, "—"]); continue; }
     let sv = typeof v === "string" ? v : JSON.stringify(v);
     if (typeof v === "string" && looksLikeJson(sv)) {
@@ -546,7 +678,13 @@ function renderDetailBody(row) {
     if (sv.length > 160 || sv.includes("\n")) blocks.push([k, sv]);
     else dlRows.push([k, sv]);
   }
-  let html = "<dl>" + dlRows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join("") + "</dl>";
+  let html = "";
+  if (why) {
+    html += `<div class="detail-why"><div class="detail-why-label">` +
+      `${row.rationale ? "why the attacker did this" : "reasoning"}</div>` +
+      `<div class="detail-why-text">${escapeHtml(why)}</div></div>`;
+  }
+  html += "<dl>" + dlRows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join("") + "</dl>";
   for (const [k, v] of blocks) html += `<h4>${escapeHtml(k)}</h4><pre>${escapeHtml(v)}</pre>`;
   return html;
 }
@@ -575,7 +713,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetai
 
 document.body.addEventListener("click", (e) => {
   // Telemetry feed lines and timeline rows both drill into the same modal.
-  const target = e.target.closest(".line.clickable, .tl-row[data-detail-key]");
+  const target = e.target.closest(".line.clickable, .tl-row[data-detail-key], .diary-entry.clickable");
   if (!target) return;
   openDetailModal(target.dataset.detailKey);
 });
@@ -614,5 +752,6 @@ document.querySelectorAll(".feed").forEach((f) => {
   f.innerHTML = '<div class="empty">waiting for data\u2026</div>';
 });
 timelineEl.innerHTML = '<div class="empty">waiting for data\u2026</div>';
+feedDiary.innerHTML = '<div class="empty">waiting for the attacker to reason\u2026</div>';
 
 loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(connectWS);

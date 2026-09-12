@@ -69,6 +69,7 @@ TABLES = {
     "pending_actions":       ("pending_action",        150),
     "loot":                  ("loot",                  150),
     "captured_flags":        ("captured_flag",          60),
+    "wins":                  ("win",                    80),
     "llm_calls":             ("llm_call",               40),
     "northwind_identities":  ("northwind_identity",     100),
     "northwind_chat_turns":  ("northwind_chat_turn",    300),

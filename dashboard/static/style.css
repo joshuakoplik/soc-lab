@@ -620,3 +620,99 @@ h1 .muted { color: var(--muted); font-weight: 400; }
   .tl-row { gap: 7px; padding: 9px 10px 9px 9px; }
   .tl-label { font-size: 12.5px; }
 }
+
+/* ============================================================
+   Attacker Diary tab + the prominent rationale block in the
+   detail modal. Both just surface pending_actions.rationale /
+   vuln_findings.description the agent already writes -- no new data.
+   ============================================================ */
+
+/* Diary flows with the PAGE -- no inner scrollbox (a nested scroll area is
+   awkward on mobile). Newest entries insert at the top (see addDiaryEntry). */
+#panel-diary { height: auto; }
+.diary {
+  flex: none;
+  overflow: visible;
+  padding: 10px 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diary-entry {
+  border-left: 3px solid var(--side-atk);
+  background: var(--surface-2);
+  border-radius: 0 8px 8px 0;
+  padding: 8px 12px;
+}
+.diary-entry.clickable { cursor: pointer; }
+.diary-entry.clickable:active { background: color-mix(in srgb, var(--surface-3) 70%, transparent); }
+.diary-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.diary-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.diary-kind {
+  font-size: 9.5px; font-weight: 800; letter-spacing: 0.4px; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px;
+  color: var(--side-atk); background: color-mix(in srgb, var(--side-atk) 18%, transparent);
+}
+.diary-kind.kind-found { color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 18%, transparent); }
+.diary-ctx { font-size: 11px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+.diary-text {
+  font-size: 14px; line-height: 1.5; color: var(--text-primary);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* Prominent "why" block at the top of any drill-down that has reasoning. */
+.detail-why {
+  border-left: 3px solid var(--side-atk);
+  background: color-mix(in srgb, var(--side-atk) 10%, var(--surface-2));
+  border-radius: 0 8px 8px 0;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.detail-why-label {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;
+  color: var(--side-atk); margin-bottom: 5px;
+}
+.detail-why-text { font-size: 14px; line-height: 1.55; color: var(--text-primary); white-space: pre-wrap; }
+
+/* ============================================================
+   Desktop width handling. The layout is mobile-first single-column;
+   on a wide screen, don't let it sprawl edge-to-edge (rows end up with
+   the label marooned left and the timestamp way out right). Cap the
+   whole console to a readable column, centered, with the page behind it
+   as a subtle frame. Mobile (< 900px) is untouched -- full width.
+   ============================================================ */
+@media (min-width: 900px) {
+  html { background: var(--surface-2); }
+  body {
+    max-width: 1100px;
+    margin-inline: auto;
+    box-shadow: 0 0 0 1px var(--border);
+  }
+  /* A touch more breathing room for the row label so the time sits a
+     little closer to it than the full column edge. */
+  .tl-row .tl-label { max-width: 68ch; }
+}
+
+/* wins = the attacker's milestone claims -- gold accent so the diary's
+   climax stands out from the running action/found lines. */
+.diary-kind.kind-milestone { color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 20%, transparent); }
+.diary-entry.kind-milestone { border-left-color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 9%, var(--surface-2)); }
+
+/* Recon/loot diary tiers. kind-recon = the attacker's own investigative beats
+   (its search query / fetch reason / staged exploit), aqua. kind-observed =
+   plain harness facts (nmap ran, a loot result), dimmed so they're secondary
+   to the model's own reasoning. .diary-got = a loot result folded onto the
+   action that produced it. */
+.diary-kind.kind-recon    { color: var(--series-suricata); background: color-mix(in srgb, var(--series-suricata) 16%, transparent); }
+.diary-kind.kind-observed { color: var(--muted); background: color-mix(in srgb, var(--muted) 20%, transparent); }
+.diary-entry.kind-recon    { border-left-color: var(--series-suricata); }
+.diary-entry.kind-observed { border-left-color: var(--gridline); opacity: 0.85; }
+.diary-entry.kind-observed .diary-text { color: var(--text-secondary); font-size: 13px; }
+.diary-got {
+  margin-top: 5px;
+  color: var(--muted);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}
