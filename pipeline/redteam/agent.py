@@ -3160,6 +3160,28 @@ def _extract_typed_state_from_execution(conn, session_id, tool, target, params, 
             privilege = "root" if _ROOT_UID_RE.search(text) else None
             _record_state_foothold(conn, session_id, target, f"msf_run_module:{params.get('module')}",
                                     privilege, "msf_run_module", pending_action_id)
+        elif tool == "shell_exec" and result.exit_code == 0 and "uid=0(root)" in text:
+            # shell_exec is free-form and runs INSIDE soc-attacker, which is
+            # itself root -- so a bare `id` shows uid=0(root) with no bearing on
+            # the target, and there's no session to anchor on the way ssh_exec/
+            # msf have. Credit a root foothold only when the command was aimed
+            # at a target (references one of the active mode's target names),
+            # making it plausible the uid=0(root) came back from code executing
+            # ON the target -- an RCE payload's response -- rather than a local
+            # id on the attacker box. A deliberate heuristic: it recovers the
+            # genuine shell_exec-only target root (wordpress CVE-2025-32463,
+            # struts S2-045) that state_footholds silently dropped before, so
+            # audit_session grounds it as shell_or_creds+root instead of
+            # under-crediting a real win -- while still rejecting attacker-local
+            # root. Errs toward crediting a real foothold, never toward
+            # inventing one from nothing (the "(root)" literal + target-directed
+            # command are both required, and both are far harder to trip by
+            # accident than a bare uid=0).
+            cmd = params.get("command") or ""
+            mode_targets = lab_modes.active_config().get("targets") or ()
+            if any(t and t in cmd for t in mode_targets):
+                _record_state_foothold(conn, session_id, target, "shell_exec", "root",
+                                        "shell_exec", pending_action_id)
         conn.commit()
     except Exception:  # noqa: BLE001 -- best-effort enrichment, never blocks the real result
         pass
