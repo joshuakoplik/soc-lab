@@ -674,3 +674,22 @@ h1 .muted { color: var(--muted); font-weight: 400; }
   color: var(--side-atk); margin-bottom: 5px;
 }
 .detail-why-text { font-size: 14px; line-height: 1.55; color: var(--text-primary); white-space: pre-wrap; }
+
+/* ============================================================
+   Desktop width handling. The layout is mobile-first single-column;
+   on a wide screen, don't let it sprawl edge-to-edge (rows end up with
+   the label marooned left and the timestamp way out right). Cap the
+   whole console to a readable column, centered, with the page behind it
+   as a subtle frame. Mobile (< 900px) is untouched -- full width.
+   ============================================================ */
+@media (min-width: 900px) {
+  html { background: var(--surface-2); }
+  body {
+    max-width: 1100px;
+    margin-inline: auto;
+    box-shadow: 0 0 0 1px var(--border);
+  }
+  /* A touch more breathing room for the row label so the time sits a
+     little closer to it than the full column edge. */
+  .tl-row .tl-label { max-width: 68ch; }
+}
