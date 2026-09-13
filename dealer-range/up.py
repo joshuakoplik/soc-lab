@@ -30,6 +30,8 @@ operator/assistant at invocation (see lab-mode.sh). Writes:
 import glob
 import json
 import os
+import secrets
+import string
 import sys
 
 try:
@@ -41,6 +43,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, ".cache", "vulhub")
 RUN = os.path.join(HERE, ".run")
 DEALER_NET = "soclab-dealer"
+
+
+def rand_host():
+    """A meaningless, DNS-valid hostname (starts with a letter). Recon-from-zero
+    means the agent must learn what the box is by probing it, not from its name:
+    docker's reverse-DNS hands back a container's NAME (confirmed: `getent hosts
+    <ip>` returned `dealer-range-n8n-1.soclab-dealer`), so a name derived from the
+    Vulhub service (`n8n`) or the mode (`dealer`) leaks both the software AND the
+    fact that this is a disposable lab. An opaque random name leaks neither."""
+    return secrets.choice(string.ascii_lowercase) + "".join(
+        secrets.choice(string.ascii_lowercase + string.digits) for _ in range(7)
+    )
 
 
 def die(msg, code=2):
@@ -78,22 +92,41 @@ def resolve(target):
 
 
 def rewrite(doc):
-    """Mutate a loaded compose dict in place; return the primary service name."""
+    """Mutate a loaded compose dict in place; return (primary service name,
+    opaque hostname the primary answers to)."""
     services = doc.get("services") or {}
     if not services:
         die("source compose has no services")
     primary = next((n for n, s in services.items() if s.get("ports")), None)
     if primary is None:
         primary = next(iter(services))
+    hostname = rand_host()              # what soc-attacker reaches the target as
     for name, svc in services.items():
         svc.pop("ports", None)          # no host exposure
         svc.pop("network_mode", None)   # would conflict with our networks: block
-        aliases = [name] + (["target"] if name == primary else [])
+        svc.pop("container_name", None)  # source may hard-code a leaky name
+        # Every service gets an OPAQUE container_name so reverse-DNS of the box
+        # leaks nothing (docker's PTR answers with the container name). The
+        # primary -- the one the attacker reaches -- answers to the random
+        # `hostname` and NOTHING else (no compose service name like "n8n", no
+        # "target": both would give away software / lab identity for free).
+        # Non-primary services keep their compose-service-name alias, because the
+        # app resolves its db/cache by that name internally, but still get an
+        # opaque container_name of their own. (Edge case: a source compose whose
+        # primary is dialed BY NAME by a sibling would need its name kept -- rare
+        # for the ports/ingress service; such a target just won't come up and the
+        # operator picks another, same as an image that won't boot.)
+        if name == primary:
+            svc["container_name"] = hostname
+            aliases = [hostname]
+        else:
+            svc["container_name"] = rand_host()
+            aliases = [name]
         svc["networks"] = {DEALER_NET: {"aliases": aliases}}
     doc["services"] = services
     doc["networks"] = {DEALER_NET: {"external": True}}
     doc.pop("version", None)            # obsolete key -> silence the warning
-    return primary
+    return primary, hostname
 
 
 def main():
@@ -110,18 +143,24 @@ def main():
             doc = yaml.safe_load(f) or {}
         project_dir = srcdir
 
-    primary = rewrite(doc)
+    primary, hostname = rewrite(doc)
 
     os.makedirs(RUN, exist_ok=True)
     with open(os.path.join(RUN, "compose.yml"), "w") as f:
         yaml.safe_dump(doc, f, sort_keys=False)
     with open(os.path.join(RUN, "project_dir"), "w") as f:
         f.write(project_dir + "\n")
+    # `hostname` is the ONLY thing the agent is told about the box (via
+    # lab_modes.active_config()["targets"], which reads it back from here); the
+    # rest of state.json is operator-only. `target` is the Vulhub path the
+    # operator chose, NOT anything the agent sees.
     with open(os.path.join(RUN, "state.json"), "w") as f:
         json.dump({"target": target, "kind": kind, "primary_service": primary,
-                   "source": cf or target, "project_dir": project_dir}, f, indent=2)
+                   "hostname": hostname, "source": cf or target,
+                   "project_dir": project_dir}, f, indent=2)
 
-    print(f"[dealer] target={target} ({kind}); service '{primary}' aliased 'target' on {DEALER_NET}")
+    print(f"[dealer] target={target} ({kind}); service '{primary}' reachable only as "
+          f"opaque '{hostname}' on {DEALER_NET}")
     print(f"[dealer] wrote .run/compose.yml (project_dir={project_dir})")
 
 

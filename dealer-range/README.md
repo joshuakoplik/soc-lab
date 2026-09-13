@@ -22,8 +22,13 @@ The target is chosen **by argument**, not by an in-code discovery/random engine
    to update). This is the only network step; picking a target is out-of-band.
 2. `up.py <target>` resolves the target to a docker-compose, then **rewrites** it
    into `.run/compose.yml`: strips all host `ports:`, puts every service on the
-   internal `soclab-dealer` bridge, and aliases the externally-facing service as
-   **`target`** so `soc-attacker` reaches it as `target.soclab-dealer`.
+   internal `soclab-dealer` bridge, gives every container an **opaque random
+   name**, and makes the externally-facing service answer to a single opaque
+   random hostname (e.g. `k3f9a2xq`) — never its Vulhub service name and never
+   `target`. That hostname is written to `.run/state.json` and is the *only*
+   thing the agent is told about the box (via `lab_modes.active_config`), so
+   reverse-DNS/aliases leak neither the software nor that this is a lab —
+   recon from zero. `soc-attacker` reaches it as `<hostname>.soclab-dealer`.
 3. `docker compose -p dealer-range up -d --build` brings it up; `make wait`
    health-gates it (fail loud → pick another).
 4. `make wire` (`wire.py`) makes the healthy target **observable to the
