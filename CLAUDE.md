@@ -44,6 +44,33 @@ docker compose ps / logs -f <svc> / down [-v]
   A `down` leaves the postgres volume alone; `make -C northwind-range reset`
   is what re-seeds corpus/entitlements/records. See `northwind-range/SPEC.md`
   and `REDTEAM_MODE_SPEC.md`.
+- **dealer**: "dealer's choice" — an ephemeral, docker-based vulnerable target
+  **live-fetched from Vulhub** (`github.com/vulhub/vulhub`, the docker analog of
+  VulnHub; VulnHub's own VM images can't run here — the host has no
+  virtualization). Unlike the fixed modes it takes a **target argument**
+  (`up dealer <software>/<CVE>` or a docker image ref) — picking one is the
+  operator's/assistant's call, not an in-code selection engine. Like northwind
+  it's an externally-managed range (`dealer-range/`, own `Makefile`,
+  lab-mode.sh delegates via `make -C`), but UNLIKE northwind it's a plain
+  network target (`adapter: None`, attacked via `shell_exec`) on a real
+  `net_topology` subnet — a new **internal** bridge `soclab-dealer`
+  (`10.211.40.0/24`) giving the untrusted image structural no-egress with no
+  iptables. The chosen target is exposed to soc-attacker only under an **opaque,
+  per-standup random hostname** (e.g. `k3f9a2xq`) — never the Vulhub service name
+  or the word `target`, and every container gets an opaque name too, so even
+  reverse-DNS leaks neither the software nor that this is a lab; that random name
+  is the sole thing the agent is told (`up.py` writes it to
+  `dealer-range/.run/state.json` → `lab_modes.active_config()["targets"]`), and
+  what the box actually is stays operator-only (recon from zero). A fetched image has no wazuh agent and
+  joins the bridge after Suricata's interface discovery, so on standup
+  `dealer-range/wire.py` (`make wire`, run at the end of `make up`) makes it
+  observable: it restarts Suricata if needed to pick up `soclab-dealer0`
+  (network leg) and runs one LLM turn to tail the target's container logs into
+  two **permanent** dealer buckets in `wazuh/ossec.conf`
+  (`/lab-logs/dealer/dealer.{log,json}`) so logs reach Wazuh (log leg) — a
+  deterministic stdout→syslog baseline guarantees the defender is never fully
+  blind even if the model turn fails. Teardown on switch/down is complete
+  (tailers killed, `logs/dealer/` cleared). See `dealer-range/README.md`.
 
 `lab_mode.json` (gitignored) is the single source of truth for which mode is
 *actually* running; `pipeline/redteam/lab_modes.py` reads it so the red-team agent's

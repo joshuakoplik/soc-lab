@@ -176,6 +176,35 @@ WORDPRESS = {
     "adapter": None,
 }
 
+# "Dealer's choice": an ephemeral, docker-based vulnerable target live-fetched
+# from Vulhub (github.com/vulhub/vulhub), stood up by dealer-range/ and reached
+# as the single alias "target" on the internal soclab-dealer bridge (see
+# net_topology.DEALER). Shaped like WORDPRESS: a lone network target attacked
+# through shell_exec -- the other gated tools are hardcoded to specific stock
+# targets (hydra->cowrie, sqlmap->nginx) and mean nothing against an arbitrary
+# box, whereas shell_exec is the universal "run any tool against target" lane
+# (nmap/curl/exploit chains, exactly how wordpress was rooted). The model is
+# never told WHAT the target is -- dealer's choice is recon-from-zero, and the
+# actual image is recorded only in dealer-range/.run/state.json for the
+# operator. expected_flags is None: Vulhub envs aren't CTF flag boxes, so
+# success is a foothold/RCE (state_footholds/wins), not a captured FLAG{...}.
+DEALER = {
+    # Placeholder only: active_config() replaces this with the per-standup opaque
+    # hostname from dealer-range/.run/state.json (up.py). Recon-from-zero -- the
+    # agent is never told "target" or the Vulhub service name.
+    "targets": ("target",),
+    "gated_tools": ("shell_exec",),
+    "msf_modules": {},
+    "expected_flags": None,
+    "network": "dealer",
+    "recon_tools": ("nmap_scan", "http_probe", "get_recon_findings", "web_search",
+                     "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
+                      "raise_vuln_finding", "propose_action", "rotate_ip", "web_search",
+                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
+    "adapter": None,
+}
+
 # The first adapter-backed mode -- see agent.py's northwind_adapter.py and
 # REDTEAM_MODE_SPEC.md. No container targets, no net_topology entry (the
 # app lives in a completely separate docker-compose project, reached
@@ -212,7 +241,7 @@ NORTHWIND = {
     },
 }
 
-MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS, "northwind": NORTHWIND}
+MODES = {"easy": EASY, "hard": HARD, "wordpress": WORDPRESS, "dealer": DEALER, "northwind": NORTHWIND}
 
 
 def current_mode():
@@ -224,5 +253,31 @@ def current_mode():
     return mode if mode in MODES else DEFAULT_MODE
 
 
+DEALER_STATE_FILE = os.path.join(ROOT, "dealer-range", ".run", "state.json")
+
+
+def _dealer_hostname():
+    """The opaque hostname up.py assigned this dealer standup (recon-from-zero:
+    the agent's target name must be the meaningless name the box actually answers
+    to, never "target" or the Vulhub service name). Returns None if the range
+    isn't up, in which case active_config() falls back to DEALER's placeholder."""
+    try:
+        with open(DEALER_STATE_FILE) as f:
+            return json.load(f).get("hostname") or None
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
 def active_config(mode=None):
-    return MODES[mode or current_mode()]
+    mode = mode or current_mode()
+    cfg = MODES[mode]
+    if mode == "dealer":
+        # DEALER["targets"] is a placeholder; the real, per-standup opaque
+        # hostname lives in dealer-range/.run/state.json (written by up.py).
+        # Overriding here keeps every consumer -- validate_target, the agent's
+        # _TARGETS/tool schemas, resolve_target_ip -- pointed at the actual name
+        # without any of them needing to know about the dealer range.
+        host = _dealer_hostname()
+        if host:
+            cfg = {**cfg, "targets": (host,)}
+    return cfg

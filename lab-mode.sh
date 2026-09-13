@@ -59,6 +59,10 @@ fi
 STATE_FILE="lab_mode.json"
 VERB="${1:-status}"
 MODE="${2:-}"
+# Third positional, used only by `dealer` mode: the Vulhub target to stand up
+# (e.g. "struts2/CVE-2017-5638", or a plain docker image ref). Every other mode
+# ignores it.
+TARGET="${3:-}"
 
 write_state() {
   printf '{"mode": "%s", "switched_at": "%s"}\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_FILE"
@@ -81,6 +85,12 @@ bootstrap() {
 # one, a stale working directory aims the command at the wrong stack, and `down` is not
 # a mistake you want to make twice.
 NORTHWIND_DIR="northwind-range"
+
+# The "dealer's choice" range -- like northwind, a separate concern with its own
+# Makefile that this script only ever shells out to via `make -C`. UNLIKE
+# northwind, it DOES live on a net_topology subnet (soclab-dealer), so it IS
+# bootstrapped normally. Its Makefile takes the chosen target from $DEALER_TARGET.
+DEALER_DIR="dealer-range"
 
 # northwind's containers can start without this and then fail confusingly deep in a
 # chat request, so fail here instead, where the cause is still obvious.
@@ -113,8 +123,15 @@ mode_up() {
       northwind_precheck
       make -C "$NORTHWIND_DIR" up
       ;;
+    dealer)
+      # $2 is the Vulhub target (required); the range's Makefile reads it from
+      # DEALER_TARGET, resolves it to a compose, rewrites it onto soclab-dealer,
+      # and brings it up contained.
+      [ -n "${2:-}" ] || { echo "usage: $0 up dealer <vulhub-target>   (e.g. struts2/CVE-2017-5638)" >&2; exit 1; }
+      DEALER_TARGET="$2" make -C "$DEALER_DIR" up
+      ;;
     *)
-      echo "usage: $0 up {easy|hard|wordpress|northwind}" >&2
+      echo "usage: $0 up {easy|hard|wordpress|northwind|dealer}" >&2
       exit 1
       ;;
   esac
@@ -137,8 +154,13 @@ mode_down() {
       # Use `make -C northwind-range reset` for that.
       make -C "$NORTHWIND_DIR" down
       ;;
+    dealer)
+      # down -v inside the Makefile -- the ephemeral target and its volumes go,
+      # so switching away leaves nothing behind. No-op if the range isn't up.
+      make -C "$DEALER_DIR" down 2>/dev/null || true
+      ;;
     *)
-      echo "usage: $0 down {easy|hard|wordpress|northwind}" >&2
+      echo "usage: $0 down {easy|hard|wordpress|northwind|dealer}" >&2
       exit 1
       ;;
   esac
@@ -147,16 +169,17 @@ mode_down() {
 case "$VERB" in
   bootstrap)
     bootstrap
-    echo "[*] all three per-mode networks exist (soclab-easy/hard/wordpress)"
+    echo "[*] all per-mode networks exist (soclab-easy/hard/wordpress + soclab-dealer[internal])"
     echo "[*] northwind is not included -- its own compose project creates its own networks"
     ;;
   up)
-    [ -n "$MODE" ] || { echo "usage: $0 up {easy|hard|wordpress|northwind}" >&2; exit 1; }
+    [ -n "$MODE" ] || { echo "usage: $0 up {easy|hard|wordpress|northwind|dealer} [dealer-target]" >&2; exit 1; }
     # northwind sits on none of the net_topology subnets, so bootstrapping them for it
-    # would create three networks it will never touch.
+    # would create networks it will never touch. Every other mode (dealer included)
+    # uses a net_topology bridge, so bootstrap runs.
     [ "$MODE" = "northwind" ] || bootstrap
     echo "[*] bringing $MODE mode up (other modes, if running, are left alone)"
-    mode_up "$MODE"
+    mode_up "$MODE" "$TARGET"
     write_state "$MODE"
     echo "[*] $MODE mode up; lab_mode.json primary mode set to $MODE"
     if [ "$MODE" = "northwind" ]; then
@@ -176,20 +199,22 @@ case "$VERB" in
     echo "[*] $MODE mode down"
     ;;
   switch)
-    [ -n "$MODE" ] || { echo "usage: $0 switch {easy|hard|wordpress|northwind}" >&2; exit 1; }
+    [ -n "$MODE" ] || { echo "usage: $0 switch {easy|hard|wordpress|northwind|dealer} [dealer-target]" >&2; exit 1; }
     [ "$MODE" = "northwind" ] || bootstrap
     echo "[*] switching to $MODE mode (tearing down every other mode first)"
-    for other in easy hard wordpress northwind; do
+    for other in easy hard wordpress northwind dealer; do
       [ "$other" = "$MODE" ] && continue
       mode_down "$other" 2>/dev/null || true
     done
-    mode_up "$MODE"
+    mode_up "$MODE" "$TARGET"
     write_state "$MODE"
     echo "[*] $MODE mode active (exclusively)"
     ;;
-  easy|hard|wordpress|northwind)
-    # Bare mode name: back-compat alias for `switch <mode>`.
-    exec "$0" switch "$VERB"
+  easy|hard|wordpress|northwind|dealer)
+    # Bare mode name: back-compat alias for `switch <mode>`. Passes $MODE through
+    # as the switch target arg so bare `dealer <vulhub-target>` still works
+    # (VERB=dealer, MODE=<target> -> `switch dealer <target>`).
+    exec "$0" switch "$VERB" "$MODE"
     ;;
   status)
     echo "primary mode: $(current_mode)"
@@ -202,9 +227,18 @@ case "$VERB" in
     docker compose -f "$NORTHWIND_DIR/docker-compose.yml" --project-directory "$NORTHWIND_DIR" \
       ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null \
       || echo "(northwind range not up, or $NORTHWIND_DIR/.env missing)"
+    echo
+    echo "-- dealer (separate compose project: $DEALER_DIR/) --"
+    if [ -f "$DEALER_DIR/.run/compose.yml" ]; then
+      docker compose -f "$DEALER_DIR/.run/compose.yml" --project-directory "$DEALER_DIR" \
+        ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null || true
+      echo "current dealer target: $("$PY" -c "import json;print(json.load(open('$DEALER_DIR/.run/state.json')).get('target','?'))" 2>/dev/null || echo '?')"
+    else
+      echo "(dealer range not up)"
+    fi
     ;;
   *)
-    echo "usage: $0 {bootstrap|up|down|switch|status|easy|hard|wordpress|northwind} [mode]" >&2
+    echo "usage: $0 {bootstrap|up|down|switch|status|easy|hard|wordpress|northwind|dealer} [mode] [dealer-target]" >&2
     exit 1
     ;;
 esac
