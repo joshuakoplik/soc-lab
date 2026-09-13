@@ -122,6 +122,14 @@ def migrate(conn):
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     if _table_columns(conn, "candidates"):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cand_updated ON candidates(updated)")
+    # The events table is owned by pipeline/schema.sql (applied by ingest.py),
+    # which connect() does NOT re-run -- so, exactly like idx_cand_updated above,
+    # create the hunter-board's signature index here too, guarded on events
+    # existing, so a hunter running against a db that predates the schema change
+    # still gets it. Partial predicate keeps it tiny (NULL on every non-alert row).
+    if _table_columns(conn, "events"):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ids_sig "
+                     "ON events(ids_signature) WHERE ids_signature IS NOT NULL")
     conn.commit()
 
 

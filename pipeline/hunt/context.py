@@ -9,9 +9,11 @@ functions rebuild the evolving picture from soc.db rows.
 Three things get rendered into every chunk's opening prompt:
   1. persistent_context_block: open incidents, active leads, recent notebook
      findings/decisions -- the standing state, always present, zero tool calls.
-  2. feed_delta_block: new/changed candidates since the hunter's cursor -- the
-     real-time intel stream ("what's burning brightest"), the piece that makes
-     the hunter reactive instead of a queue drainer.
+  2. hunt_board_block: the shift-start dashboard -- new high/crit candidates,
+     top talkers, loudest signatures, busiest dst ports, feed shape -- rendered
+     from trusted columns as counts, so the hunter starts at altitude and never
+     has to page candidate rows just to see what's happening. (It supersedes
+     feed_delta_block, which is kept only for reference / poll-style reads.)
   3. mandatory_first_action_block: the NEXT STEP from the last handoff, hoisted
      to a leading imperative, escalating if the hunter keeps deferring it.
 
@@ -29,6 +31,7 @@ triage/agent.py's build_user_turn does. See CLAUDE.md's trust-labeling rule.
 """
 
 import re
+from datetime import datetime, timedelta
 
 import store
 from providers.base import ProviderError
@@ -36,6 +39,13 @@ from providers.claude import ClaudeProvider
 
 PREVIEW_CHARS = 240
 FEED_DELTA_CAP = store.FEED_DELTA_DEFAULT_CAP
+
+# The hunt board (hunt_board_block) -- the hunter's shift-start dashboard.
+BOARD_WINDOW_MIN = 30      # "recent" window for the by-src_ip/signature/port panels
+BOARD_TOP_TALKERS = 8
+BOARD_TOP_SIGS = 8
+BOARD_TOP_PORTS = 6
+BOARD_NEW_CRIT = 5
 
 
 def _preview(text, n=PREVIEW_CHARS):
@@ -180,6 +190,121 @@ def feed_delta_block(conn, cursor_id, cursor_ts, cap=FEED_DELTA_CAP):
         header += f" of {total}"
     header += "):"
     return header + "\n" + "\n".join(lines) + overflow, len(rows)
+
+
+# ---------------------------------------------------------------------------
+# the hunt board (the shift-start dashboard that opens every chunk)
+# ---------------------------------------------------------------------------
+
+def _board_window_lb(conn, window_min):
+    """Lower bound (ISO ts) for the board's 'recent' panels, anchored to the
+    NEWEST event ts in the DB rather than wall-clock now(). For replayed/batch
+    telemetry (how the lab is usually driven) the max-ts anchor is the only one
+    that yields a meaningful window; for a live-follow hunt the two coincide.
+    Returns (lb_iso, max_ts); (None, None) when there are no events, and
+    (None, max_ts) when the ts can't be parsed (panels then count over all
+    events rather than silently emptying)."""
+    row = conn.execute("SELECT MAX(ts) AS mx FROM events").fetchone()
+    mx = row["mx"] if row else None
+    if not mx:
+        return None, None
+    try:
+        dt = datetime.fromisoformat(mx.replace("Z", "+00:00"))
+        lb = (dt - timedelta(minutes=window_min)).isoformat().replace("+00:00", "Z")
+    except (ValueError, AttributeError):
+        lb = None
+    return lb, mx
+
+
+def hunt_board_block(conn, cursor_id, cursor_ts, window_min=BOARD_WINDOW_MIN):
+    """The hunter's shift-start dashboard, rendered fresh into every chunk's
+    opening prompt -- the altitude view that REPLACES the old candidate-row
+    feed dump (feed_delta_block). A human hunter starts a shift at a board (the
+    loudest alerts, who is noisy, what is firing), prioritises from it, and
+    only pulls detail to run down a specific thread. This renders that board
+    deterministically -- a handful of GROUP BY queries, zero tool calls -- so
+    the hunter never has to page rows just to see the shape of what is
+    happening, and can't drown in a flood the way a row dump makes it.
+
+    TRUST: every column rendered is infrastructure- or detection-asserted (ids,
+    counts, signature NAMES, severities, ports, timestamps, src_ips) -- never
+    an ATTACKER_CONTROLLED field -- so the whole board sits on the safe side of
+    the trust boundary and needs no <untrusted-evidence> fence, exactly the
+    reasoning in this module's trust note for feed_delta_block. Attacker text
+    enters only when the hunter deliberately descends via a fenced tool
+    (get_candidate / query_events); pivot_events keeps to trusted group keys.
+
+    Returns (block_text, new_count), new_count being the number of new/changed
+    candidates since the cursor, so the loop keeps the same 'is there fresh
+    signal' return the feed block provided."""
+    lb, mx = _board_window_lb(conn, window_min)
+    win = f"last {window_min}m" if lb else "all time"
+    ev_where = "ts >= ?" if lb else "1=1"
+    ev_params = [lb] if lb else []
+    rank = store.SEVERITY_RANK_SQL
+    sections = [f"=== YOUR BOARD (as of {mx or 'n/a'}; 'recent' = {win}, "
+                f"anchored to the newest event) ==="]
+
+    # NEW HIGH/CRIT since the cursor -- the alerts a hunter opens the shift on.
+    hi_rows, hi_total = store.read_feed_delta(conn, cursor_id, cursor_ts,
+                                              min_severity="high", limit=BOARD_NEW_CRIT)
+    if hi_rows:
+        lines = []
+        for r in hi_rows:
+            ip = r["src_ip"] or "-"
+            lines.append(f"  [candidate {r['id']}] {r['severity']:<8} {r['rule']:<26} "
+                         f"src_ip={ip:<15} events={r['event_count']} last={r['last_seen']}")
+        extra = (f"\n  ... +{hi_total - len(hi_rows)} more high/critical not shown"
+                 if hi_total > len(hi_rows) else "")
+        sections.append("NEW HIGH/CRIT SINCE LAST LOOK:\n" + "\n".join(lines) + extra)
+
+    # What changed since last chunk (all severities), as counts not rows.
+    _, new_total = store.read_feed_delta(conn, cursor_id, cursor_ts, limit=1)
+    if new_total:
+        brk = conn.execute(
+            f"SELECT severity, COUNT(*) AS n FROM candidates WHERE (id > ? OR updated > ?) "
+            f"GROUP BY severity ORDER BY {rank} DESC", (cursor_id, cursor_ts or "")).fetchall()
+        by_sev = ", ".join(f"{b['n']} {b['severity']}" for b in brk)
+        sections.append(f"NEW/CHANGED SINCE LAST CHUNK: {new_total} candidate(s) ({by_sev}).")
+    else:
+        sections.append("NEW/CHANGED SINCE LAST CHUNK: none.")
+
+    # Recent-window aggregates over the raw events -- who's noisy, what's firing.
+    talkers = conn.execute(
+        f"SELECT src_ip, COUNT(*) AS n FROM events WHERE {ev_where} AND src_ip IS NOT NULL "
+        f"GROUP BY src_ip ORDER BY n DESC LIMIT ?", ev_params + [BOARD_TOP_TALKERS]).fetchall()
+    if talkers:
+        sections.append(f"TOP TALKERS ({win}, by event volume):\n" +
+                        "\n".join(f"  {r['src_ip']:<15} {r['n']}" for r in talkers))
+
+    sigs = conn.execute(
+        f"SELECT ids_signature AS s, COUNT(*) AS n FROM events "
+        f"WHERE {ev_where} AND ids_signature IS NOT NULL "
+        f"GROUP BY ids_signature ORDER BY n DESC LIMIT ?", ev_params + [BOARD_TOP_SIGS]).fetchall()
+    if sigs:
+        sections.append(f"LOUDEST SIGNATURES ({win}):\n" +
+                        "\n".join(f"  {r['n']:>8}  {r['s']}" for r in sigs))
+
+    ports = conn.execute(
+        f"SELECT dst_port AS p, COUNT(*) AS n FROM events WHERE {ev_where} AND dst_port IS NOT NULL "
+        f"GROUP BY dst_port ORDER BY n DESC LIMIT ?", ev_params + [BOARD_TOP_PORTS]).fetchall()
+    if ports:
+        sections.append(f"BY DST PORT ({win}):  " + "  ".join(f"{r['p']}->{r['n']}" for r in ports))
+
+    # Feed shape + event totals -- the whole backlog at a glance.
+    cand = conn.execute(
+        f"SELECT severity, COUNT(*) AS n FROM candidates GROUP BY severity "
+        f"ORDER BY {rank} DESC").fetchall()
+    cand_total = sum(r["n"] for r in cand)
+    cand_sev = ", ".join(f"{r['n']} {r['severity']}" for r in cand) or "none"
+    ev = conn.execute("SELECT COUNT(*) AS n, MIN(ts) AS lo, MAX(ts) AS hi FROM events").fetchone()
+    sections.append(f"FEED SHAPE: {cand_total} candidates ({cand_sev}); "
+                    f"{ev['n']} events total, span {ev['lo']} .. {ev['hi']}.")
+
+    sections.append("This board is your starting point. A dominating IP, signature, or rule count "
+                    "is itself the thread -- pick the brightest one, then descend with pivot_events "
+                    "/ query_events / get_candidate ONLY for that thread.")
+    return "\n\n".join(sections), new_total
 
 
 # ---------------------------------------------------------------------------

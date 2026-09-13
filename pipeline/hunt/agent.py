@@ -74,11 +74,18 @@ DEFAULT_MODEL = {
 # run unbounded. One chunk is a unit of hunting, not a whole investigation.
 DEFAULT_MAX_ITERATIONS = 15
 DEFAULT_POLL_INTERVAL = 30           # seconds to sleep when the feed is quiet
-DEFAULT_CONTEXT_BUDGET = 40_000      # per-chunk prompt-token ceiling (gmi/fireworks only)
+# Per-chunk prompt-token ceiling (gmi/fireworks only). Raised 40k -> 70k: the
+# board makes altitude free (no tool round-trips just to see the feed shape),
+# so a chunk reaches a conclusion in far fewer calls -- this is headroom so a
+# legitimate multi-step descent no longer trips the budget ~5 calls in.
+DEFAULT_CONTEXT_BUDGET = 70_000
 MAX_QUERY_EVENTS_ROWS = 25
 MAX_CORRELATE_ROWS = 25
 MAX_TRANSCRIPT_ROWS = 10
 MAX_FEED_TOOL_ROWS = 60
+MAX_PIVOT_ROWS = 50                  # top-N cap for pivot_events group rows
+_PIVOT_DIMS = ("ids_signature", "event_type", "dst_port", "src_ip", "source")
+_PIVOT_BUCKET_SQL = {"hour": "strftime('%Y-%m-%dT%H:00', ts)", "day": "strftime('%Y-%m-%d', ts)"}
 
 _shutdown = False
 
@@ -113,18 +120,31 @@ HUNTER_SYSTEM_PROMPT = (
     "from your last note. If you are mid-thought when a turn ends, call "
     "checkpoint(note) to preserve exactly where you are.\n\n"
 
-    "THE FEED. Each turn you are shown NEW/CHANGED signals since you last looked -- "
-    "detection candidates the deterministic rules engine has produced in real time. "
-    "This is a growing intel stream, not a to-do list: you do not have to look at "
-    "every candidate, and you never 'clear' them. Reconcile new signals against what "
-    "you are already working: does this new candidate belong to an open incident? "
-    "Does it change your hypothesis? Is it brighter than the thread you were pulling? "
-    "Do not get lost in the past -- a fresh high-severity signal usually outranks "
-    "finishing an old low-severity one. Use poll_feed to pull more of the backlog "
-    "before it scrolls past your cursor.\n\n"
+    "YOUR BOARD. Each turn opens with a BOARD -- a dashboard of the loudest activity "
+    "right now: new high/critical candidates, the top talker source IPs, the loudest "
+    "detection signatures, the busiest destination ports, and the overall feed shape. "
+    "This is where you start a shift, exactly like a human hunter glancing at a SIEM "
+    "dashboard before touching anything. NOISE IS NORMAL: a real environment throws "
+    "off tens of thousands of raw events an hour, and that VOLUME IS ITSELF A SIGNAL, "
+    "not a to-do list -- you do not read it row by row and you never 'clear' it. When "
+    "one IP, signature, or rule dominates the counts, THAT is your thread. A large "
+    "volume of a single benign-looking rule is itself a finding worth recording, not a "
+    "reason to inspect every instance. Reconcile the board against what you are already "
+    "working: does the dominant activity belong to an open incident? Does it change "
+    "your hypothesis? Is it brighter than the thread you were pulling? A fresh "
+    "high-severity signal usually outranks finishing an old low-severity one.\n\n"
 
-    "HOW TO HUNT. Investigate with query_events / get_candidate / enrich_ip / "
-    "correlate / get_llm_transcript. When a thread is worth tracking, open_incident "
+    "HOW TO HUNT. Read the board first and let it point you at the brightest thread; "
+    "descend into that thread and NOTHING ELSE. To drill from altitude into the raw "
+    "telemetry, use pivot_events -- group 100k+ events by a trusted dimension "
+    "(ids_signature, event_type, dst_port, src_ip), optionally filtered to one IP or "
+    "time window or shown as an hourly/daily histogram -- to confirm a spike, find the "
+    "top talkers, or see when a burst began, all as counts, never row dumps. Only once "
+    "the aggregates point at something specific do you drop to query_events / "
+    "get_candidate / enrich_ip / correlate / get_llm_transcript for the handful of rows "
+    "that actually matter. A hunter who reads counts first and rows last survives a "
+    "flood; one who opens candidates one at a time drowns in it. When a thread is worth "
+    "tracking, open_incident "
     "and link_evidence (the candidates/events that support it). Record what you learn "
     "with record_observation (note_type 'finding'/'hypothesis'/'decision' surfaces in "
     "your standing context; 'observation' is retrievable via search_notebook). Track "
@@ -154,6 +174,8 @@ HUNTER_SYSTEM_PROMPT = (
 )
 
 CHUNK_CLOSING_INSTRUCTION = (
+    "Start from the board above: read it at altitude, and only descend into individual "
+    "candidates or events once it points you at a specific thread worth running down. "
     "Work this turn now. Reconcile the new signals above against your open incidents "
     "and leads, pull the most valuable thread, and record what you find as you go. "
     "Before you finish, make sure anything worth remembering is written to an "
@@ -232,6 +254,50 @@ def tool_poll_feed(conn, hunt_id, min_severity=None, limit=MAX_FEED_TOOL_ROWS, i
             "src_ip": r["src_ip"], "event_count": r["event_count"],
             "first_seen": r["first_seen"], "last_seen": r["last_seen"]} for r in rows]
     return json.dumps({"shown": len(out), "total_matching": total, "candidates": out})
+
+
+def tool_pivot_events(conn, dimension, src_ip=None, event_type=None, since=None,
+                      top=15, bucket=None):
+    """Aggregate/pivot over the raw events without SELECT *-ing rows: group by
+    ONE trusted dimension, optionally filtered to a src_ip / event_type / time
+    window, optionally as a time histogram. This is the hunter's 'pull from the
+    SIEM to support a hunt' tool -- the descent from the board's altitude into
+    a specific thread, still as counts, not row dumps.
+
+    TRUST: the dimension is a hard allowlist of infrastructure-/IDS-asserted
+    columns (never an ATTACKER_CONTROLLED field), so grouped keys -- including
+    ids_signature NAMES -- are safe detection labels and the result needs no
+    fence. The allowlist is enforced here, not merely declared in the schema,
+    which is also what makes interpolating `dimension` into the SQL safe."""
+    if dimension not in _PIVOT_DIMS:
+        return json.dumps({"error": f"dimension must be one of {list(_PIVOT_DIMS)}"})
+    top = min(int(top or 15), MAX_PIVOT_ROWS)
+    where, params = [f"{dimension} IS NOT NULL"], []
+    if src_ip:
+        where.append("src_ip = ?"); params.append(src_ip)
+    if event_type:
+        where.append("event_type = ?"); params.append(event_type)
+    if since:
+        where.append("ts >= ?"); params.append(since)
+    w = " AND ".join(where)
+    tot = conn.execute(
+        f"SELECT COUNT(*) AS n, COUNT(DISTINCT {dimension}) AS d, MIN(ts) AS f, MAX(ts) AS l "
+        f"FROM events WHERE {w}", params).fetchone()
+    groups = conn.execute(
+        f"SELECT {dimension} AS k, COUNT(*) AS n, COUNT(DISTINCT src_ip) AS ips, "
+        f"MIN(ts) AS f, MAX(ts) AS l FROM events WHERE {w} "
+        f"GROUP BY {dimension} ORDER BY n DESC LIMIT ?", params + [top]).fetchall()
+    out = {"dimension": dimension,
+           "filter": {"src_ip": src_ip, "event_type": event_type, "since": since},
+           "total_events": tot["n"], "distinct_values": tot["d"], "span": [tot["f"], tot["l"]],
+           "top": [{"value": r["k"], "events": r["n"], "distinct_src_ips": r["ips"],
+                    "first": r["f"], "last": r["l"]} for r in groups]}
+    if bucket in _PIVOT_BUCKET_SQL:
+        hist = conn.execute(
+            f"SELECT {_PIVOT_BUCKET_SQL[bucket]} AS b, COUNT(*) AS n FROM events WHERE {w} "
+            f"GROUP BY b ORDER BY b LIMIT 48", params).fetchall()
+        out["histogram"] = [{"t": r["b"], "n": r["n"]} for r in hist]
+    return json.dumps(out, default=str)
 
 
 def tool_get_candidate(conn, candidate_id):
@@ -575,6 +641,18 @@ TOOLS = [
                     "backlog by severity (to pull older/lower items before your cursor advances). "
                     "min_severity filters (info|low|medium|high|critical).",
      "input_schema": _obj({"min_severity": _S, "limit": _I, "include_backlog": {"type": "boolean"}}, [])},
+    {"name": "pivot_events",
+     "description": "AGGREGATE/pivot over raw events (can be 100k+) WITHOUT pulling rows. Group by one "
+                    "trusted dimension (ids_signature|event_type|dst_port|src_ip|source), optionally "
+                    "filtered to one src_ip / event_type / time window (since=ISO ts), optionally as a "
+                    "time histogram (bucket=hour|day). Returns top-N groups with event counts, "
+                    "distinct-src_ip counts and time spans -- use it to confirm a spike, find the top "
+                    "talkers, or see when a burst began. This is how you descend from the board into a "
+                    "thread; only drop to query_events/get_event_details for the few rows that matter.",
+     "input_schema": _obj({"dimension": {"type": "string",
+                            "enum": ["ids_signature", "event_type", "dst_port", "src_ip", "source"]},
+                           "src_ip": _S, "event_type": _S, "since": _S, "top": _I,
+                           "bucket": {"type": "string", "enum": ["hour", "day"]}}, ["dimension"])},
     {"name": "get_candidate",
      "description": "Full detail for one candidate (attacker-controlled detail is fenced).",
      "input_schema": _obj({"candidate_id": _I}, ["candidate_id"])},
@@ -669,6 +747,10 @@ def dispatch_tool(conn, hunt_id, chunk, name, tool_input):
             return tool_poll_feed(conn, hunt_id, ti.get("min_severity"),
                                   ti.get("limit", MAX_FEED_TOOL_ROWS),
                                   ti.get("include_backlog", False)), False
+        if name == "pivot_events":
+            return tool_pivot_events(conn, ti.get("dimension"), ti.get("src_ip"),
+                                     ti.get("event_type"), ti.get("since"),
+                                     ti.get("top", 15), ti.get("bucket")), False
         if name == "get_candidate":
             return tool_get_candidate(conn, ti.get("candidate_id")), False
         if name == "query_events":
@@ -780,8 +862,8 @@ def build_chunk_user(conn, hunt_id, cursor_id, cursor_ts):
     ctx = context.persistent_context_block(conn, hunt_id)
     if ctx:
         parts.append(ctx.rstrip())
-    feed, _ = context.feed_delta_block(conn, cursor_id, cursor_ts)
-    parts.append(feed)
+    board, _ = context.hunt_board_block(conn, cursor_id, cursor_ts)
+    parts.append(board)
     last = store.latest_handoff(conn, hunt_id)
     if last and last["next_step"]:
         streak = store.next_step_stagnation_streak(conn, hunt_id)
@@ -882,11 +964,28 @@ def run_hunt(conn, provider, provider_name, args):
                 provider, system, user, TOOLS, execute, args.max_iterations,
                 token_budget=args.context_budget or None,
             )
-        except (ContextBudgetExceeded, IterationsExhausted) as e:
+        except ContextBudgetExceeded as e:
+            # The chunk blew its token budget -- it did NOT work through the feed,
+            # so do NOT advance the cursor (that would consume a backlog the chunk
+            # never processed and, with the lead-gated idle check below, let one
+            # bad chunk end the whole hunt -- the exact failure seen under a flood).
+            # The board is fixed-size regardless of backlog, so re-presenting is cheap.
             llm_call_tracker.finish_call(conn, call_id, "error", error=str(e),
                                          usage=getattr(e, "usage", None))
             src = _compact(conn, hunt_id, provider, chunk, chunk_start_ts, None)
-            print(f"    [chunk {chunk} ended: {type(e).__name__}; compacted via {src}]")
+            print(f"    [chunk {chunk} ended: ContextBudgetExceeded; compacted via {src}; "
+                  f"cursor held]")
+            consec_err = 0
+            if args.once:
+                break
+            continue  # do NOT advance cursor
+        except IterationsExhausted as e:
+            # The normal, healthy end of a bounded chunk: it worked through its
+            # iterations, so advancing the cursor (below) is correct.
+            llm_call_tracker.finish_call(conn, call_id, "error", error=str(e),
+                                         usage=getattr(e, "usage", None))
+            src = _compact(conn, hunt_id, provider, chunk, chunk_start_ts, None)
+            print(f"    [chunk {chunk} ended: IterationsExhausted; compacted via {src}]")
             consec_err = 0
         except ProviderError as e:
             llm_call_tracker.finish_call(conn, call_id, "error", error=str(e))
