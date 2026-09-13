@@ -73,6 +73,11 @@ TABLES = {
     "llm_calls":             ("llm_call",               40),
     "northwind_identities":  ("northwind_identity",     100),
     "northwind_chat_turns":  ("northwind_chat_turn",    300),
+    "hunt_sessions":         ("hunt_session",            30),
+    "incidents":             ("incident",               150),
+    "incident_evidence":     ("incident_evidence",      300),
+    "hunt_notes":            ("hunt_note",              300),
+    "leads":                 ("lead",                   150),
 }
 
 # These get UPDATEd in place after insert (candidates.status flips
@@ -82,7 +87,13 @@ TABLES = {
 # returns) -- an id-cursor alone would miss those transitions. Diff a full
 # snapshot instead. The rest are insert-only per their own schema docstrings,
 # so a cheap id-cursor is correct for them.
-MUTABLE_TABLES = {"candidates", "redteam_sessions", "pending_actions", "llm_calls"}
+# hunt_sessions (status idle<->running<->stopped, feed cursor, chunk_count),
+# incidents (status/severity/summary/hypothesis firm up over the hunt), and
+# leads (status open->dead/resolved, fail_count) all UPDATE in place, so they
+# need snapshot-diffing like the others; hunt_notes/incident_evidence are
+# insert-only.
+MUTABLE_TABLES = {"candidates", "redteam_sessions", "pending_actions", "llm_calls",
+                  "hunt_sessions", "incidents", "leads"}
 
 
 def connect_ro() -> sqlite3.Connection:

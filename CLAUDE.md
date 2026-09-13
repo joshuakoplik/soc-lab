@@ -21,9 +21,8 @@ product.
 ```bash
 ./setup.sh && ./verify.sh              # bring up cowrie+juiceshop+nginx, confirm telemetry lands
 ./lab-mode.sh {up|down|switch} {easy|hard|wordpress|northwind}   # writes lab_mode.json
-./lab-mode.sh {up|switch} dealer <vulhub-target>   # e.g. struts2/CVE-2017-5638 (dealer needs a target arg)
-./lab-mode.sh status                   # primary mode + live docker state for all modes
-./reset.sh [--network|--db|--queue|--status] [--no-kill]   # reset baseline; default (no flags) does all three
+./lab-mode.sh status                   # primary mode + live docker state for all four
+./reset.sh [--network|--db|--queue|--hunt|--status] [--no-kill]   # reset baseline; default (no flags) does network+db+queue. --hunt clears just the standing hunt's state
 docker compose ps / logs -f <svc> / down [-v]
 ```
 
@@ -88,7 +87,8 @@ top-level `README.md`.
 ```bash
 python3 pipeline/ingest.py [--follow] [--reset]      # tail cowrie/nginx/suricata/wazuh logs -> normalize -> soc.db
 python3 pipeline/detect/rules.py [--all] [--stats]    # deterministic candidate detection over events
-python3 pipeline/triage/agent.py [--dry-run] [--provider local|claude|gmi|fireworks] [--limit N] [--stats]
+python3 pipeline/hunt/agent.py [--provider local|claude|gmi|fireworks] [--continue N] [--once] [--dry-run] [--stats]  # the defender (threat hunter)
+python3 pipeline/triage/agent.py [--dry-run] [--provider ...] [--stats]   # LEGACY per-candidate triage -- retained only as the injection_asr baseline; NOT the operational defender
 python3 pipeline/redteam/agent.py [--dry-run] [--provider ...] [--stats] [--list-pending]
 python3 injection_asr/run_asr.py [--provider ...] [--classes ...] [--controls on|off|both]
 ```
@@ -131,7 +131,16 @@ cleaning up after themselves).
 Pure, deterministic functions over `events` -> `candidates`. No model involved —
 this is the reproducible tier, deliberately, because the LLM tier below it isn't.
 
-### 3. Triage agent (`pipeline/triage/agent.py`)
+### 3. Triage agent (`pipeline/triage/agent.py`) — LEGACY, superseded by the hunter (§3b)
+
+**No longer the operational defender.** The standing blue-team agent is now the
+threat hunter (§3b, `pipeline/hunt/`). This per-candidate triage loop is retained
+**only** as the `injection_asr/` measurement baseline: `injection_asr/runner.py`
+imports `triage_one`/`dispatch_tool`/`TOOLS` directly and reads the `triage`
+table columns, so those symbols and column names are a frozen compatibility
+surface — don't rename or repurpose them. Everything below still describes that
+retained path (and the hunter reuses its `block_enforcer`/`northwind_enforcer`
+backends and its trust-fencing discipline verbatim).
 
 Reads `candidates` with `status='new'`, calls a provider (see below) with a tool
 contract, writes a verdict to `triage` and flips `candidates.status`. Its own
@@ -162,6 +171,60 @@ contract — read them before changing anything here. Key points:
   remove every block this has ever put in place. `get_raw_event` exists but
   is deliberately not in `TOOLS` — opt-in only.
 - `candidates.status` is the only write this file makes to that table.
+
+### 3b. Threat hunter (`pipeline/hunt/agent.py`, `pipeline/hunt/store.py`, `pipeline/hunt/context.py`)
+
+The operational blue-team defender. Where the triage agent was a stateless,
+strictly-serial per-candidate queue drainer (one full agentic conversation per
+candidate — it fell hours behind under load), the hunter is a **standing agent
+with an ongoing, compacting context**, built on the **exact pattern the red-team
+agent uses** (§4): the DB is the memory, not the conversation. Read the
+`agent.py` module docstring and `HUNTER_SYSTEM_PROMPT` before changing anything.
+
+- **The feed, not a queue.** `candidates` is read as a real-time **intel stream**
+  via a non-consuming cursor (`hunt_sessions.feed_cursor_id/_ts`, an id/`updated`
+  high-water mark), **never** by flipping `candidates.status` — that column is now
+  vestigial. Each chunk is shown what's new/changed since the cursor, brightest
+  first, with a severity-broken-down overflow line so a flood is legible. The
+  hunter reacts to what's burning; it does not have to "clear" anything.
+- **Chunked turns + compaction (mirror of §4).** Each chunk is one bounded agentic
+  turn with a deliberately low iteration cap (`--max-iterations`, default 15) so
+  `IterationsExhausted` is the normal end. At each boundary the state is compacted
+  to a `hunt_handoff_notes` row (a cheap no-tools completion — or the model's own
+  `hunt_checkpoints` note, preferred when present), and the next chunk starts fresh
+  from a rendered context block (`context.persistent_context_block` +
+  `feed_delta_block` + a `NEXT STEP` hoisted to a MANDATORY FIRST ACTION that
+  escalates on repetition). `--continue N` resumes a hunt across processes.
+- **Externalized memory (`hunt/schema.sql`).** `hunt_sessions` (the standing hunt),
+  `incidents` + `incident_evidence` (the investigation unit the hunter promotes
+  candidates into — all-new on the blue side), `hunt_notes` (the freeform
+  timestamped notebook), `leads` (tracked threads; a dead one is closed so the
+  hunter stops circling — mirror of red-team `branches`), `hunt_handoff_notes` /
+  `hunt_checkpoints` (compaction). Every child table is keyed on `hunt_id`.
+- **Idle discipline.** A chunk (and its token cost) is spent only when there is
+  fresh feed OR an actively-pursued lead; a merely-open incident with no new signal
+  and no active lead does **not** force a chunk. Keep a lead `open`/`pursuing` to
+  keep working an incident through a quiet feed; close it when done.
+- **Tools + gating are unchanged in posture from §3.** Read-only investigation
+  (`poll_feed`/`get_candidate`/`query_events`/`get_event_details`/`enrich_ip`/
+  `correlate`/`get_llm_transcript`/`search_notebook`); notebook/incident authoring
+  (DB-only, safe/ungated); response tools reusing the **same real backends** —
+  `raise_alert` ungated, `recommend_block` human-gated (unread `approved=0`),
+  `block_ip` ungated+REAL behind `block_enforcer.validate_lab_ip()`'s CIDR fence,
+  `page_oncall` the loudest escalation, plus the Northwind enforcers. Every action
+  row now also carries the `incident_id`/`hunt_id` it belongs to (additive nullable
+  columns; `candidate_id` stays required, so the injection_asr path is untouched).
+- **Trust boundary is load-bearing here** (the hunter ingests attacker-controlled
+  text continuously): the standing feed renders only infrastructure/detection-
+  asserted columns, and every tool result carrying `ATTACKER_CONTROLLED` content is
+  fenced in `<untrusted-evidence>`, same discipline as `build_user_turn()`.
+- Reset the standing hunt's state (sessions/incidents/notebook/leads/cursor) with
+  `./reset.sh --hunt`, leaving events/candidates/triage intact; real `block_ip`
+  rules it placed are cleared by `./reset.sh --network`, same as for triage.
+
+**Follow-on (not yet done):** `injection_asr/` still measures the legacy triage
+path; a hunter-mode ASR arm (the hunter's injection surface is larger — it reads
+far more attacker text and holds the real `block_ip`) is the natural next step.
 
 ### 4. Red-team agent (`pipeline/redteam/agent.py`, `pipeline/redteam/executor.py`, `pipeline/redteam/lab_modes.py`)
 

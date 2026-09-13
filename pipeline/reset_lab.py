@@ -40,8 +40,19 @@ sys.path.insert(0, HERE)
 
 import ingest  # noqa: E402
 import llm_call_tracker  # noqa: E402
+from hunt import store as hunt_store  # noqa: E402
 
 DB_PATH = ingest.DB_PATH
+
+# The hunt tables (pipeline/hunt/schema.sql) + the additive action-table
+# migrations live behind hunt_store.ensure_schema(), not a plain schema.sql in
+# SCHEMA_FILES, because the incident_id/hunt_id ALTERs can't be expressed as
+# CREATE TABLE IF NOT EXISTS. init_full_schema() calls it after the others so
+# candidates + the action tables already exist for those ALTERs to target.
+HUNT_TABLES = (
+    "hunt_checkpoints", "hunt_handoff_notes", "leads", "hunt_notes",
+    "incident_evidence", "incidents", "hunt_sessions",
+)
 
 SCHEMA_FILES = [
     os.path.join(HERE, "detect", "schema.sql"),
@@ -71,6 +82,7 @@ def init_full_schema(db_path=None):
         with open(path) as f:
             conn.executescript(f.read())
     llm_call_tracker.ensure_schema(conn)
+    hunt_store.ensure_schema(conn)   # hunt tables + additive action-table migrations
     conn.commit()
 
 
@@ -112,6 +124,26 @@ def reset_queue():
           "will only pick up activity from here on")
 
 
+def reset_hunt():
+    """Clear the standing hunt's own state -- sessions, incidents, notebook,
+    leads, handoffs, checkpoints -- and thereby its feed cursor, WITHOUT wiping
+    events/candidates/triage. Lets an operator restart the hunter from a clean
+    slate against the same telemetry (e.g. to re-measure hunt behavior on a
+    fixed candidate set) short of a full --db wipe. Real iptables blocks the
+    hunter placed are cleared by reset.sh --network, same as for triage."""
+    if not os.path.exists(DB_PATH):
+        print(f"[*] {DB_PATH} does not exist -- nothing to clear")
+        return
+    conn = ingest.connect()
+    hunt_store.ensure_schema(conn)   # make sure the tables exist before DELETE
+    cleared = 0
+    for table in HUNT_TABLES:        # child-before-parent order (FK-safe)
+        cleared += conn.execute(f"DELETE FROM {table}").rowcount
+    conn.commit()
+    print(f"[*] hunt state cleared ({cleared} row(s) across "
+          f"{len(HUNT_TABLES)} tables); feed cursor reset")
+
+
 def status():
     if not os.path.exists(DB_PATH):
         print(f"[*] {DB_PATH} does not exist -- nothing to report")
@@ -143,6 +175,9 @@ def main():
     ap.add_argument("--db", action="store_true", help="wipe soc.db and recreate empty schema")
     ap.add_argument("--queue", action="store_true",
                      help="reseed tail_state to each log's current EOF")
+    ap.add_argument("--hunt", action="store_true",
+                     help="clear the standing hunt's sessions/incidents/notebook/leads "
+                          "(and its feed cursor), leaving events/candidates/triage intact")
     ap.add_argument("--status", action="store_true",
                      help="report table counts and tail_state staleness, change nothing")
     args = ap.parse_args()
@@ -151,14 +186,17 @@ def main():
         status()
         return
 
-    if not args.db and not args.queue:
-        print("[!] nothing to do -- pass --db, --queue, --status, or some combination", file=sys.stderr)
+    if not args.db and not args.queue and not args.hunt:
+        print("[!] nothing to do -- pass --db, --queue, --hunt, --status, or some combination",
+              file=sys.stderr)
         sys.exit(1)
 
     if args.db:
         reset_db()
     if args.queue:
         reset_queue()
+    if args.hunt:
+        reset_hunt()
 
 
 if __name__ == "__main__":

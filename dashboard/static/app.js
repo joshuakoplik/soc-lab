@@ -516,6 +516,11 @@ function resetLocalState() {
   diariedIds.clear();
   candidatesById.clear();
   sessionsById.clear();
+  incidentRowById.clear();
+  incidentEvById.clear();
+  incidentElById.clear();
+  leadElById.clear();
+  huntStatusEl = null;
   inflightById.clear();
   inflightColsByComponent.triage.innerHTML = "";
   inflightDefaultCol.innerHTML = "";
@@ -526,6 +531,98 @@ function resetLocalState() {
   alertTimes = [];
   flagsTotal = 0;
   updateStat("stat-flags", 0);
+}
+
+// ---------- Threat Hunter (incidents / notebook / leads) ----------
+// The hunter is the operational defender now; its incidents, notebook and
+// leads render into the Defender panel alongside the response actions
+// (alerts/blocks/pages) it takes. Incidents and leads UPDATE in place (status
+// firms up over the hunt); notebook entries are an append-only timeline.
+
+const incidentRowById = new Map();   // id -> latest incident row
+const incidentEvById = new Map();    // incident id -> Set("kind:ref_id")
+const incidentElById = new Map();    // id -> rendered div (update in place)
+const leadElById = new Map();        // id -> rendered div (update in place)
+let huntStatusEl = null;
+
+function huntUpsert(map, id, innerHtml, statusClass, detailKey) {
+  let div = map.get(id);
+  if (!div) {
+    const placeholder = feedDefender.querySelector(".empty");
+    if (placeholder) placeholder.remove();
+    div = document.createElement("div");
+    div.dataset.epoch = Date.now();
+    div.classList.add("clickable");
+    div.dataset.detailKey = detailKey;
+    feedDefender.insertBefore(div, feedDefender.firstChild);
+    map.set(id, div);
+  }
+  div.className = "line clickable " + (statusClass || "");
+  div.innerHTML = innerHtml;
+  return div;
+}
+
+function onHuntSession(row) {
+  const badge = row.status === "running" ? "badge-running"
+    : row.status === "stopped" ? "badge-error" : "badge-incomplete";
+  const html = `<div class="line-head"><span class="tag">HUNT #${row.id}</span>` +
+    `<span class="badge ${badge}">${escapeHtml(row.status)}</span>` +
+    `<span class="ctx">chunk ${row.chunk_count} · ${escapeHtml(row.provider)}/${escapeHtml(row.model)}` +
+    `${row.lab_mode ? " · " + escapeHtml(row.lab_mode) : ""}</span></div>`;
+  if (!huntStatusEl) {
+    const placeholder = feedDefender.querySelector(".empty");
+    if (placeholder) placeholder.remove();
+    huntStatusEl = document.createElement("div");
+    huntStatusEl.className = "line st-muted";
+    feedDefender.insertBefore(huntStatusEl, feedDefender.firstChild);
+  }
+  huntStatusEl.innerHTML = html;
+}
+
+function renderIncident(id) {
+  const row = incidentRowById.get(id);
+  if (!row) return;
+  const n = (incidentEvById.get(id) || new Set()).size;
+  const closed = row.status === "closed" || row.status === "false_positive";
+  const sc = closed ? "st-muted" : severityStatusClass(row.severity);
+  const head = `<div class="line-head"><span class="ts">${fmtTime(row.updated_at)}</span>` +
+    `<span class="tag">INCIDENT #${row.id}</span>` +
+    `<span class="ctx">${escapeHtml(row.severity)} · ${escapeHtml(row.status)}` +
+    `${row.entity ? " · " + escapeHtml(row.entity) : ""} · ${n} evidence</span>` +
+    `<span class="body">${escapeHtml(row.title)}</span></div>`;
+  const body = row.hypothesis ? `<div class="rationale">${escapeHtml(truncate(row.hypothesis, 300))}</div>` : "";
+  huntUpsert(incidentElById, id, head + body, sc, `incidents:${id}`);
+}
+
+function onIncident(row) {
+  incidentRowById.set(row.id, row);
+  renderIncident(row.id);
+}
+
+function onIncidentEvidence(row) {
+  let set = incidentEvById.get(row.incident_id);
+  if (!set) { set = new Set(); incidentEvById.set(row.incident_id, set); }
+  set.add(`${row.kind}:${row.ref_id}`);
+  renderIncident(row.incident_id);
+}
+
+function onHuntNote(row) {
+  const cls = { finding: "st-serious", decision: "st-info", hypothesis: "st-warning",
+    lead: "st-info", observation: "st-muted" }[row.note_type] || "st-muted";
+  const head = `<span class="tag">NOTE</span>` +
+    `<span class="ctx">${escapeHtml(row.note_type)}${row.incident_id ? " · inc #" + row.incident_id : ""}</span>` +
+    `<span class="body">${escapeHtml(truncate(row.body, 240))}</span>`;
+  appendLine(feedDefender, buildEntry(row.created, head, null), cls, 400, row.created, `hunt_notes:${row.id}`);
+}
+
+function onLead(row) {
+  const sc = row.status === "dead" ? "st-muted" : row.status === "resolved" ? "st-good" : "st-info";
+  const html = `<div class="line-head"><span class="ts">${fmtTime(row.updated)}</span>` +
+    `<span class="tag">LEAD #${row.id}</span>` +
+    `<span class="ctx">${escapeHtml(row.status)}${row.fail_count ? " · fails " + row.fail_count : ""}` +
+    `${row.incident_id ? " · inc #" + row.incident_id : ""}</span>` +
+    `<span class="body">${escapeHtml(truncate(row.description, 200))}</span></div>`;
+  huntUpsert(leadElById, row.id, html, sc, `leads:${row.id}`);
 }
 
 function handleMessage(msg) {
@@ -540,6 +637,11 @@ function handleMessage(msg) {
     case "human_pages": renderDefenderRow("human_pages", row); break;
     case "block_recommendations": renderDefenderRow("block_recommendations", row); break;
     case "block_ip_calls": renderDefenderRow("block_ip_calls", row); break;
+    case "hunt_sessions": onHuntSession(row); break;
+    case "incidents": onIncident(row); break;
+    case "incident_evidence": onIncidentEvidence(row); break;
+    case "hunt_notes": onHuntNote(row); break;
+    case "leads": onLead(row); break;
     case "redteam_sessions": ensureCampaign(row); break;
     case "recon_findings": onReconFinding(row); break;
     case "vuln_findings": onVulnFinding(row); break;
@@ -569,6 +671,13 @@ async function loadBootstrap() {
   }
   defenderRows.sort(byCreatedAsc);
   defenderRows.forEach(handleMessage);
+
+  // Hunt state, in dependency order (session -> incidents -> evidence/notes/
+  // leads). Rows arrive oldest-first from bootstrap; optional-chained so an
+  // older server without these tables can't break the load.
+  for (const t of ["hunt_sessions", "incidents", "incident_evidence", "hunt_notes", "leads"]) {
+    for (const row of (data[t] && data[t].rows) || []) handleMessage({ table: t, row });
+  }
 
   for (const row of data.redteam_sessions.rows) handleMessage({ table: "redteam_sessions", row });
 
