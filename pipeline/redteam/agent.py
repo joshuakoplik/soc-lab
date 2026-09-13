@@ -982,8 +982,13 @@ _TARGET_DESCRIPTIONS = {
 # adapter-backed mode is a placeholder ("northwind") with no
 # _TARGET_DESCRIPTIONS entry, and this block is only ever referenced from
 # the infra half of RECON_SYSTEM_PROMPT's if/else below.
+# In dealer mode _TARGETS is a single opaque, per-standup random hostname (see
+# lab_modes.active_config / dealer-range/up.py) with no fixed key here, so fall
+# back to the generic "unknown host" description -- which is exactly the
+# recon-from-zero framing dealer wants for any name.
 _targets_block = (
-    "\n".join(f"  {t:<15} -- {_TARGET_DESCRIPTIONS[t]}" for t in _TARGETS)
+    "\n".join(f"  {t:<15} -- {_TARGET_DESCRIPTIONS.get(t, _TARGET_DESCRIPTIONS['target'])}"
+              for t in _TARGETS)
     if not _MODE_CFG.get("adapter") else ""
 )
 

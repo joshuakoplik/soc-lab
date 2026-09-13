@@ -56,9 +56,13 @@ docker compose ps / logs -f <svc> / down [-v]
   network target (`adapter: None`, attacked via `shell_exec`) on a real
   `net_topology` subnet — a new **internal** bridge `soclab-dealer`
   (`10.211.40.0/24`) giving the untrusted image structural no-egress with no
-  iptables. The chosen target is exposed to soc-attacker only as the alias
-  `target`; what it actually is stays in `dealer-range/.run/state.json` (never
-  told to the agent — recon from zero). A fetched image has no wazuh agent and
+  iptables. The chosen target is exposed to soc-attacker only under an **opaque,
+  per-standup random hostname** (e.g. `k3f9a2xq`) — never the Vulhub service name
+  or the word `target`, and every container gets an opaque name too, so even
+  reverse-DNS leaks neither the software nor that this is a lab; that random name
+  is the sole thing the agent is told (`up.py` writes it to
+  `dealer-range/.run/state.json` → `lab_modes.active_config()["targets"]`), and
+  what the box actually is stays operator-only (recon from zero). A fetched image has no wazuh agent and
   joins the bridge after Suricata's interface discovery, so on standup
   `dealer-range/wire.py` (`make wire`, run at the end of `make up`) makes it
   observable: it restarts Suricata if needed to pick up `soclab-dealer0`

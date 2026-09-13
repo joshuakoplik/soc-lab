@@ -189,6 +189,9 @@ WORDPRESS = {
 # operator. expected_flags is None: Vulhub envs aren't CTF flag boxes, so
 # success is a foothold/RCE (state_footholds/wins), not a captured FLAG{...}.
 DEALER = {
+    # Placeholder only: active_config() replaces this with the per-standup opaque
+    # hostname from dealer-range/.run/state.json (up.py). Recon-from-zero -- the
+    # agent is never told "target" or the Vulhub service name.
     "targets": ("target",),
     "gated_tools": ("shell_exec",),
     "msf_modules": {},
@@ -250,5 +253,31 @@ def current_mode():
     return mode if mode in MODES else DEFAULT_MODE
 
 
+DEALER_STATE_FILE = os.path.join(ROOT, "dealer-range", ".run", "state.json")
+
+
+def _dealer_hostname():
+    """The opaque hostname up.py assigned this dealer standup (recon-from-zero:
+    the agent's target name must be the meaningless name the box actually answers
+    to, never "target" or the Vulhub service name). Returns None if the range
+    isn't up, in which case active_config() falls back to DEALER's placeholder."""
+    try:
+        with open(DEALER_STATE_FILE) as f:
+            return json.load(f).get("hostname") or None
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
 def active_config(mode=None):
-    return MODES[mode or current_mode()]
+    mode = mode or current_mode()
+    cfg = MODES[mode]
+    if mode == "dealer":
+        # DEALER["targets"] is a placeholder; the real, per-standup opaque
+        # hostname lives in dealer-range/.run/state.json (written by up.py).
+        # Overriding here keeps every consumer -- validate_target, the agent's
+        # _TARGETS/tool schemas, resolve_target_ip -- pointed at the actual name
+        # without any of them needing to know about the dealer range.
+        host = _dealer_hostname()
+        if host:
+            cfg = {**cfg, "targets": (host,)}
+    return cfg
