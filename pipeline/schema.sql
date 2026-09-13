@@ -67,6 +67,11 @@ CREATE INDEX IF NOT EXISTS idx_events_src_ip    ON events(src_ip);
 CREATE INDEX IF NOT EXISTS idx_events_type      ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_ip_ts     ON events(src_ip, ts);
 CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id);
+-- Partial index backing the hunter's board LOUDEST-SIGNATURES panel and
+-- pivot_events(dimension='ids_signature'). ids_signature is NULL on every
+-- non-alert row, so the partial predicate keeps this index tiny while covering
+-- the exact dimension a Suricata flood shows up on.
+CREATE INDEX IF NOT EXISTS idx_events_ids_sig   ON events(ids_signature) WHERE ids_signature IS NOT NULL;
 
 -- Tail offsets, so restarting the ingester doesn't re-import the world.
 -- Keyed on inode as well as path: when a log rotates, the path is the same but
