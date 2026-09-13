@@ -23,6 +23,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -170,6 +171,78 @@ def fetch_bootstrap() -> dict:
         conn.close()
 
 
+_CHUNK_RE = re.compile(r"chunk\s+(\d+)")
+
+
+def fetch_diary(hunt_id=None) -> dict:
+    """The hunter's diary: one entry per chunk (turn), pairing WHAT THE HUNTER
+    SAW that turn (the rendered board/context, stored verbatim as the turn's
+    llm_calls.user_prompt) with WHAT IT CONCLUDED (its own handoff note +
+    checkpoints + notebook entries for that chunk) and WHAT IT DID (incidents,
+    alerts, blocks, pages attributed to the hunt). Read-only, like everything
+    here. hunt_id defaults to the most recent hunt."""
+    conn = connect_ro()
+    try:
+        hunts = [dict(r) for r in conn.execute(
+            "SELECT id, started, ended, provider, model, status, chunk_count "
+            "FROM hunt_sessions ORDER BY id DESC").fetchall()]
+        if hunt_id is None:
+            if not hunts:
+                return {"hunts": [], "hunt": None, "chunks": [], "incidents": [], "leads": []}
+            hunt_id = hunts[0]["id"]
+        hunt_row = conn.execute("SELECT * FROM hunt_sessions WHERE id=?", (hunt_id,)).fetchone()
+        hunt = dict(hunt_row) if hunt_row else None
+
+        # per-chunk reasoning, keyed by chunk number
+        handoffs, checkpoints, notes = {}, {}, {}
+        for r in conn.execute("SELECT chunk, note, next_step, created FROM hunt_handoff_notes "
+                              "WHERE hunt_id=? ORDER BY chunk ASC", (hunt_id,)).fetchall():
+            handoffs[r["chunk"]] = dict(r)
+        for r in conn.execute("SELECT chunk, note, created FROM hunt_checkpoints "
+                              "WHERE hunt_id=? ORDER BY id ASC", (hunt_id,)).fetchall():
+            checkpoints.setdefault(r["chunk"], []).append(dict(r))
+        for r in conn.execute("SELECT chunk, note_type, body, incident_id, created FROM hunt_notes "
+                              "WHERE hunt_id=? ORDER BY id ASC", (hunt_id,)).fetchall():
+            notes.setdefault(r["chunk"], []).append(dict(r))
+
+        # one llm_calls row per chunk -- its user_prompt IS the board the hunter saw
+        chunks = []
+        for c in conn.execute(
+            "SELECT context_label, status, started, finished, elapsed_s, error, user_prompt, "
+            "prompt_tokens, completion_tokens, total_tokens FROM llm_calls "
+            "WHERE component='hunt' AND session_id=? ORDER BY id ASC", (hunt_id,)).fetchall():
+            m = _CHUNK_RE.search(c["context_label"] or "")
+            cn = int(m.group(1)) if m else None
+            chunks.append({
+                "chunk": cn, "context_label": c["context_label"], "status": c["status"],
+                "started": c["started"], "finished": c["finished"], "elapsed_s": c["elapsed_s"],
+                "error": c["error"], "board": c["user_prompt"],
+                "tokens": {"prompt": c["prompt_tokens"], "completion": c["completion_tokens"],
+                           "total": c["total_tokens"]},
+                "handoff": handoffs.get(cn), "checkpoints": checkpoints.get(cn, []),
+                "notes": notes.get(cn, []),
+            })
+
+        # hunt-level outcomes (these tables carry hunt_id but not chunk)
+        incidents = [dict(r) for r in conn.execute(
+            "SELECT * FROM incidents WHERE hunt_id=? ORDER BY id ASC", (hunt_id,)).fetchall()]
+        leads = [dict(r) for r in conn.execute(
+            "SELECT * FROM leads WHERE hunt_id=? ORDER BY id ASC", (hunt_id,)).fetchall()]
+
+        def _actions(table):
+            try:
+                return [dict(r) for r in conn.execute(
+                    f"SELECT * FROM {table} WHERE hunt_id=? ORDER BY id ASC", (hunt_id,)).fetchall()]
+            except sqlite3.Error:
+                return []
+        actions = {t: _actions(t) for t in
+                   ("agent_alerts", "block_ip_calls", "block_recommendations", "human_pages")}
+        return {"hunts": hunts, "hunt": hunt, "chunks": chunks,
+                "incidents": incidents, "leads": leads, "actions": actions}
+    finally:
+        conn.close()
+
+
 def _fresh_cursors(conn, append_only, mutable):
     # Start from "now" -- only stream rows/changes from after this baseline
     # was taken. History is served separately via /api/bootstrap. Reused
@@ -244,6 +317,19 @@ async def poll_loop():
 @app.get("/api/bootstrap")
 async def bootstrap():
     return await asyncio.to_thread(fetch_bootstrap)
+
+
+@app.get("/api/hunt-diary")
+async def hunt_diary_api(hunt_id: int | None = None):
+    return await asyncio.to_thread(fetch_diary, hunt_id)
+
+
+@app.get("/diary")
+async def diary():
+    html = (STATIC_DIR / "hunt_diary.html").read_text()
+    mtime = int((STATIC_DIR / "style.css").stat().st_mtime)
+    html = html.replace("/static/style.css", f"/static/style.css?v={mtime}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.websocket("/ws")

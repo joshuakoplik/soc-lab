@@ -1021,12 +1021,16 @@ def run_hunt(conn, provider, provider_name, args):
             consec_err += 1
             delay = retry_backoff_s(min(consec_err, 4))
             print(f"    [chunk {chunk} provider error ({consec_err}) -- {e}; retrying in {delay:.0f}s]")
+            if args.once:
+                break  # --once means one chunk attempt; don't loop forever on a persistent error
             _interruptible_sleep(int(delay))
             continue  # do NOT advance cursor -- this chunk did not process the feed
         except Exception as e:  # noqa: BLE001 - a standing hunter must not crash on one bad chunk
             llm_call_tracker.finish_call(conn, call_id, "error", error=str(e))
             consec_err += 1
             print(f"    [chunk {chunk} unexpected error ({consec_err}) -- {e}]")
+            if args.once:
+                break
             _interruptible_sleep(int(retry_backoff_s(min(consec_err, 4))))
             continue
         else:
