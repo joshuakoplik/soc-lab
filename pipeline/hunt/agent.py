@@ -303,13 +303,41 @@ def tool_enrich_ip(conn, src_ip):
     cands = conn.execute(
         "SELECT COUNT(*) AS n FROM candidates WHERE src_ip=?", (src_ip,)
     ).fetchone()["n"]
-    return json.dumps({
+    out = {
         "src_ip": src_ip,
         "total_events": agg["events"], "first_seen": agg["first_seen"],
         "last_seen": agg["last_seen"], "distinct_event_types": agg["event_types"],
         "distinct_dst_ports": agg["dst_ports"], "candidate_count": cands,
         "events_by_type": {r["event_type"]: r["n"] for r in by_type},
-    })
+    }
+    asset = _lookup_asset(conn, src_ip)
+    if asset:
+        out["asset"] = asset          # infrastructure-asserted CMDB record
+    return json.dumps(out)
+
+
+def _lookup_asset(conn, src_ip):
+    """The CMDB/asset-inventory record for an IP, if one exists (see
+    triage/schema.sql `assets`, written by npc-range/npcctl.py). All
+    infrastructure-asserted, no fence. `flock` is an operator grouping and is
+    deliberately NOT returned. Defensive against an older soc.db without the
+    assets table."""
+    try:
+        row = conn.execute(
+            "SELECT hostname, role, services, owner_team, network FROM assets "
+            "WHERE ip=? ORDER BY updated DESC LIMIT 1", (src_ip,)
+        ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    try:
+        services = json.loads(row["services"]) if row["services"] else []
+    except (ValueError, TypeError):
+        services = []
+    return {"hostname": row["hostname"], "role": row["role"],
+            "services": services, "owner_team": row["owner_team"],
+            "network": row["network"]}
 
 
 def tool_correlate(conn, src_ip):
@@ -587,7 +615,8 @@ TOOLS = [
      "input_schema": _obj({"event_id": _I}, ["event_id"])},
     {"name": "enrich_ip",
      "description": "Local, offline aggregation for a src_ip (event counts, ports, timespan, "
-                    "candidate count). No third-party threat intel.",
+                    "candidate count), plus the asset-inventory/CMDB record for the IP if one "
+                    "exists (hostname, role, owner). No third-party threat intel.",
      "input_schema": _obj({"src_ip": _S}, ["src_ip"])},
     {"name": "correlate",
      "description": "Other candidates sharing this src_ip, so you see a campaign not a fragment.",

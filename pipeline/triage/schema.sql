@@ -146,3 +146,32 @@ CREATE TABLE IF NOT EXISTS human_pages (
     reason        TEXT    NOT NULL,
     created       TEXT    NOT NULL
 );
+
+-- Asset inventory (a small internal CMDB). Written and reconciled by
+-- npc-range/npcctl.py, NOT by any agent -- it records the benign NPC hosts a
+-- flock stands up so the defender's enrich_ip can say "10.211.10.55 is the HR
+-- wiki" instead of "unknown IP". Every column is INFRASTRUCTURE-ASSERTED
+-- (observed facts about hosts we placed), so enrich_ip surfaces it in the
+-- trusted half of its result, never fenced.
+--
+-- Deliberately reads like a real CMDB: `role` is a plausible service
+-- description ("Internal web server"), never a decoy/NPC marker -- otherwise
+-- the inventory would tell the defender exactly which candidates to ignore and
+-- the noise would stop being noise. `flock` is an operator grouping only and is
+-- NOT surfaced by enrich_ip. Rows are recreated empty by reset.sh --db (this
+-- file is in reset_lab.SCHEMA_FILES) and re-asserted from manifests by
+-- `npcctl reconcile` / `status` / `up`, so they survive a DB wipe.
+CREATE TABLE IF NOT EXISTS assets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip          TEXT,
+    hostname    TEXT    NOT NULL,
+    role        TEXT,               -- CMDB-style description; no decoy marker
+    services    TEXT,               -- JSON array, e.g. ["http"]
+    owner_team  TEXT,
+    flock       TEXT,               -- operator grouping; NOT surfaced to agents
+    network     TEXT,
+    updated     TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_ip ON assets(ip);
+CREATE INDEX IF NOT EXISTS idx_assets_hostname ON assets(hostname);

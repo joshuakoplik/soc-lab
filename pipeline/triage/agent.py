@@ -175,8 +175,9 @@ TOOLS = [
         "name": "enrich_ip",
         "description": (
             "Local, offline enrichment for an IP: first/last seen, which sources "
-            "saw it, event-type counts. No third-party threat intel -- this lab "
-            "stays self-contained and offline-capable."
+            "saw it, event-type counts, and the asset-inventory/CMDB record for "
+            "the IP if one exists (hostname, role, owner). No third-party threat "
+            "intel -- this lab stays self-contained and offline-capable."
         ),
         "input_schema": {
             "type": "object",
@@ -761,7 +762,7 @@ def tool_enrich_ip(conn, src_ip):
         "GROUP BY event_type ORDER BY n DESC",
         (src_ip,),
     ).fetchall()
-    return json.dumps({
+    out = {
         "src_ip": src_ip,
         "event_count": agg["n"],
         "first_seen": agg["first_seen"],
@@ -769,7 +770,35 @@ def tool_enrich_ip(conn, src_ip):
         "sources": sorted((agg["sources"] or "").split(",")) if agg["sources"] else [],
         "event_types": {r["event_type"]: r["n"] for r in types},
         "note": "local enrichment only -- offline, no third-party threat intel",
-    })
+    }
+    asset = _lookup_asset(conn, src_ip)
+    if asset:
+        out["asset"] = asset          # infrastructure-asserted CMDB record
+    return json.dumps(out)
+
+
+def _lookup_asset(conn, src_ip):
+    """The CMDB/asset-inventory record for an IP, if one exists (see
+    triage/schema.sql `assets`). Infrastructure-asserted -- the defender can
+    trust "this IP is the HR wiki" the way it trusts any observed fact. `flock`
+    is an operator grouping and is deliberately NOT returned. Defensive against
+    an older soc.db that predates the assets table."""
+    try:
+        row = conn.execute(
+            "SELECT hostname, role, services, owner_team, network FROM assets "
+            "WHERE ip=? ORDER BY updated DESC LIMIT 1", (src_ip,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    try:
+        services = json.loads(row["services"]) if row["services"] else []
+    except (ValueError, TypeError):
+        services = []
+    return {"hostname": row["hostname"], "role": row["role"],
+            "services": services, "owner_team": row["owner_team"],
+            "network": row["network"]}
 
 
 def tool_correlate(conn, src_ip, exclude_candidate_id):
