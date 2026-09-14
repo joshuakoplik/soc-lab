@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import re
+import random
 import secrets
 import signal
 import string
@@ -61,6 +62,7 @@ LABEL_ROLE = "com.soclab.role"
 LABEL_KIND = "com.soclab.kind"   # "npc" | "client" -- operator-only (labels aren't attacker-visible)
 
 FLAG_FMT = "FLAG{{{}}}"  # FLAG{...}
+DEFAULT_FLAG_RATE = 0.10  # per-NPC random flag spawn probability
 
 
 def log(msg):
@@ -602,8 +604,9 @@ def cmd_up(args):
     spawn_tailers(flock, host_records)
     write_assets(manifest)
 
-    if args.flags:
-        plant_flags(flock, manifest, types, args.flags)
+    # Flags: explicit --flags picks specific types; every flag-capable NPC also
+    # gets a flag at --flag-rate (default 10%). See feedback_flag_planting_policy.
+    plant_flags(flock, manifest, types, args.flags or [], args.flag_rate)
     rewrite_flags_present()
 
     _warn_if_sensors_down()
@@ -671,37 +674,49 @@ def reconcile_all():
 # --------------------------------------------------------------------------
 # Flag planting (Phase 6 fleshes out placements; core here)
 # --------------------------------------------------------------------------
-def plant_flags(flock, manifest, types, flag_specs):
-    """flag_specs: list of "type" or "type:placement_index". Plants one flag per
-    spec on the FIRST host of that type, recording host+path operator-side in
-    flags.json (never surfaced to the agent)."""
+def plant_flags(flock, manifest, types, flag_specs, rate=DEFAULT_FLAG_RATE):
+    """Plant side-quest flags. Explicit `flag_specs` ("type" or "type:idx") plant
+    on the first host of that type; then EVERY flag-capable host not already
+    flagged gets one at probability `rate` (default 10%). Values recorded
+    operator-side in flags.json, never surfaced to the agent."""
     planted = []
+    planted_hosts = set()
     by_type = {}
     for h in manifest["hosts"]:
         by_type.setdefault(h["type"], []).append(h)
-    for spec in flag_specs:
+
+    def _try(host, typ, placement):
+        value = FLAG_FMT.format(secrets.token_hex(8))
+        if _apply_flag(host["hostname"], placement, value):
+            planted.append({"flag": value, "hostname": host["hostname"],
+                            "type": typ, "placement": placement})
+            planted_hosts.add(host["hostname"])
+            log(f"planted flag on {host['hostname']} ({placement.get('kind')})")
+
+    for spec in flag_specs or []:
         typ = spec.split(":", 1)[0]
         idx = int(spec.split(":", 1)[1]) if ":" in spec else 0
         t = types.get(typ)
         if not t or not t.get("flag", {}).get("supported"):
-            log(f"type {typ!r} does not support flags, skipping")
-            continue
+            log(f"type {typ!r} does not support flags, skipping"); continue
         hosts = by_type.get(typ)
         if not hosts:
-            log(f"no {typ!r} host in this flock, skipping flag")
-            continue
+            log(f"no {typ!r} host in this flock, skipping flag"); continue
         placements = t["flag"].get("placements", [])
         if idx >= len(placements):
-            log(f"{typ!r} has no placement #{idx}, skipping")
+            log(f"{typ!r} has no placement #{idx}, skipping"); continue
+        _try(hosts[0], typ, placements[idx])
+
+    # Random spawn across every flag-capable host not already flagged.
+    for h in manifest["hosts"]:
+        if h["hostname"] in planted_hosts:
             continue
-        host = hosts[0]
-        placement = placements[idx]
-        value = FLAG_FMT.format(secrets.token_hex(8))
-        ok = _apply_flag(host["hostname"], placement, value)
-        if ok:
-            planted.append({"flag": value, "hostname": host["hostname"],
-                            "type": typ, "placement": placement})
-            log(f"planted flag on {host['hostname']} ({placement.get('kind')})")
+        t = types.get(h["type"]) or {}
+        fl = t.get("flag", {})
+        placements = fl.get("placements", []) if fl.get("supported") else []
+        if placements and random.random() < rate:
+            _try(h, h["type"], random.choice(placements))
+
     with open(os.path.join(flock_dir(flock), "flags.json"), "w") as f:
         json.dump(planted, f, indent=2)
     return planted
@@ -876,6 +891,8 @@ def main():
     up.add_argument("--clients", type=int)
     up.add_argument("--flags", action="append",
                     help="type[:placement_index] to plant a flag on (repeatable)")
+    up.add_argument("--flag-rate", type=float, default=DEFAULT_FLAG_RATE,
+                    help="per-NPC random flag spawn probability (default 0.10)")
     up.set_defaults(func=cmd_up)
 
     dn = sub.add_parser("down")

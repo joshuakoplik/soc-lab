@@ -1048,12 +1048,17 @@ def _flock_flag_count(mode):
         net = net_topology.by_mode(mode)
     except KeyError:
         return 0
-    marker = os.path.join(ROOT, "npc-range", ".run", "flags-present.json")
-    try:
-        with open(marker) as f:
-            return int((json.load(f) or {}).get(net.compose_name, 0))
-    except (OSError, ValueError, TypeError):
-        return 0
+    # Sum flag counts for this network across both ranges' markers: npc-range
+    # (per-flock NPC flags) and dealer-range (the always-planted vulhub flag).
+    total = 0
+    for marker in (os.path.join(ROOT, "npc-range", ".run", "flags-present.json"),
+                   os.path.join(ROOT, "dealer-range", ".run", "flags-present.json")):
+        try:
+            with open(marker) as f:
+                total += int((json.load(f) or {}).get(net.compose_name, 0))
+        except (OSError, ValueError, TypeError):
+            pass
+    return total
 
 
 # A location-free objective: told a flag EXISTS on the segment, never where.
