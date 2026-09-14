@@ -1,7 +1,7 @@
 # MinIO S3-compatible object storage. JSON console logs; no stock Wazuh decoder,
 # so defender visibility is Suricata east-west + the asset record.
 type: objstore-minio
-image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+image: quay.io/minio/minio:latest
 weight: medium
 command: ["server", "/data", "--console-address", ":9001"]
 env:
