@@ -1,0 +1,18 @@
+# An e-commerce segment: storefront web, a checkout app over a database + cache,
+# an orders database, mail, and product-image object storage.
+name: ecommerce
+description: "An e-commerce segment (storefront, checkout, orders DB, mail, CDN)"
+network_default: easy
+default_clients: 4
+teams: [Web, Payments, Ops, Marketing]
+instances:
+  - {type: webserver-nginx, count: 2, role: shop-web,    team: Web}
+  - {type: intranet-app,    count: 1, role: checkout,    team: Payments}
+  - {type: db-postgres,     count: 1, role: pg-checkout, team: Payments}
+  - {type: db-mysql,        count: 1, role: mysql-orders, team: Ops}
+  - {type: cache-redis,     count: 2, role: cart-cache,  team: Web}
+  - {type: mail-postfix,    count: 1, role: mail,        team: Ops}
+  - {type: objstore-minio,  count: 1, role: img-cdn,     team: Marketing}
+edges:
+  - {from: checkout, to: pg-checkout, behavior: psql}
+  - {from: checkout, to: cart-cache,  behavior: redis}

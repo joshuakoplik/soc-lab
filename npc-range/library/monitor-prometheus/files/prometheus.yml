@@ -1,0 +1,15 @@
+# Scrapes itself plus the flock's web/app hosts, producing steady east-west
+# traffic. Targets that don't expose /metrics just fail the scrape (harmless);
+# the point is the recurring connection pattern, not the metrics themselves.
+global:
+  scrape_interval: 30s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+  # The flock wires additional targets in via a generated file if present.
+  - job_name: fleet
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/*.yml']
+        refresh_interval: 60s

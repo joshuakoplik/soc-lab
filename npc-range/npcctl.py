@@ -362,24 +362,34 @@ def spawn_tailers(flock, host_records):
     for h in host_records:
         hostname = h["hostname"]
         sink = os.path.join(FLEET_LOGDIR, hostname + ".log")
+        # origin "stdout" -> docker logs -f; "file:<path>" -> docker exec tail -F
+        # of an in-container log file (services that log to a file, not stdout).
+        origin = h["log"].get("origin", "stdout")
         p = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), "_tail",
-             hostname, h["log"]["program"], h["log"]["prefix"], sink, hostname],
+             hostname, h["log"]["program"], h["log"]["prefix"], sink, hostname, origin],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True)
         recorded.append({"pid": p.pid, "container": hostname, "hostname": hostname,
                          "file": sink})
-        log(f"tailer pid={p.pid}: {hostname} -> logs/fleet/{hostname}.log ({h['log']['prefix']})")
+        log(f"tailer pid={p.pid}: {hostname} -> logs/fleet/{hostname}.log "
+            f"({h['log']['prefix']}, {origin})")
     with open(tailers_path(flock), "w") as f:
         json.dump(recorded, f, indent=2)
     return recorded
 
 
-def cmd_tail(hostname, program, prefix, sink, cid):
-    """Detached child: tail one container's stdout, optionally syslog-prefix each
-    line, append to the per-host fleet file wazuh globs. Runs until killed."""
-    proc = subprocess.Popen(["docker", "logs", "-f", "--tail", "0", cid],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+def cmd_tail(hostname, program, prefix, sink, cid, origin="stdout"):
+    """Detached child: tail one container's log stream, optionally syslog-prefix
+    each line, append to the per-host fleet file wazuh globs. Runs until killed.
+    origin 'stdout' -> `docker logs -f`; 'file:<path>' -> `docker exec tail -F`
+    of an in-container file (for services that log to a file, not stdout)."""
+    if origin.startswith("file:"):
+        path = origin[len("file:"):]
+        cmd = ["docker", "exec", cid, "tail", "-n", "0", "-F", path]
+    else:
+        cmd = ["docker", "logs", "-f", "--tail", "0", cid]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
 
     def _bye(*_):
@@ -714,6 +724,15 @@ def _apply_flag(container, placement, value):
         r = run(["docker", "exec", container, "psql", "-U", "appro", "-d", "appdb",
                  "-c", sql], timeout=30)
         return r.returncode == 0
+    if kind == "mysql_row":
+        table = placement.get("table", "config_secrets")
+        # The reporting user is granted INSERT/UPDATE on config_secrets in the
+        # seed precisely for this (root's password is a per-instance secret).
+        sql = (f"INSERT INTO {table} (`key`,`value`) VALUES ('backup_key','{value}') "
+               f"ON DUPLICATE KEY UPDATE `value`=VALUES(`value`);")
+        r = run(["docker", "exec", container, "mariadb", "-u", "reporting",
+                 "-pr3port-only", "appdb", "-e", sql], timeout=30)
+        return r.returncode == 0
     if kind == "redis_key":
         key = placement.get("key", "app:secret")
         r = run(["docker", "exec", container, "redis-cli", "SET", key, value], timeout=30)
@@ -890,7 +909,8 @@ def main():
     ta.add_argument("prefix")
     ta.add_argument("sink")
     ta.add_argument("cid")
-    ta.set_defaults(func=lambda a: cmd_tail(a.hostname, a.program, a.prefix, a.sink, a.cid))
+    ta.add_argument("origin", nargs="?", default="stdout")
+    ta.set_defaults(func=lambda a: cmd_tail(a.hostname, a.program, a.prefix, a.sink, a.cid, a.origin))
 
     args = ap.parse_args()
     args.func(args)

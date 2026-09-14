@@ -1,0 +1,16 @@
+# A SaaS product's backend segment: API services over a database, with caches,
+# a broker, object storage, and monitoring.
+name: saas-backend
+description: "A SaaS product backend (APIs, DB, cache, queue, object store)"
+network_default: easy
+default_clients: 2
+teams: [Platform, Backend, SRE]
+instances:
+  - {type: api-svc,           count: 2, role: api-orders,   team: Backend}
+  - {type: db-postgres,       count: 1, role: pg-orders,    team: Backend}
+  - {type: cache-redis,       count: 2, role: cache,        team: Platform}
+  - {type: queue-rabbitmq,    count: 1, role: mq,           team: Platform}
+  - {type: objstore-minio,    count: 1, role: s3-assets,    team: Platform}
+  - {type: monitor-prometheus, count: 1, role: mon,         team: SRE}
+edges:
+  - {from: api-orders, to: pg-orders, behavior: psql}

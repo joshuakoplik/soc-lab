@@ -1,0 +1,27 @@
+# Gitea self-hosted git. Router/access logs to console; format isn't perfectly
+# combined so stock web decoding is partial -- 4xx-shaped lines may fire, most
+# is Suricata/asset visibility. Fully patched.
+type: git-gitea
+image: gitea/gitea:1.22
+weight: medium
+env:
+  GITEA__log__MODE: console
+  GITEA__log__LEVEL: Info
+  GITEA__server__DISABLE_SSH: "true"
+  GITEA__security__INSTALL_LOCK: "true"
+log:
+  origin: stdout
+  prefix: syslog
+  program: gitea
+  decodes: false
+  benign_alerts: "partial on 4xx; mostly Suricata/asset"
+asset:
+  role: "Source control (git)"
+  services: [http]
+  cmdb_desc: "{hostname} -- Gitea source-control server, {team} team."
+traffic:
+  client_behaviors: [browse]
+flag:
+  supported: true
+  placements:
+    - {kind: file, dst: /data/git/.flag}

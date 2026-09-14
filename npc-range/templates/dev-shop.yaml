@@ -1,0 +1,15 @@
+# A software team's dev/staging segment: source control, a staging web app,
+# databases, cache, an artifact store, and monitoring.
+name: dev-shop
+description: "A dev/staging segment (git, staging web, db, cache, artifacts)"
+network_default: easy
+default_clients: 2
+teams: [Engineering, QA, SRE]
+instances:
+  - {type: git-gitea,          count: 1, role: git,        team: Engineering}
+  - {type: webserver-nginx,    count: 1, role: staging-web, team: QA}
+  - {type: db-postgres,        count: 1, role: pg-dev,     team: Engineering}
+  - {type: cache-redis,        count: 1, role: redis-dev,  team: Engineering}
+  - {type: objstore-minio,     count: 1, role: artifacts,  team: SRE}
+  - {type: monitor-prometheus, count: 1, role: mon,        team: SRE}
+edges: []

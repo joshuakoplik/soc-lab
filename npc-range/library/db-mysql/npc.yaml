@@ -1,0 +1,30 @@
+# MariaDB with a shallow seeded schema. Error/auth lines go to stderr (docker
+# logs). Tailed RAW -- Wazuh's mysql decoder anchors at start-of-line, so a
+# syslog prefix would break it. Benign traffic is mostly quiet; access-denied
+# is the main thing that alerts.
+type: db-mysql
+image: mariadb:11
+weight: medium
+env:
+  MARIADB_ROOT_PASSWORD: "{secret}"
+  MARIADB_DATABASE: appdb
+  MARIADB_USER: reporting
+  MARIADB_PASSWORD: r3port-only
+init_files:
+  - {src: files/seed.sql, dst: /docker-entrypoint-initdb.d/10-seed.sql}
+log:
+  origin: stdout
+  prefix: raw
+  program: mysql
+  decodes: false
+  benign_alerts: "access-denied -> 50106 L9; benign queries silent"
+asset:
+  role: "Application database"
+  services: [mysql]
+  cmdb_desc: "{hostname} -- MariaDB application database, {team} team."
+traffic:
+  client_behaviors: [mysql]
+flag:
+  supported: true
+  placements:
+    - {kind: mysql_row, table: config_secrets}

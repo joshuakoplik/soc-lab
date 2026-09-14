@@ -1,0 +1,16 @@
+# A data-platform segment: a warehouse and an OLTP database, a data lake, an ETL
+# broker, a query API, and monitoring.
+name: data-platform
+description: "A data platform (warehouse, OLTP, data lake, ETL queue, query API)"
+network_default: easy
+default_clients: 2
+teams: [Data, Analytics, SRE]
+instances:
+  - {type: db-postgres,        count: 1, role: pg-warehouse, team: Data}
+  - {type: db-mysql,           count: 1, role: mysql-oltp,   team: Data}
+  - {type: objstore-minio,     count: 1, role: datalake,     team: Data}
+  - {type: queue-rabbitmq,     count: 1, role: mq-etl,       team: Data}
+  - {type: api-svc,            count: 1, role: api-query,    team: Analytics}
+  - {type: monitor-prometheus, count: 1, role: mon,          team: SRE}
+edges:
+  - {from: api-query, to: pg-warehouse, behavior: psql}

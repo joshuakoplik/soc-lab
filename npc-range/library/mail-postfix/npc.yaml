@@ -1,0 +1,23 @@
+# Postfix SMTP relay. This image logs to stdout; Wazuh's postfix decoder fires
+# on the syslog-prefixed lines (program starts "postfix/"). Reject/SASL-fail
+# lines alert; benign sends are mostly quiet.
+type: mail-postfix
+image: boky/postfix:latest
+weight: medium
+env:
+  ALLOWED_SENDER_DOMAINS: corp.internal
+  HOSTNAME: mail.corp.internal
+log:
+  origin: stdout
+  prefix: syslog
+  program: postfix/smtpd
+  decodes: true
+  benign_alerts: "relay reject -> 3301 L6; benign sends mostly silent"
+asset:
+  role: "Mail relay (SMTP)"
+  services: [smtp]
+  cmdb_desc: "{hostname} -- Postfix SMTP relay, {team} team."
+traffic:
+  client_behaviors: [smtp]
+flag:
+  supported: false

@@ -1,0 +1,26 @@
+# A small JSON REST service backed by PostgreSQL. Like intranet-app, it does a
+# real query per request (east-west traffic). Emits a combined-format access
+# line per request to stdout so Wazuh's web ruleset applies.
+type: api-svc
+build: stubapp
+weight: medium
+env:
+  APP_NAME: "Orders API"
+depends_env:
+  db-postgres: DB_HOST
+log:
+  origin: stdout
+  prefix: syslog
+  program: nginx
+  decodes: true
+  benign_alerts: "web ruleset on 4xx; 200s silent"
+asset:
+  role: "Internal REST API"
+  services: [http]
+  cmdb_desc: "{hostname} -- internal REST API, {team} team."
+traffic:
+  client_behaviors: [browse]
+flag:
+  supported: true
+  placements:
+    - {dst: /app/config.json, kind: file}

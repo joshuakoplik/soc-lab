@@ -1,0 +1,22 @@
+# BIND9 DNS resolver/authoritative server with query logging to stderr. Wazuh's
+# named decoder fires on the syslog-prefixed lines (program named). Zone-transfer
+# denials and query events decode.
+type: dns-bind
+image: internetsystemsconsortium/bind9:9.20
+weight: light
+config_files:
+  - {src: files/named.conf, dst: /etc/bind/named.conf}
+log:
+  origin: stdout
+  prefix: syslog
+  program: named
+  decodes: true
+  benign_alerts: "AXFR denied -> 12145; query/zone events decoded"
+asset:
+  role: "DNS server"
+  services: [dns]
+  cmdb_desc: "{hostname} -- BIND9 DNS server, {team} team."
+traffic:
+  client_behaviors: [dns]
+flag:
+  supported: false

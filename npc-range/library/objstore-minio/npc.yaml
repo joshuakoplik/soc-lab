@@ -1,0 +1,25 @@
+# MinIO S3-compatible object storage. JSON console logs; no stock Wazuh decoder,
+# so defender visibility is Suricata east-west + the asset record.
+type: objstore-minio
+image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+weight: medium
+command: ["server", "/data", "--console-address", ":9001"]
+env:
+  MINIO_ROOT_USER: minioadmin
+  MINIO_ROOT_PASSWORD: "{secret}"
+log:
+  origin: stdout
+  prefix: syslog
+  program: minio
+  decodes: false
+  benign_alerts: "none (no stock decoder) -- Suricata/asset only"
+asset:
+  role: "Object storage"
+  services: [s3]
+  cmdb_desc: "{hostname} -- S3-compatible object storage, {team} team."
+traffic:
+  client_behaviors: [s3]
+flag:
+  supported: true
+  placements:
+    - {kind: file, dst: /data/.private_flag}

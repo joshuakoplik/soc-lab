@@ -1,0 +1,23 @@
+# RabbitMQ broker. No stock Wazuh decoder for its log format, so benign traffic
+# is visible to the defender via Suricata east-west flows + the asset record,
+# not Wazuh alerts. That's honest and expected.
+type: queue-rabbitmq
+image: rabbitmq:3-management-alpine
+weight: medium
+env:
+  RABBITMQ_DEFAULT_USER: svc-app
+  RABBITMQ_DEFAULT_PASS: "{secret}"
+log:
+  origin: stdout
+  prefix: syslog
+  program: rabbitmq
+  decodes: false
+  benign_alerts: "none (no stock decoder) -- Suricata/asset only"
+asset:
+  role: "Message broker"
+  services: [amqp]
+  cmdb_desc: "{hostname} -- RabbitMQ message broker, {team} team."
+traffic:
+  client_behaviors: []
+flag:
+  supported: false

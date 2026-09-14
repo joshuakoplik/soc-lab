@@ -1,0 +1,19 @@
+# Dovecot IMAP/POP server. Logs to stdout; Wazuh's dovecot decoder fires on the
+# syslog-prefixed lines (program dovecot). Login success/fail alert at L3/L5.
+type: imap-dovecot
+image: dovecot/dovecot:latest
+weight: light
+log:
+  origin: stdout
+  prefix: syslog
+  program: dovecot
+  decodes: true
+  benign_alerts: "login -> 9701 L3; auth fail -> 9702 L5"
+asset:
+  role: "Mailbox server (IMAP)"
+  services: [imap]
+  cmdb_desc: "{hostname} -- Dovecot IMAP server, {team} team."
+traffic:
+  client_behaviors: [imap]
+flag:
+  supported: false

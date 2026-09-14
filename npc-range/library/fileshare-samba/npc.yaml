@@ -1,0 +1,25 @@
+# Samba SMB file share. smbd logs; Wazuh's smbd rules mostly L0-L5 (connection
+# denied -> 13102 L5). Benign browsing is quiet. Fully patched.
+type: fileshare-samba
+image: dperson/samba:latest
+weight: medium
+# -p keeps it in the foreground; -s defines a share; -u a user. Read-only share
+# of a plausible finance dir.
+command: ["-p", "-s", "finance;/share;yes;no;no;svc-finance",
+          "-u", "svc-finance;Sh4reMe!"]
+log:
+  origin: stdout
+  prefix: syslog
+  program: smbd
+  decodes: false
+  benign_alerts: "connection denied -> 13102 L5; benign browse quiet"
+asset:
+  role: "File share (SMB)"
+  services: [smb]
+  cmdb_desc: "{hostname} -- Samba file share, {team} team."
+traffic:
+  client_behaviors: [smb]
+flag:
+  supported: true
+  placements:
+    - {kind: file, dst: /share/quarterly/.notes.txt}

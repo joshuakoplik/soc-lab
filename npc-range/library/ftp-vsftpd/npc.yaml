@@ -1,0 +1,28 @@
+# vsftpd FTP server. Logs to /var/log/vsftpd.log (tailed via docker exec).
+# Wazuh's vsftpd decoder fires on the syslog-prefixed lines (program vsftpd):
+# login fail -> 11403 L5, brute -> 11451 L10.
+type: ftp-vsftpd
+image: fauria/vsftpd:latest
+weight: light
+env:
+  FTP_USER: svc-transfer
+  # Fixed (not {secret}) so the traffic generator can actually log in and
+  # produce successful-transfer telemetry, not only auth failures.
+  FTP_PASS: changeit
+  PASV_ADDRESS: 127.0.0.1
+log:
+  origin: "file:/var/log/vsftpd.log"
+  prefix: syslog
+  program: vsftpd
+  decodes: true
+  benign_alerts: "login fail -> 11403 L5; benign transfers decoded"
+asset:
+  role: "File transfer (FTP)"
+  services: [ftp]
+  cmdb_desc: "{hostname} -- vsftpd file transfer server, {team} team."
+traffic:
+  client_behaviors: [ftp]
+flag:
+  supported: true
+  placements:
+    - {kind: file, dst: /home/vsftpd/svc-transfer/.flag}

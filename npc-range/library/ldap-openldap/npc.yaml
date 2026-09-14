@@ -1,0 +1,26 @@
+# OpenLDAP directory seeded with a few people. Logs to stdout; Wazuh's slapd
+# decoder fires on the syslog-prefixed lines (program slapd). Bind ACCEPT/result
+# lines alert at L3.
+type: ldap-openldap
+image: bitnami/openldap:2.6
+weight: light
+env:
+  LDAP_ADMIN_USERNAME: admin
+  LDAP_ADMIN_PASSWORD: "{secret}"
+  LDAP_ROOT: dc=corp,dc=internal
+  LDAP_USERS: alice,bob,carol
+  LDAP_PASSWORDS: changeit1,changeit2,changeit3
+log:
+  origin: stdout
+  prefix: syslog
+  program: slapd
+  decodes: true
+  benign_alerts: "bind accept -> 2508 L3; failures decoded"
+asset:
+  role: "Directory server (LDAP)"
+  services: [ldap]
+  cmdb_desc: "{hostname} -- OpenLDAP directory, {team} team."
+traffic:
+  client_behaviors: [ldap]
+flag:
+  supported: false

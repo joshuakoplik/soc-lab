@@ -1,0 +1,23 @@
+# Apache httpd serving a shallow docs site. Combined access log to stdout;
+# Wazuh's web-accesslog decoder / 31100 rules fire on it (program=apache).
+type: webserver-apache
+image: httpd:2.4
+weight: light
+config_files:
+  - {src: files/index.html, dst: /usr/local/apache2/htdocs/index.html}
+log:
+  origin: stdout
+  prefix: syslog
+  program: apache
+  decodes: true
+  benign_alerts: "404s -> 31101 L5; 200s silent"
+asset:
+  role: "Documentation web server"
+  services: [http]
+  cmdb_desc: "{hostname} -- Apache documentation server, {team} team."
+traffic:
+  client_behaviors: [browse]
+flag:
+  supported: true
+  placements:
+    - {dst: /usr/local/apache2/htdocs/backup/notes.txt, kind: file}

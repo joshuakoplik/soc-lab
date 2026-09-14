@@ -1,0 +1,21 @@
+# Prometheus monitoring. Scrapes the flock's stub apps (east-west traffic). No
+# stock Wazuh decoder, so defender visibility is Suricata east-west + asset.
+type: monitor-prometheus
+image: prom/prometheus:v2.53.1
+weight: medium
+config_files:
+  - {src: files/prometheus.yml, dst: /etc/prometheus/prometheus.yml}
+log:
+  origin: stdout
+  prefix: syslog
+  program: prometheus
+  decodes: false
+  benign_alerts: "none (no stock decoder) -- Suricata/asset only"
+asset:
+  role: "Monitoring/metrics"
+  services: [http]
+  cmdb_desc: "{hostname} -- Prometheus monitoring server, {team} team."
+traffic:
+  client_behaviors: [browse]
+flag:
+  supported: false
