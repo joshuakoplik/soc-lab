@@ -370,6 +370,16 @@ if [ "$DO_DB" = "1" ]; then
   # invocation. That's intentional: flock lifecycle is independent of reset.sh.
   "$PY" pipeline/reset_lab.py --db
 
+  # A running `ingest.py --follow` held the OLD soc.db inode open across this
+  # unlink+recreate; it would keep writing events into the detached ghost file
+  # while the fresh soc.db stayed empty (bit us more than once). The current
+  # ingest self-heals -- ingest._db_identity notices the swap and reconnects to
+  # the new file within one poll interval -- so no restart is needed here.
+  if pgrep -f "ingest.py --follow" >/dev/null 2>&1; then
+    echo "[reset] ingest.py --follow is running -- it reconnects to the fresh soc.db"
+    echo "        on its next poll (ingest._db_identity); no action needed."
+  fi
+
   DASH_PID="$(pgrep -f 'dashboard/server\.py' | head -1 || true)"
   if [ -n "$DASH_PID" ]; then
     echo "[reset] dashboard server is running (pid $DASH_PID) -- its live-push connection"

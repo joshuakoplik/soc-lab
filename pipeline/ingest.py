@@ -25,6 +25,19 @@ from llm_view import compute_llm_view, check_llm_view_size, print_strip_summary 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DB_PATH = os.path.join(ROOT, "soc.db")
+
+def _db_identity(path=None):
+    """(dev, ino) of the db file, or None if it's gone. --follow uses this to
+    notice a swap: reset.sh's --db wipe UNLINKS and recreates soc.db as a brand
+    new inode, and a connection opened before that keeps writing to the old,
+    detached inode that nothing will ever read again (confirmed live -- the
+    tailer looked healthy, totals climbing, while the new soc.db stayed empty).
+    Same guard the dashboard's poll_loop already uses to reconnect."""
+    try:
+        st = os.stat(path or DB_PATH)
+        return (st.st_dev, st.st_ino)
+    except OSError:
+        return None
 NW_TELEMETRY = os.path.join(ROOT, "northwind-range", "telemetry")
 
 SOURCES = [
@@ -303,6 +316,7 @@ def main():
     args = ap.parse_args()
 
     conn = connect(reset=args.reset)
+    db_id = _db_identity()
     print(f"[*] db: {DB_PATH}")
 
     total = 0
@@ -325,6 +339,18 @@ def main():
     try:
         while True:
             time.sleep(args.interval)
+            cur_id = _db_identity()
+            if cur_id is not None and cur_id != db_id:
+                # soc.db was swapped out (reset --db). Drop the stale handle on
+                # the detached inode and reopen the new file, or every event
+                # from here on vanishes into a ghost nothing reads.
+                print("[*] soc.db was replaced (reset --db?) -- reconnecting to the new file")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = connect()
+                db_id = cur_id
             for source, path in SOURCES:
                 n = read_new(conn, source, path)
                 if n:
