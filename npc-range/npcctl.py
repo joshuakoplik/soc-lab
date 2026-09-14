@@ -764,6 +764,45 @@ def cmd_traffic(args):
         log("traffic stopped.")
 
 
+FORBIDDEN_RE = re.compile(r"(?i)\b(npc|decoy|flock|side-quest|lure|honey(pot)?)\b")
+
+
+def cmd_audit(args):
+    """Leak audit: from soc-attacker's vantage, grep every attacker-visible
+    channel of a flock's hosts for words that would give the game away
+    (npc/decoy/flock/lure/honey). rDNS, HTTP headers, banners. Also checks the
+    asset rows the DEFENDER sees carry no decoy marker. Operator-run; findings
+    print loudly. Exit non-zero if anything leaks."""
+    m = load_manifest(args.flock)
+    if not m:
+        die(f"no such flock {args.flock!r}")
+    leaks = []
+
+    def check(where, text):
+        if text and FORBIDDEN_RE.search(text):
+            hit = FORBIDDEN_RE.search(text).group(0)
+            leaks.append((where, hit, text.strip()[:120]))
+
+    for h in m["hosts"]:
+        name, ip = h["hostname"], h.get("ip")
+        check(f"hostname {name}", name)
+        check(f"asset_desc {name}", h.get("asset_desc"))
+        if not ip:
+            continue
+        # reverse DNS as the attacker sees it
+        r = run(["docker", "exec", net_topology.ATTACKER_CONTAINER, "getent", "hosts", ip], timeout=15)
+        check(f"rDNS {ip}", r.stdout)
+        # HTTP banner/headers (harmless if not a web host)
+        r = run(["docker", "exec", net_topology.ATTACKER_CONTAINER,
+                 "curl", "-s", "-I", "--max-time", "6", f"http://{ip}/"], timeout=15)
+        check(f"HTTP headers {ip}", r.stdout)
+    if leaks:
+        for where, hit, ctx in leaks:
+            log(f"LEAK [{hit}] in {where}: {ctx}")
+        die(f"{len(leaks)} leak(s) found in {args.flock!r}", code=1)
+    log(f"audit clean: no forbidden terms on any attacker/defender-visible channel of {args.flock!r}")
+
+
 def cmd_pull(_args):
     """Refresh every library image to its current stable tag -- 'fully patched'."""
     images = sorted({t["image"] for t in load_all_types().values() if t.get("image")})
@@ -836,6 +875,10 @@ def main():
     tr.add_argument("action", choices=["start", "stop"])
     tr.add_argument("flock")
     tr.set_defaults(func=cmd_traffic)
+
+    au = sub.add_parser("audit")
+    au.add_argument("flock")
+    au.set_defaults(func=cmd_audit)
 
     sub.add_parser("pull").set_defaults(func=cmd_pull)
     sub.add_parser("build").set_defaults(func=cmd_build)
