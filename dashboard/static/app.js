@@ -4,6 +4,7 @@
 const feedEvents = document.getElementById("feed-events");
 const timelineEl = document.getElementById("timeline");   // the unified defender|attacker time axis
 const feedDiary = document.getElementById("feed-diary");  // attacker's own reasoning, streamed unedited
+const feedDefender = document.getElementById("feed-defender");  // threat-hunter feed: incidents, hunt status, notes, leads
 const diariedIds = new Set();  // pending_action ids already narrated (they re-fire on approve/execute)
 
 const candidatesById = new Map();   // id -> candidate row
@@ -513,6 +514,7 @@ function resetLocalState() {
   feedEvents.innerHTML = "";
   timelineEl.innerHTML = "";
   feedDiary.innerHTML = "";
+  feedDefender.innerHTML = "";
   diariedIds.clear();
   candidatesById.clear();
   sessionsById.clear();
