@@ -118,7 +118,7 @@ function fmtClock(ts) {
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
 
-function addTimelineEntry(side, ts, icon, statusClass, label, detailKey) {
+function addTimelineEntry(side, ts, icon, statusClass, label, detailKey, tool) {
   const placeholder = timelineEl.querySelector(".empty");
   if (placeholder) placeholder.remove();
 
@@ -128,6 +128,7 @@ function addTimelineEntry(side, ts, icon, statusClass, label, detailKey) {
   row.dataset.epoch = epoch;
   if (detailKey) row.dataset.detailKey = detailKey;
   row.dataset.etype = (detailKey || "").split(":")[0];
+  if (tool) row.dataset.tool = tool;
   row.innerHTML =
     `<span class="tl-ic">${icon}</span>` +
     `<span class="tl-tag">${side === "def" ? "DEF" : "ATK"}</span>` +
@@ -156,13 +157,17 @@ const TL_FILTERS = [
   { key: "win",      label: "win",      etypes: ["wins"] },
   { key: "flag",     label: "flag",     etypes: ["captured_flags"] },
   { key: "defender", label: "defender", etypes: ["triage", "agent_alerts", "human_pages", "block_recommendations", "block_ip_calls"] },
+  { key: "shell_exec", label: "shell_exec", tools: ["shell_exec"] },
 ];
 const hiddenFilters = new Set();
 
 function rebuildFilterStyle() {
   const sel = [];
   for (const f of TL_FILTERS) {
-    if (hiddenFilters.has(f.key)) for (const e of f.etypes) sel.push(`#timeline [data-etype="${e}"]`);
+    if (hiddenFilters.has(f.key)) {
+      for (const e of (f.etypes || [])) sel.push(`#timeline [data-etype="${e}"]`);
+      for (const t of (f.tools || [])) sel.push(`#timeline [data-tool="${t}"]`);
+    }
   }
   let st = document.getElementById("tl-filter-style");
   if (!st) { st = document.createElement("style"); st.id = "tl-filter-style"; document.head.appendChild(st); }
@@ -404,7 +409,7 @@ function onPendingAction(row) {
   else if (row.approved) { icon = "\u2705"; cls = "st-warning"; verb = "approved"; ts = row.approved_at || row.created; }
   else { icon = "\u{1F3AF}"; cls = "st-muted"; verb = "propose"; ts = row.created; }
   addTimelineEntry("atk", ts, icon, cls,
-    `S${row.session_id} ${verb}: ${row.tool}\u2192${row.target}`, `pending_actions:${row.id}`);
+    `S${row.session_id} ${verb}: ${row.tool}\u2192${row.target}`, `pending_actions:${row.id}`, row.tool);
   // Diary: the "why" it wrote before acting. Once per action (pending_actions
   // re-fire on approve/execute), timestamped at propose so it reads in order.
   if (row.rationale && !diariedIds.has(row.id)) {
@@ -416,7 +421,7 @@ function onPendingAction(row) {
 
 function onLoot(row) {
   addTimelineEntry("atk", row.created, "\u{1F4E6}", "",
-    `S${row.session_id} loot: ${row.tool}${row.target ? " \u00b7 " + row.target : ""}`, `loot:${row.id}`);
+    `S${row.session_id} loot: ${row.tool}${row.target ? " \u00b7 " + row.target : ""}`, `loot:${row.id}`, row.tool);
   addLootDiary(row);
 }
 
