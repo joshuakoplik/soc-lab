@@ -141,6 +141,36 @@ throughput and on anything originating inside").
 - **PR 6 — (optional, defer) `assumed_breach`**: attacker starts with a foothold
   on a named inside host.
 
+## 6a. Spike result (2026-09-14) — PASSED, Design B validated
+
+Prototyped manually (raw docker + iptables via `soc-block-enforcer`, `hard` mode,
+nginx on `soclab-hard`) before writing any code:
+
+- attacker on `soclab-inet` only, off the inside bridge → **HTTP 200 to the edge
+  `10.211.99.1:80`** (reaches nginx through DNAT) but **timeout to nginx's real
+  `10.211.20.4:80`** (Docker isolation holds — no bypass) and **refused on the
+  edge `:443`** (unexposed port closed). Exactly the intended behavior.
+- The working ruleset (→ the PR-3 generator):
+  ```
+  nat PREROUTING  -i soclab-inet0 -d <edge> -p tcp --dport <P> -j DNAT --to <host>:<P>
+  nat POSTROUTING -o <inside0> -p tcp -d <host> --dport <P> -j MASQUERADE
+  DOCKER-USER     -i soclab-inet0 -o <inside0> -p tcp -d <host> --dport <P> -j ACCEPT
+  DOCKER-USER     -i <inside0> -o soclab-inet0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  ```
+  ACCEPT in `DOCKER-USER` (first chain off `FORWARD`) wins ahead of Docker's
+  isolation drop. `MASQUERADE` keeps the return path on one bridge.
+- **Confirmed §6 risks:** (3) the attacker's OUTPUT egress lockdown DROPs the new
+  `.99` until `soclab-inet` is added to it — so `soclab-inet` must join the
+  `net_topology` subnet list `reset.sh --attacker` iterates (falls out for free by
+  adding the network there). (2) Suricata (started before the bridge existed) will
+  NOT watch `soclab-inet0` without a restart — same "restart to pick up the new
+  bridge" the dealer range already does; inside-bridge east-west visibility is
+  unaffected. (1) inter-bridge routing + DNAT works from the existing
+  block-enforcer container — no new privileged container needed.
+- **Remaining unknown for PR 4:** how firewall LOG lines get into a file bucket for
+  Wazuh. `-j LOG` goes to the host kernel ring buffer; the tail into
+  `/lab-logs/firewall/` likely needs NFLOG→ulogd2 or a syslog path, TBD in PR 4.
+
 ## 6. Risks to validate in the PR-2 spike (before committing to the rest)
 
 1. **Docker inter-bridge routing + DNAT hairpin.** Docker's
