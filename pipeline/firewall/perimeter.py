@@ -49,11 +49,18 @@ sys.path.insert(0, os.path.join(PIPELINE, "redteam"))
 import lab_modes  # noqa: E402
 
 ENFORCER_CONTAINER = "soc-block-enforcer"
-FILTER_CHAIN = "SOCLAB-PERIMETER"
+FILTER_CHAIN = "SOCLAB-PERIMETER"          # forward: inet->inside
+INPUT_CHAIN = "SOCLAB-PERIMETER-IN"        # input: scans of the edge itself
 NAT_COMMENT = "soclab-perimeter"
 INET_MODE = "inet"
-LOG_PREFIX_ALLOW = "FW-ALLOW-THRU "   # trailing space is the iptables convention
-LOG_PREFIX_DENY = "FW-DENY-EXT "
+# Firewall logs go out via NFLOG (netlink group), NOT -j LOG: the kernel ring
+# buffer isn't readable here (dmesg_restrict=1, and neither soc-block-enforcer
+# nor the host user has CAP_SYSLOG), whereas NFLOG needs only CAP_NET_ADMIN,
+# which the enforcer already has. ulogd (running inside the enforcer) reads this
+# group and writes LOGEMU-format lines to /lab-logs/firewall/ for Wazuh (PR4).
+NFLOG_GROUP = 100
+LOG_PREFIX_ALLOW = "FW-ALLOW-THRU"   # nflog-prefix (<=64 chars, no trailing space)
+LOG_PREFIX_DENY = "FW-DENY-EXT"
 
 
 class PerimeterError(Exception):
@@ -113,12 +120,17 @@ def _nat_rules_with_comment(chain):
 def clear():
     """Remove every perimeter rule. Idempotent and always safe -- a no-op when
     nothing is installed. Never touches block_ip rules or Docker's own chains."""
-    # 1. remove the jump(s) from DOCKER-USER
+    # 1. remove the jump(s) from DOCKER-USER (forward) and INPUT (edge scans)
     while _ipt("-C", "DOCKER-USER", "-j", FILTER_CHAIN).returncode == 0:
         _ipt("-D", "DOCKER-USER", "-j", FILTER_CHAIN)
-    # 2. flush + delete the chain (ignore "no such chain")
-    _ipt("-F", FILTER_CHAIN)
-    _ipt("-X", FILTER_CHAIN)
+    for line in [ln for ln in _ipt("-S", "INPUT").stdout.splitlines() if f"-j {INPUT_CHAIN}" in ln]:
+        argv = line.split()
+        argv[0] = "-D"
+        _ipt(*argv)
+    # 2. flush + delete both chains (ignore "no such chain")
+    for chain in (FILTER_CHAIN, INPUT_CHAIN):
+        _ipt("-F", chain)
+        _ipt("-X", chain)
     # 3. delete the tagged nat rules
     for chain in ("PREROUTING", "POSTROUTING"):
         for line in _nat_rules_with_comment(chain):
@@ -182,14 +194,34 @@ def apply(mode):
     _ipt("-A", FILTER_CHAIN, "-i", inet_if, "-o", inside_if,
          "-m", "conntrack", "--ctstate", "NEW",
          "-m", "conntrack", "--ctstate", "DNAT",
-         "-j", "LOG", "--log-prefix", LOG_PREFIX_ALLOW, "--log-level", "6", check=True)
+         "-j", "NFLOG", "--nflog-group", NFLOG_GROUP, "--nflog-prefix", LOG_PREFIX_ALLOW, check=True)
     _ipt("-A", FILTER_CHAIN, "-i", inet_if, "-o", inside_if,
          "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT", check=True)
-    # everything else inet->inside (incl. direct-to-real-IP probing): log + drop.
+    # everything else inet->inside (e.g. direct-to-real-IP probing): log + drop.
+    # (Most such probes are dropped earlier by Docker's inter-bridge isolation,
+    # so this is primarily a containment safety net; the realistic external-scan
+    # noise is logged on INPUT below, where edge-IP scans actually land.)
     _ipt("-A", FILTER_CHAIN, "-i", inet_if, "-o", inside_if,
          "-m", "conntrack", "--ctstate", "NEW",
-         "-j", "LOG", "--log-prefix", LOG_PREFIX_DENY, "--log-level", "6", check=True)
+         "-j", "NFLOG", "--nflog-group", NFLOG_GROUP, "--nflog-prefix", LOG_PREFIX_DENY, check=True)
     _ipt("-A", FILTER_CHAIN, "-i", inet_if, "-o", inside_if, "-j", "DROP", check=True)
+
+    # INPUT-side handling: a remote attacker scans the EDGE IP (= the host's inet
+    # address). Exposed ports are DNAT'd in PREROUTING and go to FORWARD, so a
+    # connection arriving here on soclab-inet0 is aimed at the HOST itself. The
+    # edge exposes NOTHING of the host to the internet segment, so: let replies
+    # pass, LOG the NEW probe (the "internet background noise" a real firewall
+    # records), then DROP. The DROP is load-bearing -- without it the attacker
+    # reaches host services bound to 0.0.0.0 (e.g. the host's own sshd on :22), a
+    # lab-escape vector. The jump is scoped `-i soclab-inet0`, so nothing else on
+    # the shared host INPUT chain is touched.
+    _ipt("-N", INPUT_CHAIN, check=True)
+    _ipt("-I", "INPUT", "-i", inet_if, "-j", INPUT_CHAIN, check=True)
+    _ipt("-A", INPUT_CHAIN, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+         "-j", "RETURN", check=True)
+    _ipt("-A", INPUT_CHAIN, "-m", "conntrack", "--ctstate", "NEW",
+         "-j", "NFLOG", "--nflog-group", NFLOG_GROUP, "--nflog-prefix", LOG_PREFIX_DENY, check=True)
+    _ipt("-A", INPUT_CHAIN, "-j", "DROP", check=True)
 
     return {"mode": mode, "inside_iface": inside_if, "inet_iface": inet_if,
             "edge_ip": edge_ip, "published": published}
@@ -201,6 +233,8 @@ def status():
     print(_ipt("-S", "DOCKER-USER").stdout, end="")
     print(f"== filter: {FILTER_CHAIN} ==")
     print(_ipt("-S", FILTER_CHAIN).stdout or "(chain absent)\n", end="")
+    print(f"== filter: {INPUT_CHAIN} (edge scan logging) ==")
+    print(_ipt("-S", INPUT_CHAIN).stdout or "(chain absent)\n", end="")
     print("== nat: tagged rules ==")
     for chain in ("PREROUTING", "POSTROUTING"):
         for ln in _nat_rules_with_comment(chain):

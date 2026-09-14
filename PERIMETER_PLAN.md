@@ -190,6 +190,30 @@ which stays only as a containment safety net. Containment itself is complete
 (everything non-exposed is blocked three ways: perimeter DROP, host INPUT, Docker
 isolation).
 
+## 6c. PR-4 result (2026-09-14) — firewall→Wazuh→soc.db verified end-to-end
+
+Transport decided (the "simpler" delegated call): **NFLOG → ulogd (LOGEMU) → file**,
+because `-j LOG`'s kernel ring buffer is unreadable here (`dmesg_restrict=1`, and
+neither the host user nor `soc-block-enforcer` has `CAP_SYSLOG`), whereas NFLOG
+needs only `CAP_NET_ADMIN`, which the enforcer already has. ulogd runs inside
+`soc-block-enforcer` (no new container) reading NFLOG group 100, writing
+`/lab-logs/firewall/firewall.log`.
+
+Verified live: `edge:80 → 200` → `FW-ALLOW-THRU` line → Wazuh **rule 100310
+(level 5)** with srcip/dstport decoded → `alerts.json` → `ingest.py` → `soc.db`
+(`source=wazuh`, `src_ip=10.211.99.2`, `dst_port=80`). Denies decode to **rule
+100320 level 0** — logged, never alerted, never a candidate (the noise model); a
+20+/60s scan burst rolls up to **rule 100321 level 6** (weak signal). **No
+`normalize.py` change** — firewall alerts ride the existing `wazuh` source, and
+`rule_wazuh_alert` in detect promotes them like any other SIEM alert.
+
+Also fixed a real containment hole the log test exposed: the host's own sshd
+(0.0.0.0:22) was reachable from the attacker's inet segment; the INPUT chain now
+DROPs (not just logs) all NEW inet→host traffic, so the edge exposes nothing of
+the host. New files: `firewall/ulogd.conf`, `wazuh/local_decoder.xml`. `action`
+had to be renamed to `fwaction` in the decoder/rules (`action` is a reserved
+static Wazuh field a rule can't regex-match).
+
 ## 6. Risks to validate in the PR-2 spike (before committing to the rest)
 
 1. **Docker inter-bridge routing + DNAT hairpin.** Docker's
