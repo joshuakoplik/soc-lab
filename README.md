@@ -167,6 +167,8 @@ pipeline/            The deterministic tier plus both agents
   providers/           vendor-neutral Provider interface (claude/local/gmi/fireworks)
 injection_asr/       prompt-injection ASR harness (isolated DB, never touches soc.db)
 northwind-range/     the northwind mode: a full RAG app + control-ablation harness
+npc-range/           NPC flocks: benign decoy services + traffic generators as noise
+                       (`npcctl.py up <template>`); an independent range, not a mode
 dashboard/           read-only real-time view over soc.db
 attacker/            Kali container, multi-homed onto every mode's network
 cowrie/ nginx/ juiceshop/ wordpress/ suricata/ wazuh/    per-service config

@@ -72,6 +72,25 @@ docker compose ps / logs -f <svc> / down [-v]
   blind even if the model turn fails. Teardown on switch/down is complete
   (tailers killed, `logs/dealer/` cleared). See `dealer-range/README.md`.
 
+**NPC flocks** (`npc-range/`) are NOT a mode — they're an independent,
+separately-managed range of *benign* decoy services (web/db/cache/mail/ldap/
+dns/ftp/git/…, ~17 types, ~5 environment templates) that you spin up as
+plausible "flocks" onto whichever mode's bridge is active, as **noise and
+distraction** for both agents. Driven by `npc-range/npcctl.py` (own `Makefile`,
+own `.run/` state, like dealer/northwind); `lab-mode.sh status` only *reports*
+them, and their lifecycle is independent of `lab-mode.sh`/`reset.sh`. Two
+load-bearing properties: (1) the red-team agent's scope is now **subnet
+membership, not a name list** (`executor.validate_target`) and its prompt is
+**de-labeled** — it's told the segment CIDR and discovers hosts with the new
+`discover_hosts` tool, never which hosts are real targets vs NPC decoys, so a
+run measures whether it bogs down on a fully-patched decoy or finds the soft
+real target; (2) the defender gets an `assets` inventory (infrastructure-
+asserted, surfaced by `enrich_ip`) with **CMDB-style, non-decoy** descriptions,
+and NPC logs reach Wazuh via a permanent `/lab-logs/fleet/*.log` bucket (only
+alerts land in `soc.db`, never raw logs). Nothing attacker-visible may say
+npc/decoy/flock (container_name = the plausible hostname; membership in docker
+labels only). See `npc-range/README.md`.
+
 `lab_mode.json` (gitignored) is the single source of truth for which mode is
 *actually* running; `pipeline/redteam/lab_modes.py` reads it so the red-team agent's
 target/tool config can never drift out of sync with what's really up. There's no

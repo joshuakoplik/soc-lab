@@ -236,6 +236,12 @@ case "$VERB" in
     else
       echo "(dealer range not up)"
     fi
+    echo
+    # NPC flocks are an independent range (npc-range/), never started/stopped by
+    # lab-mode -- only reported here. Managed with `make -C npc-range ...` /
+    # npc-range/npcctl.py.
+    echo "-- npc flocks (separate range: npc-range/) --"
+    make -C npc-range status 2>/dev/null || echo "(no flocks up)"
     ;;
   *)
     echo "usage: $0 {bootstrap|up|down|switch|status|easy|hard|wordpress|northwind|dealer} [mode] [dealer-target]" >&2

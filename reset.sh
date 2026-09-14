@@ -363,6 +363,11 @@ fi
 
 if [ "$DO_DB" = "1" ]; then
   echo "[reset] wiping soc.db..."
+  # Note: this recreates the assets inventory table (triage/schema.sql) empty.
+  # NPC-flock asset rows are NOT reseeded here -- they are re-asserted from the
+  # flock manifests by `npc-range/npcctl.py reconcile` (also run by npcctl
+  # status/up), so a --db wipe just leaves assets empty until the next npcctl
+  # invocation. That's intentional: flock lifecycle is independent of reset.sh.
   "$PY" pipeline/reset_lab.py --db
 
   DASH_PID="$(pgrep -f 'dashboard/server\.py' | head -1 || true)"
