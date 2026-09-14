@@ -244,6 +244,15 @@ if [ "$DO_ATTACKER" = "1" ]; then
     exit 1
   fi
   echo "[reset] soc-attacker rebuilt, provisioned, and locked down (real internet: $REAL_NET); attacker/loot cleared"
+  # A rebuild reconnects soc-attacker to its compose-declared (inside) networks,
+  # i.e. the insider placement. If the lab is in posture=remote, re-assert it so
+  # the fresh attacker lands on the internet segment and the perimeter is applied
+  # (PERIMETER_PLAN.md PR5) -- otherwise a reset silently drops back to insider.
+  POSTURE="$("$PY" -c "import json;print(json.load(open('lab_mode.json')).get('posture','insider'))" 2>/dev/null || echo insider)"
+  if [ "$POSTURE" = "remote" ]; then
+    echo "[reset] posture=remote -- re-homing rebuilt attacker to the internet segment + applying perimeter..."
+    ./lab-mode.sh posture remote
+  fi
 fi
 
 if [ "$DO_TARGET" = "1" ]; then

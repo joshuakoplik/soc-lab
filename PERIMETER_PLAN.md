@@ -214,6 +214,34 @@ the host. New files: `firewall/ulogd.conf`, `wazuh/local_decoder.xml`. `action`
 had to be renamed to `fwaction` in the decoder/rules (`action` is a reserved
 static Wazuh field a rule can't regex-match).
 
+## 6d. PR-5 result (2026-09-14) — agent-facing half, both sides play the new game
+
+- `executor.validate_target`: a `remote` branch that fences the attacker to the
+  perimeter's exposed **edge** (the inet gateway) and rejects inside IPs (they
+  need a foothold + pivot via shell_exec's unfenced lane). Insider unchanged.
+  Unit-tested: edge allowed, inside/off-lab rejected, insider regression holds.
+- Recon prompt (`agent.py`): posture-aware `_POSITION_INTRO` + `_SEGMENT_CIDR`.
+  Under remote it tells the attacker it's on the public internet, only the edge
+  is reachable, internals need a pivot -- WITHOUT naming the mode or which ports
+  are exposed (recon-from-zero holds). Verified under both postures.
+- `reset.sh --attacker`: after rebuilding soc-attacker (which reconnects it to the
+  inside networks), re-asserts posture=remote so it lands on the internet segment
+  and the perimeter is re-applied -- otherwise a reset silently dropped to insider.
+- Hunter doctrine (`hunt/agent.py`): a posture line prepended to each chunk under
+  remote ("internet recon is background noise; alert on throughput and on
+  internal-origin"). Empty under insider, so the tuned insider behavior is
+  byte-identical.
+
+## 7. Status: PR 0-5 complete. PR 6 (assumed_breach) deferred.
+
+The feature is functionally complete and every phase verified live. PR 6
+(`assumed_breach` posture -- attacker starts with a foothold on a named inside
+host) remains optional/deferred. The natural full acceptance test is a live
+`posture remote` campaign (red-team recon->assess against the edge, hunter
+reacting to the resulting soc.db candidates) on a strong model -- the components
+are each verified; the end-to-end agent behavior under remote is the one thing
+only a real run exercises.
+
 ## 6. Risks to validate in the PR-2 spike (before committing to the rest)
 
 1. **Docker inter-bridge routing + DNAT hairpin.** Docker's
