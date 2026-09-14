@@ -109,6 +109,24 @@ LAB_NETWORKS = (
         bridge_iface="soclab-dealer0",
         internal=True,
     ),
+    # The perimeter's EXTERNAL segment -- "the internet" from the lab's POV (see
+    # PERIMETER_PLAN.md). NOT a vuln mode: mode="inet" is a sentinel, never looked
+    # up via by_mode() or MODES[]. Registered here (rather than tracked separately)
+    # so it falls into every LAB_NETWORKS consumer for free: bootstrap() creates
+    # it, `--subnets` puts it in soc-attacker's egress allow-list (reset.sh
+    # --attacker -- without which the attacker's own OUTPUT lockdown DROPs its .99
+    # traffic, confirmed in the PR-2 spike), network_for_ip() lets block_ip target
+    # the attacker's inet address, and `--ifaces` feeds Suricata's discovery.
+    # Under posture=insider it's an empty, harmless bridge; under posture=remote
+    # soc-attacker is re-homed onto it alone (lab-mode.sh). NOT internal: the host
+    # must route/DNAT through it, and it publishes the perimeter's exposed edge.
+    LabNetwork(
+        mode="inet",
+        compose_name="soclab-inet",
+        subnet=ipaddress.ip_network("10.211.99.0/24"),
+        gateway=ipaddress.ip_address("10.211.99.1"),
+        bridge_iface="soclab-inet0",
+    ),
 )
 
 # soc-attacker is the one container attached to every network above,
@@ -194,9 +212,14 @@ if __name__ == "__main__":
     elif "--subnets" in sys.argv:
         for net in LAB_NETWORKS:
             print(net.subnet)
+    elif "--names" in sys.argv:
+        # docker network names, one per line -- lab-mode.sh's attacker re-homing
+        # filters soclab-inet out of this to get the inside bridges.
+        for net in LAB_NETWORKS:
+            print(net.compose_name)
     elif "--ifaces" in sys.argv:
         for net in LAB_NETWORKS:
             print(net.bridge_iface)
     else:
-        print("usage: net_topology.py [--bootstrap|--subnets|--ifaces]", file=sys.stderr)
+        print("usage: net_topology.py [--bootstrap|--subnets|--ifaces|--names]", file=sys.stderr)
         sys.exit(1)

@@ -1,0 +1,32 @@
+<!--
+  Perimeter firewall decoder (PERIMETER_PLAN.md PR4).
+
+  ulogd (LOGEMU) writes classic netfilter-style lines to /lab-logs/firewall/
+  firewall.log, e.g.:
+
+    Sep 14 17:01:05 host FW-ALLOW-THRU IN=soclab-inet0 OUT=soclab-hard0 MAC=... \
+      SRC=10.211.99.2 DST=10.211.20.4 LEN=60 ... PROTO=TCP SPT=54770 DPT=80 ... SYN ...
+    Sep 14 17:01:05 host FW-DENY-EXT IN=soclab-inet0 OUT= MAC=... \
+      SRC=10.211.99.2 DST=10.211.99.1 ... PROTO=TCP SPT=39554 DPT=443 ... SYN ...
+
+  There is no "program:" token, so Wazuh's predecoder leaves program_name empty
+  and the message begins at "FW-...". We decode the nflog-prefix as `action` and
+  pull the 5-tuple into Wazuh's STANDARD field names (srcip/dstip/srcport/
+  dstport/protocol) so normalize_wazuh maps them to soc.db's src_ip/dst_port with
+  no change (see pipeline/normalize.py) and rules can use <same_source_ip>.
+
+  All infrastructure-asserted: action, interfaces, 5-tuple come straight off the
+  firewall's own log -- no attacker-controlled text drives the classification.
+
+  pcre2 throughout (same reason as local_rules.xml: os_regex habits fail
+  silently). `.*?` skips the MAC/LEN/TOS/... fields between the parts we want.
+-->
+<decoder name="soclab-firewall">
+  <prematch type="pcre2">FW-(ALLOW-THRU|DENY-EXT) </prematch>
+</decoder>
+
+<decoder name="soclab-firewall">
+  <parent>soclab-firewall</parent>
+  <regex type="pcre2">(FW-\S+) IN=(\S*) OUT=(\S*).*?SRC=(\S+) DST=(\S+).*?PROTO=(\S+) SPT=(\d+) DPT=(\d+)</regex>
+  <order>fwaction, in_iface, out_iface, srcip, dstip, protocol, srcport, dstport</order>
+</decoder>

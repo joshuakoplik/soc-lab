@@ -135,3 +135,62 @@
   </rule>
 
 </group>
+
+<!--
+  Perimeter firewall rules (PERIMETER_PLAN.md PR4). Decoded by
+  wazuh/local_decoder.xml. Posture=remote classification (spec Section 5),
+  keyed on infrastructure-asserted facts only (action + 5-tuple off the
+  firewall log):
+
+    - allow-through  -> keep/alert. Someone reached an exposed app THROUGH the
+                        perimeter -- "an attacker is actually attacking the app."
+    - external deny  -> background noise. Decoded and grouped at level 0 so it
+                        never alerts (never becomes a soc.db candidate), exactly
+                        the "internet scan is not a to-do item" behavior.
+    - deny SPIKE     -> the volume roll-up: a burst of denied probes from one
+                        source IS weak signal (a port sweep), so it alerts.
+
+  Internal-origin elevation (spec Section 5, case 3) is NOT here: inside->inside
+  traffic never crosses the perimeter, so it's Suricata/detect-rules' job, not
+  the firewall's. IDs in the reserved 100300+ block.
+-->
+<group name="soclab_firewall,perimeter,">
+
+  <rule id="100300" level="0">
+    <decoded_as>soclab-firewall</decoded_as>
+    <description>Perimeter firewall event</description>
+  </rule>
+
+  <rule id="100310" level="5">
+    <if_sid>100300</if_sid>
+    <field name="fwaction" type="pcre2">^FW-ALLOW-THRU$</field>
+    <description>Perimeter: external connection allowed through to $(dstip):$(dstport) from $(srcip)</description>
+    <group>firewall,perimeter_allow,</group>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+  </rule>
+
+  <!-- level 0: decoded and grouped, never alerts on its own -> stays out of
+       alerts.json / soc.db. Background internet noise, by design. -->
+  <rule id="100320" level="0">
+    <if_sid>100300</if_sid>
+    <field name="fwaction" type="pcre2">^FW-DENY-EXT$</field>
+    <description>Perimeter: external probe denied at the edge (background noise) from $(srcip) to port $(dstport)</description>
+    <group>firewall,perimeter_deny,</group>
+  </rule>
+
+  <!-- The spike over baseline IS signal: many denied probes from one source in
+       a short window = a port sweep. Wazuh's frequency engine, same pattern as
+       the Cowrie brute-force rule above. -->
+  <rule id="100321" level="6" frequency="20" timeframe="60">
+    <if_matched_sid>100320</if_matched_sid>
+    <same_source_ip />
+    <description>Perimeter: external port-scan spike - 20+ denied probes from $(srcip) in 60s</description>
+    <group>firewall,recon,attack,</group>
+    <mitre>
+      <id>T1046</id>
+    </mitre>
+  </rule>
+
+</group>

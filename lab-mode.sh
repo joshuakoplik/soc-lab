@@ -64,15 +64,96 @@ MODE="${2:-}"
 # ignores it.
 TARGET="${3:-}"
 
-write_state() {
-  printf '{"mode": "%s", "switched_at": "%s"}\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_FILE"
+# Merge ONE key into lab_mode.json, preserving every other key -- so setting the
+# mode never clobbers the posture (a second, orthogonal axis) and vice versa.
+# Always refreshes switched_at. Replaces the old whole-file printf, which wiped
+# any key it didn't itself write.
+_state_set() {
+  "$PY" - "$STATE_FILE" "$1" "$2" <<'PY'
+import json, sys, datetime
+path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(open(path))
+    if not isinstance(d, dict):
+        d = {}
+except Exception:
+    d = {}
+d[key] = val
+d["switched_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+with open(path, "w") as f:
+    json.dump(d, f)
+    f.write("\n")
+PY
 }
+
+write_state() { _state_set mode "$1"; }
 
 current_mode() {
   if [ -f "$STATE_FILE" ]; then
     "$PY" -c "import json; print(json.load(open('$STATE_FILE')).get('mode','unknown'))" 2>/dev/null || echo unknown
   else
     echo "(none set -- lab_mode.json has never been written)"
+  fi
+}
+
+# Attacker posture -- a second axis, orthogonal to the vuln mode (see
+# PERIMETER_PLAN.md). Default "insider" preserves today's behavior until the
+# perimeter build lands and someone explicitly switches to "remote".
+current_posture() {
+  if [ -f "$STATE_FILE" ]; then
+    "$PY" -c "import json; print(json.load(open('$STATE_FILE')).get('posture','insider'))" 2>/dev/null || echo insider
+  else
+    echo insider
+  fi
+}
+
+# The docker networks soc-attacker is currently attached to (space-padded so
+# `case` membership tests are unambiguous).
+_attacker_nets() {
+  echo " $(docker inspect -f '{{range $n,$c := .NetworkSettings.Networks}}{{$n}} {{end}}' soc-attacker 2>/dev/null) "
+}
+
+# Place soc-attacker according to the posture (PERIMETER_PLAN.md, validated in the
+# PR-2 spike). insider: multi-homed on every inside bridge (the compose default),
+# off soclab-inet. remote: on soclab-inet ONLY, so it reaches inside hosts solely
+# through the perimeter firewall. Idempotent (connect/disconnect only when the
+# state actually needs to change); a no-op with a clear note if soc-attacker isn't
+# running yet -- the placement is (re)asserted on the next `up`/`switch`. Requires
+# soclab-inet to exist, so callers bootstrap first.
+rehome_attacker() {
+  local posture="$1"
+  if ! docker inspect soc-attacker >/dev/null 2>&1; then
+    echo "[posture] soc-attacker not running -- placement will apply on next 'up'/'switch'"
+    return 0
+  fi
+  local cur inside_names
+  cur="$(_attacker_nets)"
+  inside_names="$("$PY" pipeline/net_topology.py --names | grep -vx soclab-inet)"
+  if [ "$posture" = "remote" ]; then
+    # Self-sufficient about the segment existing, so this is safe even from the
+    # northwind path (which skips the normal bootstrap).
+    docker network inspect soclab-inet >/dev/null 2>&1 || "$PY" pipeline/net_topology.py --bootstrap >/dev/null
+    case "$cur" in *" soclab-inet "*) : ;; *) docker network connect soclab-inet soc-attacker && echo "[posture] soc-attacker -> soclab-inet" ;; esac
+    for n in $inside_names; do
+      case "$cur" in *" $n "*) docker network disconnect "$n" soc-attacker && echo "[posture] soc-attacker off $n" ;; esac
+    done
+  else  # insider (default)
+    case "$cur" in *" soclab-inet "*) docker network disconnect soclab-inet soc-attacker && echo "[posture] soc-attacker off soclab-inet" ;; esac
+    for n in $inside_names; do
+      case "$cur" in *" $n "*) : ;; *) docker network connect "$n" soc-attacker && echo "[posture] soc-attacker -> $n" ;; esac
+    done
+  fi
+}
+
+# Install (remote) or tear down (insider) the perimeter firewall rules for a mode
+# via pipeline/firewall/perimeter.py. Rules only exist under posture=remote; under
+# insider the perimeter is cleared so the attacker's LAN-adjacency is unfenced.
+perimeter_sync() {
+  local mode="$1" posture="$2"
+  if [ "$posture" = "remote" ]; then
+    "$PY" pipeline/firewall/perimeter.py apply "$mode" >/dev/null && echo "[perimeter] rules applied for $mode (posture=remote)"
+  else
+    "$PY" pipeline/firewall/perimeter.py clear >/dev/null && echo "[perimeter] rules cleared (posture=insider)"
   fi
 }
 
@@ -181,6 +262,8 @@ case "$VERB" in
     echo "[*] bringing $MODE mode up (other modes, if running, are left alone)"
     mode_up "$MODE" "$TARGET"
     write_state "$MODE"
+    rehome_attacker "$(current_posture)"
+    perimeter_sync "$MODE" "$(current_posture)"
     echo "[*] $MODE mode up; lab_mode.json primary mode set to $MODE"
     if [ "$MODE" = "northwind" ]; then
       echo "[*] if this range has never been seeded, its corpus/entitlements/records are"
@@ -191,6 +274,10 @@ case "$VERB" in
     [ -n "$MODE" ] || { echo "usage: $0 down {easy|hard|wordpress|northwind}" >&2; exit 1; }
     echo "[*] tearing $MODE mode down (other modes, if running, are left alone)"
     mode_down "$MODE"
+    # The mode's targets are gone; drop any perimeter rules that published them.
+    if [ "$(current_mode)" = "$MODE" ]; then
+      perimeter_sync "" insider
+    fi
     if [ "$(current_mode)" = "$MODE" ]; then
       echo "[!] $MODE was the PRIMARY mode -- lab_mode.json still points at it, so the" >&2
       echo "    red-team agent's target allowlist now points at nothing running. Run" >&2
@@ -208,6 +295,8 @@ case "$VERB" in
     done
     mode_up "$MODE" "$TARGET"
     write_state "$MODE"
+    rehome_attacker "$(current_posture)"
+    perimeter_sync "$MODE" "$(current_posture)"
     echo "[*] $MODE mode active (exclusively)"
     ;;
   easy|hard|wordpress|northwind|dealer)
@@ -216,8 +305,30 @@ case "$VERB" in
     # (VERB=dealer, MODE=<target> -> `switch dealer <target>`).
     exec "$0" switch "$VERB" "$MODE"
     ;;
+  posture)
+    # Set (or, with no arg, report) the attacker posture. Orthogonal to the vuln
+    # mode: does NOT bring anything up or down, only records the axis in
+    # lab_mode.json. The perimeter topology reacts to it once that build lands;
+    # until then it is recorded and read (lab_modes.active_config()) but inert.
+    case "$MODE" in
+      remote|insider)
+        _state_set posture "$MODE"
+        echo "[*] attacker posture set to '$MODE' (orthogonal to the vuln mode)"
+        rehome_attacker "$MODE"
+        perimeter_sync "$(current_mode)" "$MODE"
+        ;;
+      "")
+        echo "current attacker posture: $(current_posture)"
+        ;;
+      *)
+        echo "usage: $0 posture {remote|insider}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   status)
     echo "primary mode: $(current_mode)"
+    echo "attacker posture: $(current_posture)"
     echo
     docker compose --profile easy --profile hard --profile wordpress ps --format "table {{.Name}}\t{{.Status}}"
     echo
@@ -244,7 +355,7 @@ case "$VERB" in
     make -C npc-range status 2>/dev/null || echo "(no flocks up)"
     ;;
   *)
-    echo "usage: $0 {bootstrap|up|down|switch|status|easy|hard|wordpress|northwind|dealer} [mode] [dealer-target]" >&2
+    echo "usage: $0 {bootstrap|up|down|switch|status|posture|easy|hard|wordpress|northwind|dealer} [mode|remote|insider] [dealer-target]" >&2
     exit 1
     ;;
 esac

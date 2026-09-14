@@ -167,6 +167,37 @@ def validate_target(target, mode=None):
                 f"(allowed: {sorted(allowed)})"
             )
         return
+    # REMOTE posture (PERIMETER_PLAN.md PR5): soc-attacker sits on the external
+    # internet segment, behind the perimeter firewall. The ONLY thing reachable
+    # from there is the perimeter's exposed edge -- the inet segment's gateway,
+    # which is where the firewall DNAT-publishes the mode's exposed ports. Inside
+    # hosts are NOT directly reachable (the firewall drops it); reaching them
+    # requires first footholding an exposed service and pivoting, which happens
+    # through shell_exec's unfenced lane (contained by the attacker's own egress
+    # iptables), never a validate_target'd tool. So here the fence is: the edge,
+    # and nothing else. Fails CLOSED like the insider branch below.
+    if cfg.get("posture") == "remote":
+        inet = net_topology.by_mode("inet")
+        ip_str = resolve_target_ip(target, mode)
+        if not ip_str:
+            raise ScopeError(
+                f"{target!r} does not resolve -- from the external segment only the "
+                f"perimeter's exposed edge ({inet.gateway}) is reachable"
+            )
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            raise ScopeError(f"{target!r} resolved to {ip_str!r}, not a valid IP -- refusing")
+        self_ip = attacker_ip("inet")
+        if self_ip and str(ip) == self_ip:
+            raise ScopeError(f"{target!r} ({ip}) is soc-attacker itself -- refusing")
+        if ip == inet.gateway:
+            return  # the exposed edge -- the firewall's public face, in scope
+        raise ScopeError(
+            f"{target!r} ({ip}) is not reachable from the external segment -- only "
+            f"the perimeter's exposed edge ({inet.gateway}) is; internal hosts "
+            f"require establishing a foothold on an exposed service and pivoting first"
+        )
     net = net_topology.by_mode(mode)
     ip_str = resolve_target_ip(target, mode)
     if not ip_str:

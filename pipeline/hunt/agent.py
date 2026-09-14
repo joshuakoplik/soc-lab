@@ -886,8 +886,38 @@ def _interruptible_sleep(seconds):
         time.sleep(1)
 
 
+def _posture_doctrine():
+    """A RESPONSE-DOCTRINE line reflecting the attacker posture (PERIMETER_PLAN.md
+    PR5). Returns '' under posture=insider, so the existing insider hunt behavior
+    (the tuned default) is byte-identical; only posture=remote adds this line. It
+    is legitimate operational context, not coaching -- a real analyst knows
+    whether they defend an internet edge or an internal segment."""
+    try:
+        import lab_modes
+        posture = lab_modes.current_posture()
+    except Exception:
+        return ""
+    if posture != "remote":
+        return ""
+    return (
+        "POSTURE -- you are defending an internet-facing perimeter. A firewall sits "
+        "between the outside and the assets, and it already drops and logs external "
+        "port scans and probes of non-exposed ports -- so that recon is background "
+        "internet noise, NOT an incident: do not raise_alert or block on external "
+        "scanning alone. What deserves your attention is something that got THROUGH "
+        "the perimeter (a connection on an exposed service, an exploit against it) or "
+        "any activity whose source is INSIDE the network (lateral movement / "
+        "post-compromise). Weigh response accordingly: an external IP hammering the "
+        "edge is expected background; an inside host scanning its neighbours is the "
+        "alarm."
+    )
+
+
 def build_chunk_user(conn, hunt_id, cursor_id, cursor_ts):
     parts = []
+    doctrine = _posture_doctrine()
+    if doctrine:
+        parts.append(doctrine)
     ctx = context.persistent_context_block(conn, hunt_id)
     if ctx:
         parts.append(ctx.rstrip())

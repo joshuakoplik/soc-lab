@@ -343,10 +343,19 @@ services:
     restart: unless-stopped
     network_mode: host
     cap_add: [NET_ADMIN, NET_RAW]
+    volumes:
+      # Perimeter firewall logging (PERIMETER_PLAN.md PR4): ulogd reads NFLOG
+      # group 100 (the perimeter rules) and writes firewall.log here, which Wazuh
+      # tails as /lab-logs/firewall/. Both are inside this already-privileged,
+      # host-netns container, so no new container is needed.
+      - ./firewall/ulogd.conf:/etc/ulogd.conf:ro
+      - ./logs/firewall:/lab-logs/firewall
     command: >
       sh -c "
-      apk add --no-cache iptables ip6tables >/dev/null &&
-      echo '[block-enforcer] ready -- inserts DOCKER-USER rules scoped to soclab-* interfaces only' &&
+      apk add --no-cache iptables ip6tables ulogd >/dev/null &&
+      mkdir -p /lab-logs/firewall &&
+      (ulogd -c /etc/ulogd.conf 2>>/var/log/ulogd.err &) &&
+      echo '[block-enforcer] ready -- DOCKER-USER rules (soclab-* only) + ulogd NFLOG->firewall.log' &&
       sleep infinity
       "
 
@@ -418,6 +427,7 @@ services:
       # path fights the entrypoint.
       - ./wazuh/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro
       - ./wazuh/local_rules.xml:/wazuh-config-mount/etc/rules/local_rules.xml:ro
+      - ./wazuh/local_decoder.xml:/wazuh-config-mount/etc/decoders/local_decoder.xml:ro
       # Our telemetry, read-only. Wazuh is a consumer here, not a producer.
       - ./logs:/lab-logs:ro
       # THE OUTPUT. alerts.json lands on the host for ingest.py to tail.
