@@ -339,16 +339,51 @@ def compose_base(flock):
             "--project-directory", HERE]
 
 
-def inspect_ips(flock, net, hostnames):
-    """container_name -> IP on this flock's network."""
+def inspect_ips(compose_net, hostnames):
+    """container_name -> live IP on the given compose network. None when the
+    container is absent or not attached (stopped/removed)."""
     out = {}
     for name in hostnames:
         r = run(["docker", "inspect", "-f",
-                 "{{ (index .NetworkSettings.Networks \"" + net.compose_name + "\").IPAddress }}",
+                 "{{ (index .NetworkSettings.Networks \"" + compose_net + "\").IPAddress }}",
                  name])
         ip = r.stdout.strip()
         out[name] = ip or None
     return out
+
+
+def sync_live_ips(manifest):
+    """Refresh a manifest's host IPs from live `docker inspect`, self-healing the
+    drift that `restart: unless-stopped` introduces: a daemon/host restart brings
+    the flock back up and Docker re-assigns bridge addresses in whatever order
+    the containers happen to start, so the IPs captured at `up`-time (and the
+    `assets` rows written from them) go stale/swapped. Workstation clients share
+    the bridge too, so a freed host IP can end up on a client, leaving the stale
+    host row pointing at the wrong container. Re-observing live is the only fix.
+
+    Persists the manifest if anything moved and returns whether it did. A host
+    with no live IP (momentarily down/restarting) keeps its last-known address
+    rather than being nulled -- nulling would surface as a false 'unknown host'
+    in the defender's enrich_ip, the very drift we're trying to kill."""
+    hosts = manifest.get("hosts", [])
+    if not hosts:
+        return False
+    compose_net = manifest["network"]["compose_name"]
+    live = inspect_ips(compose_net, [h["hostname"] for h in hosts])
+    changed = False
+    for h in hosts:
+        ip = live.get(h["hostname"])
+        if ip and ip != h.get("ip"):
+            if h.get("ip"):
+                log(f"  {h['hostname']}: {h['ip']} -> {ip} (re-synced from live)")
+            h["ip"] = ip
+            changed = True
+        elif not ip and h.get("ip"):
+            log(f"  {h['hostname']}: no live IP (container down?); keeping {h['ip']}")
+    if changed:
+        with open(os.path.join(flock_dir(manifest["flock"]), "manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=2)
+    return changed
 
 
 # --------------------------------------------------------------------------
@@ -595,11 +630,7 @@ def cmd_up(args):
     if r.returncode != 0:
         die(f"docker compose up failed:\n{r.stdout}\n{r.stderr}")
 
-    ips = inspect_ips(flock, net, [h["hostname"] for h in host_records])
-    for h in manifest["hosts"]:
-        h["ip"] = ips.get(h["hostname"])
-    with open(os.path.join(fdir, "manifest.json"), "w") as f:
-        json.dump(manifest, f, indent=2)
+    sync_live_ips(manifest)  # fills in host IPs from the containers just started
 
     spawn_tailers(flock, host_records)
     write_assets(manifest)
@@ -663,10 +694,15 @@ def cmd_reconcile(_args):
 
 
 def reconcile_all():
-    """Re-assert asset rows from every manifest (they're recreated empty by
-    reset.sh --db, so this is how they survive a DB wipe) and refresh the
-    flags-present marker."""
+    """Re-sync every flock's host IPs from live containers, then re-assert its
+    asset rows (they're recreated empty by reset.sh --db, so this is how they
+    survive a DB wipe) and refresh the flags-present marker. The live re-sync is
+    what makes `status`/`reconcile` self-heal restart drift instead of just
+    re-writing the stale manifest snapshot. (There is no `restart` subcommand --
+    docker's `unless-stopped` restarts happen underneath us -- so these observe
+    commands are the re-sync points.)"""
     for m in all_manifests():
+        sync_live_ips(m)
         write_assets(m)
     rewrite_flags_present()
 
@@ -810,6 +846,7 @@ def cmd_audit(args):
     m = load_manifest(args.flock)
     if not m:
         die(f"no such flock {args.flock!r}")
+    sync_live_ips(m)  # probe live addresses, not a stale up-time snapshot
     leaks = []
 
     def check(where, text):
