@@ -145,6 +145,18 @@ rehome_attacker() {
   fi
 }
 
+# Install (remote) or tear down (insider) the perimeter firewall rules for a mode
+# via pipeline/firewall/perimeter.py. Rules only exist under posture=remote; under
+# insider the perimeter is cleared so the attacker's LAN-adjacency is unfenced.
+perimeter_sync() {
+  local mode="$1" posture="$2"
+  if [ "$posture" = "remote" ]; then
+    "$PY" pipeline/firewall/perimeter.py apply "$mode" >/dev/null && echo "[perimeter] rules applied for $mode (posture=remote)"
+  else
+    "$PY" pipeline/firewall/perimeter.py clear >/dev/null && echo "[perimeter] rules cleared (posture=insider)"
+  fi
+}
+
 bootstrap() {
   "$PY" pipeline/net_topology.py --bootstrap
 }
@@ -251,6 +263,7 @@ case "$VERB" in
     mode_up "$MODE" "$TARGET"
     write_state "$MODE"
     rehome_attacker "$(current_posture)"
+    perimeter_sync "$MODE" "$(current_posture)"
     echo "[*] $MODE mode up; lab_mode.json primary mode set to $MODE"
     if [ "$MODE" = "northwind" ]; then
       echo "[*] if this range has never been seeded, its corpus/entitlements/records are"
@@ -261,6 +274,10 @@ case "$VERB" in
     [ -n "$MODE" ] || { echo "usage: $0 down {easy|hard|wordpress|northwind}" >&2; exit 1; }
     echo "[*] tearing $MODE mode down (other modes, if running, are left alone)"
     mode_down "$MODE"
+    # The mode's targets are gone; drop any perimeter rules that published them.
+    if [ "$(current_mode)" = "$MODE" ]; then
+      perimeter_sync "" insider
+    fi
     if [ "$(current_mode)" = "$MODE" ]; then
       echo "[!] $MODE was the PRIMARY mode -- lab_mode.json still points at it, so the" >&2
       echo "    red-team agent's target allowlist now points at nothing running. Run" >&2
@@ -279,6 +296,7 @@ case "$VERB" in
     mode_up "$MODE" "$TARGET"
     write_state "$MODE"
     rehome_attacker "$(current_posture)"
+    perimeter_sync "$MODE" "$(current_posture)"
     echo "[*] $MODE mode active (exclusively)"
     ;;
   easy|hard|wordpress|northwind|dealer)
@@ -297,6 +315,7 @@ case "$VERB" in
         _state_set posture "$MODE"
         echo "[*] attacker posture set to '$MODE' (orthogonal to the vuln mode)"
         rehome_attacker "$MODE"
+        perimeter_sync "$(current_mode)" "$MODE"
         ;;
       "")
         echo "current attacker posture: $(current_posture)"

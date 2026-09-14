@@ -171,6 +171,25 @@ nginx on `soclab-hard`) before writing any code:
   Wazuh. `-j LOG` goes to the host kernel ring buffer; the tail into
   `/lab-logs/firewall/` likely needs NFLOG→ulogd2 or a syslog path, TBD in PR 4.
 
+## 6b. PR-3 result (2026-09-14) — generator works; deny-log placement is a PR-4 note
+
+`pipeline/firewall/perimeter.py` apply/clear/status verified live on `hard`:
+allow-through to the edge `:80` → HTTP 200 with **FW-ALLOW-THRU logged**;
+direct-to-inside-IP and non-exposed edge ports all blocked. Wired into
+`lab-mode.sh` (apply under remote / clear under insider, on the posture verb and
+after up/switch) and `reset.sh --network` (teardown).
+
+Important finding for PR 4: the *interesting denied traffic under remote is not in
+FORWARD.* A remote attacker scans the **edge IP (= the host's inet address)**, so
+non-exposed-port probes hit the host's **INPUT** chain (refused there), and
+direct-to-inside-IP probes are dropped by **Docker's own inter-bridge isolation**
+before reaching `SOCLAB-PERIMETER`. So the realistic "external scan = background
+noise" deny-logging belongs in an **INPUT-side LOG rule on `soclab-inet0`** (new,
+non-established, non-DNAT to the edge), added in PR 4 — not the FORWARD deny-log,
+which stays only as a containment safety net. Containment itself is complete
+(everything non-exposed is blocked three ways: perimeter DROP, host INPUT, Docker
+isolation).
+
 ## 6. Risks to validate in the PR-2 spike (before committing to the rest)
 
 1. **Docker inter-bridge routing + DNAT hairpin.** Docker's

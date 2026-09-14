@@ -321,6 +321,11 @@ if [ "$DO_NETWORK" = "1" ]; then
   else
     echo "[reset] removing every block_ip rule..."
     "$PY" pipeline/triage/block_enforcer.py --unblock-all
+    # Also tear down the perimeter firewall rules (posture=remote). Separate
+    # chain/tag from block_ip, so this never touches a block_ip DROP; a no-op
+    # under insider or when nothing is installed (PERIMETER_PLAN.md PR3).
+    echo "[reset] clearing perimeter firewall rules (if any)..."
+    "$PY" pipeline/firewall/perimeter.py clear
     remaining="$("$PY" pipeline/triage/block_enforcer.py --list)"
     if [ "$remaining" = "[block_enforcer] nothing currently blocked" ]; then
       echo "[reset] confirmed: network back to baseline, nothing blocked"

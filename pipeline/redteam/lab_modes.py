@@ -144,6 +144,15 @@ EASY = {
     "msf_modules": ALLOWED_MSF_MODULES,
     "expected_flags": None,
     "network": "easy",
+    # Perimeter exposure (posture=remote): the ports the firewall DNAT-publishes
+    # from soclab-inet to inside hosts (PERIMETER_PLAN.md PR3). {container, port,
+    # proto=tcp}; consumed by pipeline/firewall/perimeter.py, ignored under
+    # posture=insider. nginx is the web edge; cowrie's SSH honeypot is a
+    # deliberate exposure. metasploitable's services stay internal -- pivot-only.
+    "exposed": (
+        {"container": "soc-nginx-easy", "port": 80},
+        {"container": "soc-cowrie", "port": 2222},
+    ),
     "recon_tools": ("discover_hosts", "nmap_scan", "http_probe", "get_recon_findings", "web_search",
                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
     "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
@@ -158,6 +167,7 @@ HARD = {
     "msf_modules": {},
     "expected_flags": None,
     "network": "hard",
+    "exposed": ({"container": "soc-nginx-hard", "port": 80},),
     "recon_tools": ("discover_hosts", "nmap_scan", "http_probe", "get_recon_findings", "web_search",
                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
     "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
@@ -177,6 +187,7 @@ WORDPRESS = {
     # /root/flag2.txt (root only, via CVE-2025-32463).
     "expected_flags": 2,
     "network": "wordpress",
+    "exposed": ({"container": "soc-wordpress", "port": 80},),
     "recon_tools": ("discover_hosts", "nmap_scan", "http_probe", "get_recon_findings", "web_search",
                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
     "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
@@ -206,6 +217,11 @@ DEALER = {
     "msf_modules": {},
     "expected_flags": None,
     "network": "dealer",
+    # Default-deny / pivot-only: a live-fetched Vulhub box's realistic public
+    # port (if any) is per-target and unknown here -- a curated opt-in lives with
+    # the target (dealer-range), TODO. Empty => nothing exposed => remotely the
+    # box is reachable only after breaching an exposed service and pivoting.
+    "exposed": (),
     "recon_tools": ("discover_hosts", "nmap_scan", "http_probe", "get_recon_findings", "web_search",
                      "fetch_url", "stage_artifact", "record_win", "checkpoint"),
     "assess_tools": ("get_recon_findings", "get_loot", "get_pending_actions",
@@ -237,6 +253,7 @@ NORTHWIND = {
     "expected_flags": None,     # canary count varies -- same reasoning as easy/hard
     "network": None,            # no net_topology entry; start_session() special-cases
                                  # adapter-backed modes so this is never dereferenced
+    "exposed": (),              # adapter-backed, no net_topology bridge => no perimeter
     "recon_tools": ("whoami", "chat", "http_request", "probe_refusal",
                      "get_recon_findings", "record_win"),
     "assess_tools": ("chat", "get_recon_findings", "record_win", "raise_vuln_finding",
