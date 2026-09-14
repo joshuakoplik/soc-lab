@@ -716,3 +716,15 @@ h1 .muted { color: var(--muted); font-weight: 400; }
   font-size: 12.5px;
   white-space: pre-wrap;
 }
+
+
+/* Timeline event-type filter chips (show/hide categories) */
+.tl-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px 2px; }
+.tl-filters .chip {
+  font: inherit; font-size: 11px; line-height: 1; padding: 4px 10px;
+  border-radius: 12px; border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.05); color: inherit; cursor: pointer;
+  user-select: none; white-space: nowrap;
+}
+.tl-filters .chip:hover { border-color: rgba(255,255,255,0.35); }
+.tl-filters .chip.off { opacity: 0.4; text-decoration: line-through; }

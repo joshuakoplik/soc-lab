@@ -127,6 +127,7 @@ function addTimelineEntry(side, ts, icon, statusClass, label, detailKey) {
   const epoch = ts != null ? toEpoch(ts) : Date.now();
   row.dataset.epoch = epoch;
   if (detailKey) row.dataset.detailKey = detailKey;
+  row.dataset.etype = (detailKey || "").split(":")[0];
   row.innerHTML =
     `<span class="tl-ic">${icon}</span>` +
     `<span class="tl-tag">${side === "def" ? "DEF" : "ATK"}</span>` +
@@ -140,6 +141,50 @@ function addTimelineEntry(side, ts, icon, statusClass, label, detailKey) {
   timelineEl.insertBefore(row, ref);
 
   while (timelineEl.children.length > TL_CAP) timelineEl.removeChild(timelineEl.lastChild);
+}
+
+// ---------- Timeline filters (show/hide event types) ----------
+// Chips over the timeline toggle whole categories. Implemented as one generated
+// <style> hiding [data-etype] selectors, so it applies to live-pushed rows too,
+// not just the ones already on screen when you click.
+const TL_FILTERS = [
+  { key: "campaign", label: "campaign", etypes: ["redteam_sessions"] },
+  { key: "recon",    label: "recon",    etypes: ["recon_findings"] },
+  { key: "vuln",     label: "vuln",     etypes: ["vuln_findings"] },
+  { key: "exploit",  label: "exploit",  etypes: ["pending_actions"] },
+  { key: "loot",     label: "loot",     etypes: ["loot"] },
+  { key: "win",      label: "win",      etypes: ["wins"] },
+  { key: "flag",     label: "flag",     etypes: ["captured_flags"] },
+  { key: "defender", label: "defender", etypes: ["triage", "agent_alerts", "human_pages", "block_recommendations", "block_ip_calls"] },
+];
+const hiddenFilters = new Set();
+
+function rebuildFilterStyle() {
+  const sel = [];
+  for (const f of TL_FILTERS) {
+    if (hiddenFilters.has(f.key)) for (const e of f.etypes) sel.push(`#timeline [data-etype="${e}"]`);
+  }
+  let st = document.getElementById("tl-filter-style");
+  if (!st) { st = document.createElement("style"); st.id = "tl-filter-style"; document.head.appendChild(st); }
+  st.textContent = sel.length ? sel.join(",") + "{display:none!important}" : "";
+}
+
+function buildFilterBar() {
+  const bar = document.getElementById("tl-filters");
+  if (!bar) return;
+  bar.innerHTML = "";
+  for (const f of TL_FILTERS) {
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.type = "button";
+    b.textContent = f.label;
+    b.addEventListener("click", () => {
+      if (hiddenFilters.has(f.key)) { hiddenFilters.delete(f.key); b.classList.remove("off"); }
+      else { hiddenFilters.add(f.key); b.classList.add("off"); }
+      rebuildFilterStyle();
+    });
+    bar.appendChild(b);
+  }
 }
 
 // Defender-side verdict icon (colour comes from the chip's status class).
@@ -865,4 +910,5 @@ document.querySelectorAll(".feed").forEach((f) => {
 timelineEl.innerHTML = '<div class="empty">waiting for data\u2026</div>';
 feedDiary.innerHTML = '<div class="empty">waiting for the attacker to reason\u2026</div>';
 
+buildFilterBar();
 loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(connectWS);
