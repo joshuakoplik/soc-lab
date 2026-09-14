@@ -8,16 +8,22 @@ justify the extra structure.
 
 Scope fencing lives here, not just in tool schemas: validate_target() is the
 check redteam_agent.py's dispatch_tool() calls BEFORE run() is ever reached
--- a JSON-schema "enum" on a tool's target parameter is advisory (models
-don't always respect schema outside a grammar-locked call, see
-providers/local.py), this is not. The allowed set itself is NOT a static
-constant here -- it comes from lab_modes.active_config()["targets"], which
-depends on lab_mode.json (see lab_modes.py). Easy mode allows cowrie/nginx/
-metasploitable; hard mode allows nginx only, because cowrie and
-metasploitable aren't even running in that mode. Re-read on every call
-rather than cached at import time, so a mode switch mid-process (unlikely,
-but --continue-assess resumes an old session) can't leave this checking
-against a stale allowlist.
+-- a tool schema's target parameter is advisory (models don't always respect
+schema outside a grammar-locked call, see providers/local.py), this is not.
+For CONTAINER modes the fence is SUBNET MEMBERSHIP: the target must resolve to
+an address inside the active mode's own /24, and must not be that subnet's
+gateway (the Docker host) or soc-attacker itself. This deliberately makes the
+whole segment fair game -- the real intentionally-vulnerable target AND any
+benign NPC decoy alike (see npc-range/) -- so the attacker discovers and tells
+them apart itself rather than being handed a name list. It is safe to widen
+from a name list to the subnet because no sensor sits on a mode bridge (wazuh
+is network_mode:none; suricata/block-enforcer are network_mode:host); the old
+name list existed to stop a subnet sweep from reaching Wazuh on a shared
+bridge, and that hole is closed structurally now (per-mode bridges, sensors
+off-bridge). The subnet itself is re-read from net_topology per mode on every
+call, so a mode switch mid-process can't leave this checking a stale segment.
+ADAPTER modes (northwind: no net_topology subnet) keep the old name allowlist
+from lab_modes.active_config()["targets"].
 
 ALLOWED_NETWORKS is a separate, narrower question: not "can this name be
 touched at all" but "is it fully inside our own lab, such that a gated
@@ -130,25 +136,81 @@ class ScopeError(Exception):
     redteam_exec.run() only ever sees argv that already passed this check."""
 
 
-def validate_target(target):
-    allowed = lab_modes.active_config()["targets"]
-    if target not in allowed:
+def validate_target(target, mode=None):
+    """Scope fence -- called before run() for every named tool.
+
+    For CONTAINER modes the fence is SUBNET MEMBERSHIP, not a name allowlist:
+    the target must resolve to an address inside the active mode's own /24, and
+    must not be that subnet's gateway (the Docker host) or soc-attacker itself.
+    This deliberately makes every host on the segment fair game -- the real,
+    intentionally-vulnerable target AND any benign NPC decoy alike -- so the
+    attacker has to tell them apart on its own (recon-from-zero) rather than
+    being handed a curated name list. It is safe to widen from a name list to
+    the whole subnet because NO sensor sits on a mode bridge (wazuh is
+    network_mode:none; suricata and block-enforcer are network_mode:host), so
+    the only non-target addresses on the /24 are the gateway and the attacker,
+    both excluded here. The old name allowlist existed to stop a subnet sweep
+    from reaching Wazuh on a shared bridge; that hole is closed structurally
+    now (per-mode bridges, sensors off-bridge -- see net_topology.py). Fails
+    CLOSED: an unresolvable target is rejected.
+
+    ADAPTER-backed modes (northwind: no net_topology subnet) keep the name
+    allowlist -- they have no subnet to fence and reach their target through an
+    adapter, not run()."""
+    mode = mode or lab_modes.current_mode()
+    cfg = lab_modes.active_config(mode)
+    if not cfg.get("network"):
+        allowed = cfg["targets"]
+        if target not in allowed:
+            raise ScopeError(
+                f"{target!r} is not an allowed target in {mode!r} mode "
+                f"(allowed: {sorted(allowed)})"
+            )
+        return
+    net = net_topology.by_mode(mode)
+    ip_str = resolve_target_ip(target, mode)
+    if not ip_str:
         raise ScopeError(
-            f"{target!r} is not an allowed target in {lab_modes.current_mode()!r} "
-            f"mode (allowed: {sorted(allowed)})"
+            f"{target!r} does not resolve to a host on {net.compose_name} "
+            f"({net.subnet}) -- refusing (scope is that subnet, nothing else)"
         )
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        raise ScopeError(f"{target!r} resolved to {ip_str!r}, not a valid IP -- refusing")
+    if ip not in net.subnet:
+        raise ScopeError(
+            f"{target!r} ({ip}) is outside {net.compose_name} ({net.subnet}) "
+            f"-- refusing (off-segment / off-lab)"
+        )
+    if ip == net.gateway:
+        raise ScopeError(
+            f"{target!r} ({ip}) is the {net.compose_name} bridge gateway "
+            f"(the Docker host) -- refusing"
+        )
+    self_ip = attacker_ip(mode)
+    if self_ip and str(ip) == self_ip:
+        raise ScopeError(f"{target!r} ({ip}) is soc-attacker itself -- refusing")
 
 
 def resolve_target_ip(target, mode=None):
-    """The host's resolver doesn't know soclab's service names -- ask
-    soc-attacker, which is on the same bridge(s) and shares Docker's
-    embedded DNS. Resolves the NETWORK-QUALIFIED name (e.g.
-    "nginx.soclab-easy") rather than a bare hostname: soc-attacker is
-    multi-homed across every mode's network at once, so a bare "nginx"
-    is ambiguous the moment more than one mode is up and each has its own
-    container answering to that alias (see compose.yaml). Returns None on
-    any resolution failure rather than raising: an unresolvable target
-    just means "not whitelisted", not a hard error."""
+    """Resolve a target -- a discovered IP literal, or a service/host name --
+    to an IPv4 string, or None on failure.
+
+    A host the agent discovered on the segment is given as a LITERAL IP; return
+    it verbatim (validate_target then checks it against the subnet). Otherwise
+    ask soc-attacker's resolver, which shares Docker's embedded DNS, for the
+    NETWORK-QUALIFIED name (e.g. "nginx.soclab-easy" / "hr-wiki-01.soclab-easy")
+    -- soc-attacker is multi-homed across every mode's network at once, so a
+    bare name is ambiguous the moment more than one mode is up (see
+    compose.yaml). Returns None on any resolution failure rather than raising:
+    for in_whitelisted_network() an unresolvable target just means "not
+    whitelisted"; validate_target() turns None into a hard, fail-closed reject
+    itself."""
+    try:
+        return str(ipaddress.ip_address(target))
+    except ValueError:
+        pass
     net = net_topology.by_mode(mode or lab_modes.current_mode())
     qualified = f"{target}.{net.compose_name}"
     result = run(["getent", "hosts", qualified], timeout_s=10)
