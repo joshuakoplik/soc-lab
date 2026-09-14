@@ -1,0 +1,5 @@
+# Per-flock runtime state (compose, manifest, tailer pids, planted-flag records,
+# the flags-present marker) -- all regenerable, machine-specific, and some of it
+# operator-only (flags.json). Never committed.
+.run/
+.env

@@ -1,0 +1,22 @@
+# A mid-size company intranet segment. Plausible corporate hosts an attacker
+# would find on an internal network -- none of them the real objective.
+#
+# `role` is the hostname slug: an instance becomes <role>-NN (hr-wiki-01, ...).
+# `edges` wire east-west dependencies by role; npcctl turns each into the
+# dependent app's DB_HOST/REDIS_HOST env (see each type's depends_env).
+#
+# NOTE: this is the Phase-1 shape (four proving types). More host types are
+# added as the library grows.
+name: corp-intranet
+description: "A mid-size company intranet segment"
+network_default: easy
+default_clients: 3
+teams: [HR, Finance, IT, Engineering, Sales]
+instances:
+  - {type: webserver-nginx, count: 2, role: hr-wiki,      team: HR}
+  - {type: intranet-app,    count: 1, role: it-portal,    team: IT}
+  - {type: db-postgres,     count: 1, role: pg-payroll,   team: Finance}
+  - {type: cache-redis,     count: 1, role: redis-session, team: IT}
+edges:
+  - {from: it-portal, to: pg-payroll,    behavior: psql}
+  - {from: it-portal, to: redis-session, behavior: redis}

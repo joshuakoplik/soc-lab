@@ -1,0 +1,26 @@
+# A Redis cache. Fully patched. Logs to stdout; Wazuh's redis decoder needs the
+# program token "redis", so we syslog-prefix it. Benign ops are mostly silent --
+# this NPC is visible to the defender chiefly via Suricata east-west flows and
+# the asset inventory, which is honest and expected.
+type: cache-redis
+image: redis:7-alpine
+weight: light
+# Keep the default loglevel (notice) -- enough for "Ready to accept connections"
+# and client-tracking lines without flooding.
+command: ["redis-server", "--loglevel", "notice"]
+log:
+  origin: stdout
+  prefix: syslog
+  program: redis
+  decodes: false
+  benign_alerts: "mostly silent on benign ops"
+asset:
+  role: "Session/cache store"
+  services: [redis]
+  cmdb_desc: "{hostname} -- Redis cache, {team} team."
+traffic:
+  client_behaviors: [redis]
+flag:
+  supported: true
+  placements:
+    - {kind: redis_key, key: "app:config:backup_token"}

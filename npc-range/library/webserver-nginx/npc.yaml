@@ -1,0 +1,28 @@
+# An ordinary internal web server. Serves a shallow static site; the point is
+# that it looks and logs exactly like a real intranet host, not that it does
+# much. Fully patched (current stable tag) -- a *hard* target on purpose.
+type: webserver-nginx
+image: nginx:1.27-alpine
+weight: light
+config_files:
+  - {src: files/site.conf, dst: /etc/nginx/conf.d/default.conf}
+  - {src: files/index.html, dst: /usr/share/nginx/html/index.html}
+# Log leg: the stock image already writes the combined access log to stdout.
+# We wrap each stdout line with a syslog prefix so Wazuh's web-accesslog
+# decoder + 31100-series rules fire (404 -> 31101 L5, etc.).
+log:
+  origin: stdout
+  prefix: syslog
+  program: nginx
+  decodes: true
+  benign_alerts: "404s (favicon/old paths) -> 31101 L5; 200s silent"
+asset:
+  role: "Internal web server"
+  services: [http]
+  cmdb_desc: "{hostname} -- internal web server, {team} team. Managed by IT."
+traffic:
+  client_behaviors: [browse]
+flag:
+  supported: true
+  placements:
+    - {dst: /usr/share/nginx/html/backup/.env, kind: file}

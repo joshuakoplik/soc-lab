@@ -1,0 +1,33 @@
+# A small internal web app that, on each request, does a real SELECT against its
+# PostgreSQL backend and a GET/SET against its Redis cache. This is what makes a
+# flock produce plausible east-west (app<->db, app<->cache) traffic that Suricata
+# sees, in addition to the north-south client traffic. Custom image (built), but
+# tiny and stdlib+two clients only -- no runtime internet.
+type: intranet-app
+build: stubapp
+weight: medium
+env:
+  APP_NAME: "Employee Portal"
+# depends_env: for each depended TYPE, the env var to set to that dependency's
+# allocated hostname. npcctl fills these from the template's `edges`, so the app
+# resolves its backends by their real in-flock DNS names.
+depends_env:
+  db-postgres: DB_HOST
+  cache-redis: REDIS_HOST
+# The Flask app writes a combined-format access line per request to stdout.
+log:
+  origin: stdout
+  prefix: syslog
+  program: nginx
+  decodes: true
+  benign_alerts: "web ruleset on 4xx; 200s silent"
+asset:
+  role: "Internal web application"
+  services: [http]
+  cmdb_desc: "{hostname} -- internal web application, {team} team."
+traffic:
+  client_behaviors: [browse]
+flag:
+  supported: true
+  placements:
+    - {kind: file, dst: /app/.env.local}

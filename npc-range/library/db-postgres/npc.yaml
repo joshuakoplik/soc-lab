@@ -1,0 +1,32 @@
+# A real PostgreSQL server with a shallow seeded schema. Fully patched.
+type: db-postgres
+image: postgres:16-alpine
+weight: medium
+env:
+  POSTGRES_PASSWORD: "{secret}"        # {secret} -> a per-instance random secret
+  POSTGRES_USER: appro
+  POSTGRES_DB: appdb
+# log_connections + a %h (client host) prefix so Wazuh's postgresql_log decoder
+# fires on connections (50511 L3) and auth failures (50512 L9). These lines are
+# tailed RAW (no syslog prefix) because that decoder anchors at start-of-line;
+# a syslog "host program:" prefix breaks it. See log.prefix: raw below.
+command: ["postgres", "-c", "log_connections=on", "-c", "log_disconnections=on",
+          "-c", "log_line_prefix=[%m] %h: "]
+init_files:
+  - {src: files/seed.sql, dst: /docker-entrypoint-initdb.d/10-seed.sql}
+log:
+  origin: stdout
+  prefix: raw
+  program: postgres
+  decodes: true
+  benign_alerts: "connection authorized -> 50511 L3; auth fail -> 50512 L9"
+asset:
+  role: "Application database"
+  services: [postgresql]
+  cmdb_desc: "{hostname} -- PostgreSQL application database, {team} team."
+traffic:
+  client_behaviors: [psql]
+flag:
+  supported: true
+  placements:
+    - {kind: pg_row, table: config_secrets, column: value}
