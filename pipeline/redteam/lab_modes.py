@@ -256,16 +256,22 @@ def current_mode():
 DEALER_STATE_FILE = os.path.join(ROOT, "dealer-range", ".run", "state.json")
 
 
-def _dealer_hostname():
-    """The opaque hostname up.py assigned this dealer standup (recon-from-zero:
-    the agent's target name must be the meaningless name the box actually answers
-    to, never "target" or the Vulhub service name). Returns None if the range
-    isn't up, in which case active_config() falls back to DEALER's placeholder."""
+def _dealer_hostnames():
+    """The opaque hostname(s) up.py assigned this dealer standup (recon-from-zero:
+    the agent's target name is the meaningless name the box answers to, never
+    "target" or the Vulhub service name). state.json is a LIST of target dicts
+    now (one element for a single target); a legacy single-dict is tolerated.
+    Returns a tuple, empty if the range isn't up -- active_config() then falls
+    back to DEALER's placeholder."""
     try:
         with open(DEALER_STATE_FILE) as f:
-            return json.load(f).get("hostname") or None
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+        return ()
+    if isinstance(data, list):
+        return tuple(t.get("hostname") for t in data if isinstance(t, dict) and t.get("hostname"))
+    h = data.get("hostname") if isinstance(data, dict) else None
+    return (h,) if h else ()
 
 
 def active_config(mode=None):
@@ -277,7 +283,7 @@ def active_config(mode=None):
         # Overriding here keeps every consumer -- validate_target, the agent's
         # _TARGETS/tool schemas, resolve_target_ip -- pointed at the actual name
         # without any of them needing to know about the dealer range.
-        host = _dealer_hostname()
-        if host:
-            cfg = {**cfg, "targets": (host,)}
+        hosts = _dealer_hostnames()
+        if hosts:
+            cfg = {**cfg, "targets": hosts}
     return cfg

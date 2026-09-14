@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
 """
-Resolve a "dealer's choice" target into a lab-adapted docker compose under .run/.
+Resolve one OR MORE "dealer's choice" targets into a lab-adapted docker compose
+under .run/, all on the internal soclab-dealer bridge.
 
-Target comes from argv[1] or $DEALER_TARGET, in one of two forms:
-  - a Vulhub path, "<software>/<CVE-id>" -> reads
-    .cache/vulhub/<path>/docker-compose.y*ml (Vulhub = github.com/vulhub/vulhub,
-    the docker analog of VulnHub; the cache is a shallow clone, see the Makefile).
-  - a plain docker image ref, "org/image:tag" -> synthesizes a one-service compose.
+Target(s) come from argv[1] or $DEALER_TARGET as a space/comma-separated list;
+each is either a Vulhub path ("<software>/<CVE>") or a plain docker image ref.
 
-The source compose is rewritten to run on the lab's INTERNAL `soclab-dealer`
-bridge (see pipeline/net_topology.py):
-  - every host `ports:` mapping is stripped (nothing is exposed off the bridge);
-  - every service is put on `soclab-dealer` -- Docker still provides
-    service-name DNS on a user-defined network, so app<->db comms are preserved
-    (and other services are reachable by IP for lateral movement, which is
-    realistic);
-  - the externally-facing service (the one that HAD published ports) gets the
-    network alias `target`, so soc-attacker reaches it as `target.soclab-dealer`
-    exactly the way it resolves stock targets (executor.resolve_target_ip()).
+Single target  -> the original rewrite: every service on soclab-dealer, the
+                  externally-facing one aliased to a random opaque hostname
+                  (recon-from-zero), siblings reachable by their compose name.
+Multiple targets -> MERGE them into one compose. Multi-target mode supports
+                  SINGLE-CONTAINER targets only (the common Vulhub RCE shape):
+                  each becomes one service with an opaque container_name + its
+                  own opaque hostname alias on soclab-dealer, service keys
+                  namespaced per target so two targets that both call a service
+                  "app"/"db" don't collide. A multi-container target in a
+                  multi-target list is SKIPPED with a warning (its intra-target
+                  DNS would collide on the shared bridge).
 
-No model, no discovery, no random selection -- the target is chosen by the
-operator/assistant at invocation (see lab-mode.sh). Writes:
-  .run/compose.yml    the rewritten compose
-  .run/project_dir    base dir for docker compose --project-directory (so a
-                      Vulhub env's relative build/volume paths still resolve)
-  .run/state.json     what's up, for the operator/`lab-mode.sh status` (never
-                      surfaced to the agent -- dealer's choice is recon-from-zero)
+state.json is ALWAYS a LIST of {target,kind,primary_service,hostname,source}
+now (a one-element list for a single target) -- consumers (lab_modes
+_dealer_hostnames, wire.py plant_flag, lab-mode.sh status) read the list.
 """
 import glob
 import json
@@ -46,12 +41,9 @@ DEALER_NET = "soclab-dealer"
 
 
 def rand_host():
-    """A meaningless, DNS-valid hostname (starts with a letter). Recon-from-zero
-    means the agent must learn what the box is by probing it, not from its name:
-    docker's reverse-DNS hands back a container's NAME (confirmed: `getent hosts
-    <ip>` returned `dealer-range-n8n-1.soclab-dealer`), so a name derived from the
-    Vulhub service (`n8n`) or the mode (`dealer`) leaks both the software AND the
-    fact that this is a disposable lab. An opaque random name leaks neither."""
+    """A meaningless, DNS-valid hostname (starts with a letter). Recon-from-zero:
+    docker reverse-DNS returns the container NAME, so a name derived from the
+    software/mode would leak it; an opaque random name leaks nothing."""
     return secrets.choice(string.ascii_lowercase) + "".join(
         secrets.choice(string.ascii_lowercase + string.digits) for _ in range(7)
     )
@@ -60,6 +52,10 @@ def rand_host():
 def die(msg, code=2):
     print(f"[dealer] {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def warn(msg):
+    print(f"[dealer] {msg}", file=sys.stderr)
 
 
 def find_compose(d):
@@ -79,7 +75,6 @@ def resolve(target):
             return ("vulhub", cf, cand)
         die(f"'{target}' is a Vulhub directory but has no docker-compose file")
     if "/" in target and os.path.isdir(CACHE):
-        # A path-shaped target that isn't in the cache -- help with near matches.
         top = target.split("/")[0]
         near = sorted(
             os.path.relpath(os.path.dirname(p), CACHE)
@@ -87,35 +82,58 @@ def resolve(target):
         )
         hint = ("\n  under " + top + "/: " + ", ".join(near[:10])) if near else ""
         die(f"no Vulhub target '{target}' in the cache (try `make refresh`, or check the path){hint}")
-    # Not a Vulhub path -- treat it as a docker image reference.
     return ("image", None, None)
 
 
-def rewrite(doc):
-    """Mutate a loaded compose dict in place; return (primary service name,
-    opaque hostname the primary answers to)."""
+def load_target(target):
+    """(kind, compose_dict, source_dir)."""
+    kind, cf, srcdir = resolve(target)
+    if kind == "image":
+        return ("image", {"services": {"app": {"image": target, "restart": "no"}}}, HERE)
+    with open(cf) as f:
+        return (kind, yaml.safe_load(f) or {}, srcdir)
+
+
+def _abs_build(svc, srcdir):
+    b = svc.get("build")
+    if isinstance(b, str):
+        svc["build"] = {"context": os.path.normpath(os.path.join(srcdir, b))}
+    elif isinstance(b, dict) and "context" in b and not os.path.isabs(b["context"]):
+        b["context"] = os.path.normpath(os.path.join(srcdir, b["context"]))
+
+
+def _abs_volumes(svc, srcdir):
+    vols = svc.get("volumes")
+    if not isinstance(vols, list):
+        return
+    out = []
+    for v in vols:
+        if isinstance(v, str) and ":" in v:
+            host, rest = v.split(":", 1)
+            if host.startswith((".", "/", "~")):
+                if not os.path.isabs(host):
+                    host = os.path.normpath(os.path.join(srcdir, host))
+                out.append(f"{host}:{rest}")
+            else:
+                out.append(v)   # named volume -- left as-is (rare for single-container)
+        else:
+            out.append(v)
+    svc["volumes"] = out
+
+
+def rewrite_single(doc):
+    """Single-target: mutate compose in place; return (primary, hostname)."""
     services = doc.get("services") or {}
     if not services:
         die("source compose has no services")
     primary = next((n for n, s in services.items() if s.get("ports")), None)
     if primary is None:
         primary = next(iter(services))
-    hostname = rand_host()              # what soc-attacker reaches the target as
+    hostname = rand_host()
     for name, svc in services.items():
-        svc.pop("ports", None)          # no host exposure
-        svc.pop("network_mode", None)   # would conflict with our networks: block
-        svc.pop("container_name", None)  # source may hard-code a leaky name
-        # Every service gets an OPAQUE container_name so reverse-DNS of the box
-        # leaks nothing (docker's PTR answers with the container name). The
-        # primary -- the one the attacker reaches -- answers to the random
-        # `hostname` and NOTHING else (no compose service name like "n8n", no
-        # "target": both would give away software / lab identity for free).
-        # Non-primary services keep their compose-service-name alias, because the
-        # app resolves its db/cache by that name internally, but still get an
-        # opaque container_name of their own. (Edge case: a source compose whose
-        # primary is dialed BY NAME by a sibling would need its name kept -- rare
-        # for the ports/ingress service; such a target just won't come up and the
-        # operator picks another, same as an image that won't boot.)
+        svc.pop("ports", None)
+        svc.pop("network_mode", None)
+        svc.pop("container_name", None)
         if name == primary:
             svc["container_name"] = hostname
             aliases = [hostname]
@@ -125,42 +143,66 @@ def rewrite(doc):
         svc["networks"] = {DEALER_NET: {"aliases": aliases}}
     doc["services"] = services
     doc["networks"] = {DEALER_NET: {"external": True}}
-    doc.pop("version", None)            # obsolete key -> silence the warning
+    doc.pop("version", None)
     return primary, hostname
 
 
+def build_multi(targets):
+    """Merge SINGLE-CONTAINER targets onto soclab-dealer. Returns (doc, state)."""
+    services = {}
+    state = []
+    for i, target in enumerate(targets):
+        kind, doc, srcdir = load_target(target)
+        svcs = doc.get("services") or {}
+        if len(svcs) != 1:
+            warn(f"SKIP '{target}': {len(svcs)} services -- multi-target mode is single-container only")
+            continue
+        name, svc = next(iter(svcs.items()))
+        hostname = rand_host()
+        svc.pop("ports", None)
+        svc.pop("network_mode", None)
+        svc.pop("container_name", None)
+        svc.pop("depends_on", None)   # single service -> nothing to depend on
+        _abs_build(svc, srcdir)
+        _abs_volumes(svc, srcdir)
+        svc["container_name"] = hostname
+        svc["networks"] = {DEALER_NET: {"aliases": [hostname]}}
+        services[f"t{i}_{name}"] = svc
+        state.append({"target": target, "kind": kind, "primary_service": name,
+                      "hostname": hostname, "source": target})
+        print(f"[dealer] + '{target}' ({kind}) -> opaque '{hostname}' on {DEALER_NET}")
+    if not services:
+        die("no usable single-container targets in the list")
+    doc = {"services": services, "networks": {DEALER_NET: {"external": True}}}
+    return doc, state
+
+
 def main():
-    target = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("DEALER_TARGET", "")).strip()
-    if not target:
-        die("no target given (set DEALER_TARGET or pass one as an argument)")
-
-    kind, cf, srcdir = resolve(target)
-    if kind == "image":
-        doc = {"services": {"app": {"image": target, "restart": "no"}}}
-        project_dir = HERE
-    else:
-        with open(cf) as f:
-            doc = yaml.safe_load(f) or {}
-        project_dir = srcdir
-
-    primary, hostname = rewrite(doc)
+    raw = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("DEALER_TARGET", "")).strip()
+    if not raw:
+        die("no target given (set DEALER_TARGET or pass one/more as arguments)")
+    targets = raw.replace(",", " ").split()
 
     os.makedirs(RUN, exist_ok=True)
+    if len(targets) == 1:
+        kind, doc, srcdir = load_target(targets[0])
+        primary, hostname = rewrite_single(doc)
+        project_dir = srcdir
+        state = [{"target": targets[0], "kind": kind, "primary_service": primary,
+                  "hostname": hostname, "source": targets[0]}]
+        print(f"[dealer] target={targets[0]} ({kind}); service '{primary}' reachable only "
+              f"as opaque '{hostname}' on {DEALER_NET}")
+    else:
+        doc, state = build_multi(targets)
+        project_dir = HERE   # every build context / bind mount is absolutized in build_multi
+        print(f"[dealer] {len(state)} target(s) merged onto {DEALER_NET}")
+
     with open(os.path.join(RUN, "compose.yml"), "w") as f:
         yaml.safe_dump(doc, f, sort_keys=False)
     with open(os.path.join(RUN, "project_dir"), "w") as f:
         f.write(project_dir + "\n")
-    # `hostname` is the ONLY thing the agent is told about the box (via
-    # lab_modes.active_config()["targets"], which reads it back from here); the
-    # rest of state.json is operator-only. `target` is the Vulhub path the
-    # operator chose, NOT anything the agent sees.
     with open(os.path.join(RUN, "state.json"), "w") as f:
-        json.dump({"target": target, "kind": kind, "primary_service": primary,
-                   "hostname": hostname, "source": cf or target,
-                   "project_dir": project_dir}, f, indent=2)
-
-    print(f"[dealer] target={target} ({kind}); service '{primary}' reachable only as "
-          f"opaque '{hostname}' on {DEALER_NET}")
+        json.dump(state, f, indent=2)   # ALWAYS a list now
     print(f"[dealer] wrote .run/compose.yml (project_dir={project_dir})")
 
 

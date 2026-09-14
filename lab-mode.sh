@@ -232,7 +232,7 @@ case "$VERB" in
     if [ -f "$DEALER_DIR/.run/compose.yml" ]; then
       docker compose -f "$DEALER_DIR/.run/compose.yml" --project-directory "$DEALER_DIR" \
         ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null || true
-      echo "current dealer target: $("$PY" -c "import json;print(json.load(open('$DEALER_DIR/.run/state.json')).get('target','?'))" 2>/dev/null || echo '?')"
+      echo "current dealer target(s): $("$PY" -c "import json,sys; d=json.load(open('$DEALER_DIR/.run/state.json')); items=d if isinstance(d,list) else [d]; print(', '.join(t.get('target','?') for t in items))" 2>/dev/null || echo '?')"
     else
       echo "(dealer range not up)"
     fi

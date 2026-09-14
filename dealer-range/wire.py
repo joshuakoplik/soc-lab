@@ -366,23 +366,30 @@ def plant_flag():
     try:
         st = json.load(open(STATE))
     except (OSError, ValueError):
-        st = {}
-    container = st.get("hostname") or st.get("primary_service")
-    if not container:
-        log("no target container to plant a flag in; skipping")
-        return
-    value = "FLAG{" + secrets.token_hex(8) + "}"
+        st = []
+    targets = st if isinstance(st, list) else [st]
     path = "/root/flag.txt"
-    r = run(["docker", "exec", "-u", "0", container, "sh", "-c",
-             f'mkdir -p /root && printf "%s\\n" "{value}" > {path} && chmod 600 {path}'], timeout=20)
-    if not r or r.returncode != 0:
-        log(f"flag plant failed on {container} (non-root fs?); target up, just unflagged")
+    planted = []
+    for t in targets:
+        container = (t or {}).get("hostname") or (t or {}).get("primary_service")
+        if not container:
+            continue
+        value = "FLAG{" + secrets.token_hex(8) + "}"
+        r = run(["docker", "exec", "-u", "0", container, "sh", "-c",
+                 f'mkdir -p /root && printf "%s\\n" "{value}" > {path} && chmod 600 {path}'], timeout=20)
+        if not r or r.returncode != 0:
+            log(f"flag plant failed on {container} (non-root fs?); leaving it unflagged")
+            continue
+        planted.append({"flag": value, "container": container, "path": path})
+    if not planted:
+        log("no flags planted on any dealer target")
         return
     with open(FLAG_RECORD, "w") as fh:
-        json.dump({"flag": value, "container": container, "path": path}, fh, indent=2)
+        json.dump(planted, fh, indent=2)
     with open(FLAG_MARKER, "w") as fh:
-        json.dump({DEALER_NET: 1}, fh)
-    log(f"planted flag on target {container} ({path}, root-only); marked present for {DEALER_NET}")
+        json.dump({DEALER_NET: len(planted)}, fh)
+    log(f"planted {len(planted)} flag(s) on dealer target(s) ({path}, root-only); "
+        f"marked present for {DEALER_NET}")
 
 
 def main():
