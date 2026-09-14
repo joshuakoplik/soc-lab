@@ -4,7 +4,6 @@
 const feedEvents = document.getElementById("feed-events");
 const timelineEl = document.getElementById("timeline");   // the unified defender|attacker time axis
 const feedDiary = document.getElementById("feed-diary");  // attacker's own reasoning, streamed unedited
-const feedDefender = document.getElementById("feed-defender");  // threat-hunter feed: incidents, hunt status, notes, leads
 const diariedIds = new Set();  // pending_action ids already narrated (they re-fire on approve/execute)
 
 const candidatesById = new Map();   // id -> candidate row
@@ -156,8 +155,7 @@ const TL_FILTERS = [
   { key: "loot",     label: "loot",     etypes: ["loot"] },
   { key: "win",      label: "win",      etypes: ["wins"] },
   { key: "flag",     label: "flag",     etypes: ["captured_flags"] },
-  { key: "defender", label: "defender", etypes: ["triage", "agent_alerts", "human_pages", "block_recommendations", "block_ip_calls"] },
-  { key: "shell_exec", label: "shell_exec", tools: ["shell_exec"] },
+  { key: "defender", label: "defender", etypes: ["triage", "agent_alerts", "human_pages", "block_recommendations", "block_ip_calls", "incidents", "leads", "hunt_notes", "hunt_sessions"] },
 ];
 const hiddenFilters = new Set();
 
@@ -564,15 +562,14 @@ function resetLocalState() {
   feedEvents.innerHTML = "";
   timelineEl.innerHTML = "";
   feedDiary.innerHTML = "";
-  feedDefender.innerHTML = "";
   diariedIds.clear();
   candidatesById.clear();
   sessionsById.clear();
   incidentRowById.clear();
   incidentEvById.clear();
-  incidentElById.clear();
-  leadElById.clear();
-  huntStatusEl = null;
+  _incState.clear();
+  _leadState.clear();
+  _huntState.clear();
   inflightById.clear();
   inflightColsByComponent.triage.innerHTML = "";
   inflightDefaultCol.innerHTML = "";
@@ -593,88 +590,57 @@ function resetLocalState() {
 
 const incidentRowById = new Map();   // id -> latest incident row
 const incidentEvById = new Map();    // incident id -> Set("kind:ref_id")
-const incidentElById = new Map();    // id -> rendered div (update in place)
-const leadElById = new Map();        // id -> rendered div (update in place)
-let huntStatusEl = null;
+const _incState = new Map();   // id -> "severity/status" last shown (no-op-update guard)
+const _leadState = new Map();  // id -> status last shown
+const _huntState = new Map();  // id -> status last shown
 
-function huntUpsert(map, id, innerHtml, statusClass, detailKey) {
-  let div = map.get(id);
-  if (!div) {
-    const placeholder = feedDefender.querySelector(".empty");
-    if (placeholder) placeholder.remove();
-    div = document.createElement("div");
-    div.dataset.epoch = Date.now();
-    div.classList.add("clickable");
-    div.dataset.detailKey = detailKey;
-    feedDefender.insertBefore(div, feedDefender.firstChild);
-    map.set(id, div);
-  }
-  div.className = "line clickable " + (statusClass || "");
-  div.innerHTML = innerHtml;
-  return div;
-}
-
+// Threat-hunter activity renders as single-line DEF entries INTERLEAVED into the
+// unified timeline (not a separate card feed), so the hunt unfolds against the
+// attacker's moves in real time -- tap any line for the full row. State maps keep
+// a line from re-firing on a no-op update: only a genuine status/severity change
+// adds a new line, so an incident's evolution reads as a short thread, not a flood.
 function onHuntSession(row) {
-  const badge = row.status === "running" ? "badge-running"
-    : row.status === "stopped" ? "badge-error" : "badge-incomplete";
-  const html = `<div class="line-head"><span class="tag">HUNT #${row.id}</span>` +
-    `<span class="badge ${badge}">${escapeHtml(row.status)}</span>` +
-    `<span class="ctx">chunk ${row.chunk_count} · ${escapeHtml(row.provider)}/${escapeHtml(row.model)}` +
-    `${row.lab_mode ? " · " + escapeHtml(row.lab_mode) : ""}</span></div>`;
-  if (!huntStatusEl) {
-    const placeholder = feedDefender.querySelector(".empty");
-    if (placeholder) placeholder.remove();
-    huntStatusEl = document.createElement("div");
-    huntStatusEl.className = "line st-muted";
-    feedDefender.insertBefore(huntStatusEl, feedDefender.firstChild);
-  }
-  huntStatusEl.innerHTML = html;
-}
-
-function renderIncident(id) {
-  const row = incidentRowById.get(id);
-  if (!row) return;
-  const n = (incidentEvById.get(id) || new Set()).size;
-  const closed = row.status === "closed" || row.status === "false_positive";
-  const sc = closed ? "st-muted" : severityStatusClass(row.severity);
-  const head = `<div class="line-head"><span class="ts">${fmtTime(row.updated_at)}</span>` +
-    `<span class="tag">INCIDENT #${row.id}</span>` +
-    `<span class="ctx">${escapeHtml(row.severity)} · ${escapeHtml(row.status)}` +
-    `${row.entity ? " · " + escapeHtml(row.entity) : ""} · ${n} evidence</span>` +
-    `<span class="body">${escapeHtml(row.title)}</span></div>`;
-  const body = row.hypothesis ? `<div class="rationale">${escapeHtml(truncate(row.hypothesis, 300))}</div>` : "";
-  huntUpsert(incidentElById, id, head + body, sc, `incidents:${id}`);
+  if (_huntState.get(row.id) === row.status) return;
+  _huntState.set(row.id, row.status);
+  const cls = row.status === "running" ? "badge-running" : row.status === "stopped" ? "st-muted" : "st-warning";
+  addTimelineEntry("def", row.updated || row.created, "\u{1F9ED}", cls,
+    `HUNT #${row.id} ${row.status} \u00b7 ${row.model || ""}`, `hunt_sessions:${row.id}`);
 }
 
 function onIncident(row) {
   incidentRowById.set(row.id, row);
-  renderIncident(row.id);
+  const key = `${row.severity}/${row.status}`;
+  if (_incState.get(row.id) === key) return;
+  _incState.set(row.id, key);
+  const closed = row.status === "closed" || row.status === "false_positive";
+  addTimelineEntry("def", row.updated_at || row.created, "\u{1F6A8}",
+    closed ? "st-muted" : severityStatusClass(row.severity),
+    `INCIDENT #${row.id} [${row.severity}/${row.status}]${row.entity ? " \u00b7 " + row.entity : ""} \u00b7 ${row.title || ""}`,
+    `incidents:${row.id}`);
 }
 
 function onIncidentEvidence(row) {
   let set = incidentEvById.get(row.incident_id);
   if (!set) { set = new Set(); incidentEvById.set(row.incident_id, set); }
   set.add(`${row.kind}:${row.ref_id}`);
-  renderIncident(row.incident_id);
+  // Evidence count shows in the incident's detail modal; no separate timeline line.
 }
 
 function onHuntNote(row) {
   const cls = { finding: "st-serious", decision: "st-info", hypothesis: "st-warning",
     lead: "st-info", observation: "st-muted" }[row.note_type] || "st-muted";
-  const head = `<span class="tag">NOTE</span>` +
-    `<span class="ctx">${escapeHtml(row.note_type)}${row.incident_id ? " · inc #" + row.incident_id : ""}</span>` +
-    `<span class="body">${escapeHtml(truncate(row.body, 240))}</span>`;
-  appendLine(feedDefender, buildEntry(row.created, head, null), cls, 400, row.created, `hunt_notes:${row.id}`);
+  addTimelineEntry("def", row.created, "\u{1F4DD}", cls,
+    `note[${row.note_type || "note"}]${row.incident_id ? " inc#" + row.incident_id : ""}: ${truncate(row.body, 90)}`,
+    `hunt_notes:${row.id}`);
 }
 
 function onLead(row) {
+  if (_leadState.get(row.id) === row.status) return;
+  _leadState.set(row.id, row.status);
   const sc = row.status === "dead" ? "st-muted" : row.status === "resolved" ? "st-good" : "st-info";
-  const html = `<div class="line-head"><span class="ts">${fmtTime(row.updated)}</span>` +
-    `<span class="tag">LEAD #${row.id}</span>` +
-    `<span class="ctx">${escapeHtml(row.status)}${row.fail_count ? " · fails " + row.fail_count : ""}` +
-    `${row.incident_id ? " · inc #" + row.incident_id : ""}</span>` +
-    `<span class="body">${escapeHtml(truncate(row.description, 200))}</span></div>`;
-  huntUpsert(leadElById, row.id, html, sc, `leads:${row.id}`);
+  addTimelineEntry("def", row.updated || row.created, "\u{1F9F5}", sc,
+    `LEAD #${row.id} ${row.status}${row.incident_id ? " inc#" + row.incident_id : ""}: ${truncate(row.description, 80)}`,
+    `leads:${row.id}`);
 }
 
 function handleMessage(msg) {
