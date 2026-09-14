@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS events (
     -- ---- infrastructure-asserted: we observed this, nobody could forge it ----
     ts            TEXT    NOT NULL,   -- ISO8601 UTC, normalized from both sources
     source        TEXT    NOT NULL,   -- 'cowrie' | 'nginx'
+    host          TEXT,               -- emitting host: which NPC/sensor produced the line.
+                                      -- Set for Wazuh fleet alerts (from the log location /
+                                      -- predecoder hostname); NULL for sources that don't
+                                      -- attribute a host. Infrastructure-asserted.
     event_type    TEXT    NOT NULL,   -- canonical taxonomy, see normalize.py
     src_ip        TEXT,
     src_port      INTEGER,

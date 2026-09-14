@@ -9,6 +9,7 @@ is a real signal, but the payload that tripped it is still hostile string data.
 """
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 
@@ -209,6 +210,17 @@ def normalize_wazuh(obj, raw):
     data  = obj.get("data", {}) or {}
     groups = rule.get("groups") or []
 
+    # Which NPC/sensor host emitted the line. predecoder.hostname is set when
+    # the line carried a syslog "host program:" prefix (nginx/apache/sshd/...),
+    # but NOT for the raw-format buckets (postgres/mysql decoders anchor at
+    # start-of-line, so we tail those without a prefix). The decoder-independent
+    # channel is the fleet per-host filename: logs/fleet/<hostname>.log. Prefer
+    # the predecoder value, fall back to the location basename for fleet logs.
+    loc = obj.get("location") or ""
+    host = (obj.get("predecoder") or {}).get("hostname")
+    if not host and "/fleet/" in loc and loc.endswith(".log"):
+        host = os.path.basename(loc)[:-4]
+
     # Cowrie says src_ip; Wazuh's own decoders say srcip. Accept both.
     src_ip = data.get("src_ip") or data.get("srcip")
     # web_accesslog puts the HTTP status in data.id and the verb in data.protocol
@@ -219,6 +231,7 @@ def normalize_wazuh(obj, raw):
     return {
         "ts":             _iso_utc(obj.get("timestamp")),
         "source":         "wazuh",
+        "host":           _clean(host),
         "event_type":     "siem.alert",
         "src_ip":         _clean(src_ip),
         "src_port":       _int(data.get("src_port") or data.get("srcport")),
@@ -471,7 +484,7 @@ LLM_TRANSCRIPT_ATTACKER_CONTROLLED = (
 )
 
 COLUMNS = (
-    "ts", "source", "event_type", "src_ip", "src_port", "dst_port",
+    "ts", "source", "host", "event_type", "src_ip", "src_port", "dst_port",
     "session_id", "http_status", "bytes_sent", "username", "password",
     "command", "http_method", "url_path", "url_query", "user_agent",
     "referer", "request_body", "client_version",

@@ -87,6 +87,7 @@ def migrate(conn):
         ("siem_description", "TEXT"),
         ("siem_groups",      "TEXT"),
         ("llm_view",         "TEXT"),
+        ("host",             "TEXT"),
     ):
         if col not in have:
             conn.execute(f"ALTER TABLE events ADD COLUMN {col} {decl}")
@@ -113,7 +114,10 @@ def insert_event(conn, row, obj):
     placeholders = ",".join("?" * len(COLUMNS))
     cur = conn.execute(
         f"INSERT INTO events ({','.join(COLUMNS)}, llm_view) VALUES ({placeholders}, ?)",
-        tuple(row[c] for c in COLUMNS) + (llm_view_json,),
+        # `host` is optional -- only source=wazuh (fleet) sets it, so default it
+        # here rather than making all nine normalizers carry the key. Every
+        # other column stays strict (KeyError on a missing key is a real bug).
+        tuple(row.get(c) if c == "host" else row[c] for c in COLUMNS) + (llm_view_json,),
     )
     check_llm_view_size(cur.lastrowid, llm_view_json)
 
