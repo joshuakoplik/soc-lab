@@ -64,15 +64,46 @@ MODE="${2:-}"
 # ignores it.
 TARGET="${3:-}"
 
-write_state() {
-  printf '{"mode": "%s", "switched_at": "%s"}\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_FILE"
+# Merge ONE key into lab_mode.json, preserving every other key -- so setting the
+# mode never clobbers the posture (a second, orthogonal axis) and vice versa.
+# Always refreshes switched_at. Replaces the old whole-file printf, which wiped
+# any key it didn't itself write.
+_state_set() {
+  "$PY" - "$STATE_FILE" "$1" "$2" <<'PY'
+import json, sys, datetime
+path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(open(path))
+    if not isinstance(d, dict):
+        d = {}
+except Exception:
+    d = {}
+d[key] = val
+d["switched_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+with open(path, "w") as f:
+    json.dump(d, f)
+    f.write("\n")
+PY
 }
+
+write_state() { _state_set mode "$1"; }
 
 current_mode() {
   if [ -f "$STATE_FILE" ]; then
     "$PY" -c "import json; print(json.load(open('$STATE_FILE')).get('mode','unknown'))" 2>/dev/null || echo unknown
   else
     echo "(none set -- lab_mode.json has never been written)"
+  fi
+}
+
+# Attacker posture -- a second axis, orthogonal to the vuln mode (see
+# PERIMETER_PLAN.md). Default "insider" preserves today's behavior until the
+# perimeter build lands and someone explicitly switches to "remote".
+current_posture() {
+  if [ -f "$STATE_FILE" ]; then
+    "$PY" -c "import json; print(json.load(open('$STATE_FILE')).get('posture','insider'))" 2>/dev/null || echo insider
+  else
+    echo insider
   fi
 }
 
@@ -216,8 +247,28 @@ case "$VERB" in
     # (VERB=dealer, MODE=<target> -> `switch dealer <target>`).
     exec "$0" switch "$VERB" "$MODE"
     ;;
+  posture)
+    # Set (or, with no arg, report) the attacker posture. Orthogonal to the vuln
+    # mode: does NOT bring anything up or down, only records the axis in
+    # lab_mode.json. The perimeter topology reacts to it once that build lands;
+    # until then it is recorded and read (lab_modes.active_config()) but inert.
+    case "$MODE" in
+      remote|insider)
+        _state_set posture "$MODE"
+        echo "[*] attacker posture set to '$MODE' (orthogonal to the vuln mode)"
+        ;;
+      "")
+        echo "current attacker posture: $(current_posture)"
+        ;;
+      *)
+        echo "usage: $0 posture {remote|insider}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   status)
     echo "primary mode: $(current_mode)"
+    echo "attacker posture: $(current_posture)"
     echo
     docker compose --profile easy --profile hard --profile wordpress ps --format "table {{.Name}}\t{{.Status}}"
     echo
@@ -244,7 +295,7 @@ case "$VERB" in
     make -C npc-range status 2>/dev/null || echo "(no flocks up)"
     ;;
   *)
-    echo "usage: $0 {bootstrap|up|down|switch|status|easy|hard|wordpress|northwind|dealer} [mode] [dealer-target]" >&2
+    echo "usage: $0 {bootstrap|up|down|switch|status|posture|easy|hard|wordpress|northwind|dealer} [mode|remote|insider] [dealer-target]" >&2
     exit 1
     ;;
 esac

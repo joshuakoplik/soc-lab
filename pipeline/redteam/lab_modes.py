@@ -39,6 +39,15 @@ STATE_FILE = os.path.join(ROOT, "lab_mode.json")
 
 DEFAULT_MODE = "easy"
 
+# Attacker posture -- a SECOND axis, orthogonal to the vuln mode (see
+# PERIMETER_PLAN.md / PERIMETER_SPEC.md). "insider" is today's behavior:
+# soc-attacker multi-homed onto the target subnet, LAN-adjacent to every
+# service. "remote" puts it on its own internet segment behind the perimeter
+# firewall, reaching only the exposed edge. Default "insider" so every existing
+# script and run is unchanged until the posture is explicitly switched.
+POSTURES = ("insider", "remote")
+DEFAULT_POSTURE = "insider"
+
 # Every entry here was verified end-to-end against the running metasploitable
 # container (not just msf's own `check`, which several of these don't even
 # implement) before being added -- `payload: None` means the module's own
@@ -253,6 +262,19 @@ def current_mode():
     return mode if mode in MODES else DEFAULT_MODE
 
 
+def current_posture():
+    """Read the attacker posture from lab_mode.json, same single-source-of-truth
+    pattern as current_mode(). Falls back to DEFAULT_POSTURE ("insider") if the
+    file is missing, unreadable, or names an unknown posture -- so the absence of
+    the key means today's behavior, never a hard error."""
+    try:
+        with open(STATE_FILE) as f:
+            posture = json.load(f).get("posture", DEFAULT_POSTURE)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return DEFAULT_POSTURE
+    return posture if posture in POSTURES else DEFAULT_POSTURE
+
+
 DEALER_STATE_FILE = os.path.join(ROOT, "dealer-range", ".run", "state.json")
 
 
@@ -286,4 +308,9 @@ def active_config(mode=None):
         hosts = _dealer_hostnames()
         if hosts:
             cfg = {**cfg, "targets": hosts}
+    # Posture is orthogonal to the vuln mode, surfaced here so every consumer
+    # (validate_target, ALLOWED_NETWORKS, the agent prompt) reads it alongside
+    # the mode config without a second lookup. {**cfg, ...} copies, never mutates
+    # the MODES constant -- same reason the dealer branch above copies.
+    cfg = {**cfg, "posture": current_posture()}
     return cfg
