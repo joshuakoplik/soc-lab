@@ -58,6 +58,10 @@ SCHEMA_FILES = [
     os.path.join(HERE, "detect", "schema.sql"),
     os.path.join(HERE, "triage", "schema.sql"),
     os.path.join(HERE, "redteam", "schema.sql"),
+    # The analyst-chat tables (pipeline/analyst/schema.sql) are plain
+    # CREATE TABLE IF NOT EXISTS with no ALTER migrations, so unlike the hunt
+    # tables they can layer in here rather than needing an ensure_schema() call.
+    os.path.join(HERE, "analyst", "schema.sql"),
 ]
 
 
