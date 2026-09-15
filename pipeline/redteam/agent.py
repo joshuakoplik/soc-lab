@@ -199,28 +199,16 @@ _TARGETS = list(_MODE_CFG["targets"])
 GATED_TOOLS = _MODE_CFG["gated_tools"]
 ALLOWED_MSF_MODULES = _MODE_CFG["msf_modules"]
 
-# http_probe only makes sense against a target with an HTTP surface --
-# cowrie/metasploitable are SSH-only. Was hardcoded to ["nginx"] (the only
-# web target easy/hard mode ever had), which silently made the tool
-# unusable in wordpress mode: every call got coerced/rejected before ever
-# reaching the target, so the whole session ran recon blind on the one
-# target that actually needed content discovery to find its seeded vuln.
-# Filtered against _TARGETS (not just a static list) so it's still empty,
-# not wrong, in a mode where neither web target is up.
-_HTTP_TARGETS = tuple(t for t in _TARGETS if t in ("nginx", "wordpress"))
-
-
 def _str_enum(values):
     """A string tool-parameter schema constrained to `values` -- but with the
     `enum` key OMITTED when `values` is empty. An empty `enum: []` is rejected
     outright by strict tool-schema validators (Moonshot/kimi returns a GMI 400,
     "enum array cannot be empty", killing the whole tool list) and a
     zero-choice enum constrains nothing anyway. This bites in modes with no
-    matching surface -- e.g. _HTTP_TARGETS is empty in dealer mode (its target
-    is the alias 'target', not nginx/wordpress), so http_probe's schema would
-    otherwise ship `enum: []`. The runtime tool impls still validate the
-    argument (see tool_http_probe's _HTTP_TARGETS check), so dropping the
-    advisory enum keeps the schema valid without loosening any real control."""
+    matching surface -- e.g. GATED_TOOLS is empty in a mode with no gated tools,
+    so propose_action's `tool` schema would otherwise ship `enum: []`. The
+    runtime tool impls still validate their arguments, so dropping the advisory
+    enum keeps the schema valid without loosening any real control."""
     values = list(values)
     return {"type": "string", "enum": values} if values else {"type": "string"}
 
@@ -746,13 +734,22 @@ _RECON_TOOL_SCHEMAS = [
     },
     {
         "name": "http_probe",
-        "description": "Fetch one or more paths from a web target and report status code plus a capped preview of the response body. Read-only content discovery.",
+        "description": ("Fetch one or more paths from a web target and report status code plus a "
+                        "capped preview of the response body. Read-only content discovery. "
+                        "Defaults to http on port 80 -- set `port` to reach a web service nmap "
+                        "found on a non-standard port (e.g. 5678, 8080, 8443), and `scheme` to "
+                        "\"https\" for a TLS service (certificate errors are ignored). You can "
+                        "also write the port straight into `target` as host:port."),
         "input_schema": {
             "type": "object",
             "properties": {
                 "target": _TARGET_PARAM,
                 "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 25},
                 "method": {"type": "string", "enum": ["GET", "POST"], "default": "GET"},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535,
+                          "description": "TCP port of the web service (default 80). Use the port nmap reported."},
+                "scheme": {"type": "string", "enum": ["http", "https"], "default": "http",
+                            "description": "URL scheme (default http). Use https for a TLS service."},
             },
             "required": ["target", "paths"],
         },
@@ -1680,14 +1677,17 @@ def tool_discover_hosts(conn, session_id):
 _AUTOINDEX_LINK_RE = re.compile(r'<a href="([^"]+)">')
 
 
-def _autofollow_listing(target, path, body, method):
+def _autofollow_listing(base, tls_flags, path, body, method):
     """If `body` looks like an nginx autoindex directory listing, fetch each
     linked file (not '../') and return their entries too. Closes a one-hop
     gap deterministically instead of counting on the model to notice a
     filename in a listing and issue a second http_probe call for it --
     observed live, a smaller local model does this inconsistently across
     otherwise-identical runs. One level deep only; this is a targeted fix
-    for "found a directory, didn't open the file in it," not a crawler."""
+    for "found a directory, didn't open the file in it," not a crawler.
+
+    `base` is the scheme://host:port the parent probe used, so a listing on a
+    non-standard port / https is followed on that same port, not port 80."""
     if "Index of " not in body:
         return []
     names = [m for m in _AUTOINDEX_LINK_RE.findall(body) if m != "../"]
@@ -1695,7 +1695,7 @@ def _autofollow_listing(target, path, body, method):
     for name in names[:10]:
         sub_path = path.rstrip("/") + "/" + name
         r = redteam_exec.run(
-            ["curl", "-s", "--max-time", "15", "-L", "-X", method, f"http://{target}{sub_path}"],
+            ["curl", "-s", "--max-time", "15", "-L", *tls_flags, "-X", method, f"{base}{sub_path}"],
             timeout_s=15, max_output_chars=1500,
         )
         followed.append({
@@ -1706,24 +1706,40 @@ def _autofollow_listing(target, path, body, method):
     return followed
 
 
-def tool_http_probe(conn, session_id, target, paths, method):
+def tool_http_probe(conn, session_id, target, paths, method, port=None, scheme="http"):
     # Subnet-scope: any host on the segment is probeable. There's no HTTP-target
     # allowlist any more -- probing a host with no web surface just returns
     # connection errors, which is legitimate recon feedback (that's how the
     # agent learns a host isn't a web server). The only fence is
     # validate_target()'s subnet membership check.
-    redteam_exec.validate_target(target)
+    #
+    # The web service can be on ANY port nmap turned up, not just 80 -- so honour
+    # `port`/`scheme`, and also accept the port written into `target` as host:port
+    # (what nmap prints and the natural instinct). An explicit `port` arg wins.
+    host = target
+    if isinstance(target, str) and target.count(":") == 1:
+        h, _, p = target.partition(":")
+        if h and p.isdigit():
+            host = h
+            if port is None:
+                port = int(p)
+    if port is None:
+        port = 80
+    scheme = scheme if scheme in ("http", "https") else "http"
+    redteam_exec.validate_target(host)
+    tls_flags = ["-k"] if scheme == "https" else []
+    base = f"{scheme}://{host}:{port}"
     results = []
     for p in (paths or [])[:25]:
         path = p if p.startswith("/") else "/" + p
-        url = f"http://{target}{path}"
+        url = f"{base}{path}"
         # Two calls, not one write-out marker appended after the body: a
         # large response (e.g. Juice Shop's SPA falls back to index.html for
         # any unmatched path) gets truncated by redteam_exec's output cap,
         # which would silently eat a trailing status marker before it's ever
         # read. Separate calls means the body cap can't corrupt the status.
         status_r = redteam_exec.run(
-            ["curl", "-s", "--max-time", "15", "-o", "/dev/null", "-w", "%{http_code}", "-X", method, url],
+            ["curl", "-s", "--max-time", "15", *tls_flags, "-o", "/dev/null", "-w", "%{http_code}", "-X", method, url],
             timeout_s=15,
         )
         # Content discovery is useless if you only learn a path exists and
@@ -1735,18 +1751,18 @@ def tool_http_probe(conn, session_id, target, paths, method):
         # should now separately request the Location" just to see a
         # directory listing that's one hop away.
         body_r = redteam_exec.run(
-            ["curl", "-s", "--max-time", "15", "-L", "-X", method, url], timeout_s=15, max_output_chars=1500,
+            ["curl", "-s", "--max-time", "15", "-L", *tls_flags, "-X", method, url], timeout_s=15, max_output_chars=1500,
         )
         entry = {
-            "path": path, "status": status_r.stdout.strip() or None,
+            "path": path, "url": url, "status": status_r.stdout.strip() or None,
             "exit_code": body_r.exit_code, "body_preview": body_r.stdout.strip(),
         }
         results.append(entry)
-        _record_recon_finding(conn, session_id, target, "http_path", entry, "http_probe")
+        _record_recon_finding(conn, session_id, host, "http_path", entry, "http_probe")
 
-        for sub_entry in _autofollow_listing(target, path, entry["body_preview"], method):
+        for sub_entry in _autofollow_listing(base, tls_flags, path, entry["body_preview"], method):
             results.append(sub_entry)
-            _record_recon_finding(conn, session_id, target, "http_path", sub_entry, "http_probe")
+            _record_recon_finding(conn, session_id, host, "http_path", sub_entry, "http_probe")
     return json.dumps(results), False
 
 
@@ -1935,6 +1951,7 @@ def dispatch_recon_tool(conn, session_id, provider, name, tool_input):
             return tool_http_probe(
                 conn, session_id, tool_input.get("target"),
                 tool_input.get("paths") or [], tool_input.get("method", "GET"),
+                tool_input.get("port"), tool_input.get("scheme", "http"),
             )
         if name == "get_recon_findings":
             return tool_get_recon_findings(conn, session_id, tool_input.get("target"), tool_input.get("ids"))
