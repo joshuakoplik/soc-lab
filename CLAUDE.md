@@ -109,6 +109,7 @@ python3 pipeline/detect/rules.py [--all] [--stats]    # deterministic candidate 
 python3 pipeline/hunt/agent.py [--provider local|claude|gmi|fireworks] [--continue N] [--once] [--dry-run] [--stats]  # the defender (threat hunter)
 python3 pipeline/triage/agent.py [--dry-run] [--provider ...] [--stats]   # LEGACY per-candidate triage -- retained only as the injection_asr baseline; NOT the operational defender
 python3 pipeline/redteam/agent.py [--dry-run] [--provider ...] [--stats] [--list-pending]
+python3 pipeline/analyst/agent.py [--provider ...] [--model ...] [--sitrep] [--ask "..."] [--session N] [--once] [--dry-run] [--stats]  # interactive analyst chat (also the dashboard "Analyst" tab)
 python3 injection_asr/run_asr.py [--provider ...] [--classes ...] [--controls on|off|both]
 ```
 
@@ -244,6 +245,67 @@ agent uses** (§4): the DB is the memory, not the conversation. Read the
 **Follow-on (not yet done):** `injection_asr/` still measures the legacy triage
 path; a hunter-mode ASR arm (the hunter's injection surface is larger — it reads
 far more attacker text and holds the real `block_ip`) is the natural next step.
+
+### 3c. Interactive analyst chat (`pipeline/analyst/`, `dashboard/chat.py`, dashboard "Analyst" tab)
+
+The human-in-the-loop counterpart to the standing hunter (§3b): a chat an
+on-call analyst drives from the dashboard -- "what the hell is going on?", then
+digging into details. Same providers, same trust-fencing, same real response
+backends as the hunter; the difference is that a HUMAN, not a feed cursor, drives
+each turn, and the conversation IS the artifact (persisted to `chat_turns`, not
+compacted away like the hunter's).
+
+- **Backend + CLI (`pipeline/analyst/`).** `agent.py` is the loop, drivable
+  standalone (`python3 pipeline/analyst/agent.py --sitrep|--ask "..."|--session
+  N|--dry-run|--stats`); `chat_store.py` owns the chat_* tables + CRUD;
+  `schema.sql` defines chat_sessions / chat_turns (the persisted transcript) /
+  chat_notes / chat_actions; `enrichment.py` holds the external tools. Naming
+  trap: the analyst's store is `chat_store.py`, not `store.py`, and hunt's
+  modules load via importlib under unique names -- both packages ship a
+  store.py/agent.py, so a bare `import store`/`import agent` would collide in one
+  process (the analyst reuses the hunter's code).
+- **Read shared, write own.** The analyst READS the live hunt's shared memory
+  (list_hunt_incidents / get_hunt_incident / search_hunt_notebook /
+  list_hunt_leads) and reuses the hunter's read tools VERBATIM (poll_feed /
+  pivot_events / query_events / enrich_ip / correlate / get_llm_transcript) so
+  the `<untrusted-evidence>` fencing is identical. It WRITES only to its own
+  chat_* tables (chat_notes, chat_actions), never the hunt/triage tables -- so
+  two agents never contend and the frozen injection_asr surface is untouched.
+  Response tools are full parity with the hunter (raise_alert / recommend_block /
+  block_ip / page_oncall + northwind) through the SAME backends and hard fences
+  (`block_enforcer`'s CIDR fence, `northwind_enforcer`'s allowlist) -- no new
+  safety boundary, theirs reused. chat_actions is the audit record; the fence is
+  still the only safety boundary.
+- **External enrichment is gated (`enrichment.py`).** dns_lookup / reverse_dns /
+  whois_lookup (RDAP) / traceroute / http_headers / web_search reach OFF-HOST --
+  the one outbound path in this otherwise egress-locked lab. Off unless
+  `SOC_ANALYST_EGRESS` is truthy (when off, the tools aren't even offered to the
+  model, and dispatch refuses them). Connecting tools (traceroute/http_headers,
+  and RDAP-by-IP) resolve the target and refuse anything not `is_global` --
+  blocking loopback / RFC1918 / link-local incl. the 169.254.169.254 metadata
+  endpoint -- so attacker-chosen input can't be steered into internal space;
+  lab-internal IPs stay with enrich_ip/correlate. Results are fenced as untrusted
+  like any other evidence.
+- **Dashboard integration (`dashboard/chat.py`).** A router mounted in
+  server.py. The poll loop stays `mode=ro` (its physical read-only guarantee is
+  intact); the chat opens its OWN read-write connection per turn, inside an
+  `asyncio.to_thread` worker running the blocking provider call, pointed at the
+  same `SOC_DASHBOARD_DB` the poller reads. Streaming is free: the agent logs
+  each turn/tool/reply row to chat_turns as it goes, and server.py registers the
+  chat_* tables in its broadcast poller, so the transcript streams to the browser
+  over the existing WebSocket -- no separate streaming channel. Config via .env:
+  `SOC_ANALYST_PROVIDER` / `SOC_ANALYST_MODEL` / `SOC_ANALYST_MAX_ITERATIONS` /
+  `SOC_ANALYST_EGRESS`. Per-session lock serialises turns (a second message
+  mid-turn is refused 409).
+- Reset: the chat_* tables are built by `reset_lab.init_full_schema` (a `--db`
+  wipe recreates them); real `block_ip` rules the chat placed are cleared by
+  `./reset.sh --network`, same as hunter/triage.
+
+**Follow-on (not yet done):** no `injection_asr/` arm exercises this path yet.
+Its injection surface is the largest of any agent -- it reads the most attacker
+text, holds the real block_ip/page_oncall, AND (with egress on) can be steered to
+make outbound requests -- so a chat-mode ASR arm is the natural next measurement,
+alongside the hunter-mode arm noted in §3b.
 
 ### 4. Red-team agent (`pipeline/redteam/agent.py`, `pipeline/redteam/executor.py`, `pipeline/redteam/lab_modes.py`)
 
