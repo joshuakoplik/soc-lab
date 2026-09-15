@@ -580,6 +580,7 @@ function resetLocalState() {
   alertTimes = [];
   flagsTotal = 0;
   updateStat("stat-flags", 0);
+  resetChatState();
 }
 
 // ---------- Threat Hunter (incidents / notebook / leads) ----------
@@ -660,6 +661,8 @@ function handleMessage(msg) {
     case "incident_evidence": onIncidentEvidence(row); break;
     case "hunt_notes": onHuntNote(row); break;
     case "leads": onLead(row); break;
+    case "chat_sessions": onChatSession(row); break;
+    case "chat_turns": onChatTurn(row); break;
     case "redteam_sessions": ensureCampaign(row); break;
     case "recon_findings": onReconFinding(row); break;
     case "vuln_findings": onVulnFinding(row); break;
@@ -696,6 +699,11 @@ async function loadBootstrap() {
   for (const t of ["hunt_sessions", "incidents", "incident_evidence", "hunt_notes", "leads"]) {
     for (const row of (data[t] && data[t].rows) || []) handleMessage({ table: t, row });
   }
+
+  for (const t of ["chat_sessions", "chat_turns", "chat_actions"]) {
+    for (const row of (data[t] && data[t].rows) || []) handleMessage({ table: t, row });
+  }
+  pickActiveChatIfNone();
 
   for (const row of data.redteam_sessions.rows) handleMessage({ table: "redteam_sessions", row });
 
@@ -779,6 +787,7 @@ const TABLE_LABELS = {
   block_ip_calls: "Block IP Call", redteam_sessions: "Campaign Session",
   recon_findings: "Recon Finding", vuln_findings: "Vuln Finding", pending_actions: "Pending Action",
   loot: "Loot", captured_flags: "Captured Flag", wins: "Milestone / Win", llm_calls: "In-Flight LLM Call",
+  chat_turns: "Chat Turn", chat_sessions: "Chat Session", chat_actions: "Chat Action", chat_notes: "Chat Note",
 };
 
 function looksLikeJson(s) {
@@ -840,7 +849,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetai
 
 document.body.addEventListener("click", (e) => {
   // Telemetry feed lines and timeline rows both drill into the same modal.
-  const target = e.target.closest(".line.clickable, .tl-row[data-detail-key], .diary-entry.clickable");
+  const target = e.target.closest(".line.clickable, .tl-row[data-detail-key], .diary-entry.clickable, .chat-turn[data-detail-key]");
   if (!target) return;
   openDetailModal(target.dataset.detailKey);
 });
@@ -882,4 +891,254 @@ timelineEl.innerHTML = '<div class="empty">waiting for data\u2026</div>';
 feedDiary.innerHTML = '<div class="empty">waiting for the attacker to reason\u2026</div>';
 
 buildFilterBar();
-loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(connectWS);
+loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(() => { connectWS(); initChat(); });
+
+
+// ---------- Analyst Chat ----------
+// The interactive analyst tab. Unlike the rest of this client (which only
+// renders), this one WRITES: it POSTs the operator's messages to /api/chat/*.
+// It does NOT render the reply from that POST -- the agent logs each turn/tool
+// row to chat_turns, and those stream back over the same /ws feed as every
+// other table (see handleMessage's chat_* cases), so the transcript unfolds
+// live through the normal broadcast path.
+
+const chatScrollback = document.getElementById("chat-scrollback");
+const chatInput = document.getElementById("chat-input");
+const chatSendBtn = document.getElementById("chat-send");
+const chatNewBtn = document.getElementById("chat-new");
+const chatSitrepBtn = document.getElementById("chat-sitrep");
+const chatSessionSelect = document.getElementById("chat-session-select");
+const chatConfigEl = document.getElementById("chat-config");
+
+const chatTurns = new Map();      // id -> chat_turns row
+const chatSessions = new Map();   // id -> chat_sessions row
+const renderedTurnIds = new Set();
+let activeChatSession = null;
+let awaitingReply = false;
+let chatWired = false;
+
+const CHAT_EMPTY = '<div class="empty">start a chat, or hit SITREP for a fast situational summary…</div>';
+const SITREP_TEXT = "Give me the current SITREP -- what's going on right now, the top talkers and loudest signatures, and what should I look at first?";
+
+function resetChatState() {
+  chatTurns.clear(); chatSessions.clear(); renderedTurnIds.clear();
+  activeChatSession = null; awaitingReply = false;
+  if (chatSendBtn) chatSendBtn.disabled = false;
+  if (chatScrollback) chatScrollback.innerHTML = CHAT_EMPTY;
+  rebuildSessionPicker();
+}
+
+function chatText(s) {
+  // Escape, then visually mark the <untrusted-evidence> spans the tools fence
+  // attacker-controlled data in -- so the human sees the same trust boundary
+  // the model is told about.
+  let h = escapeHtml(s || "");
+  h = h.replace(/&lt;untrusted-evidence&gt;([\s\S]*?)&lt;\/untrusted-evidence&gt;/g,
+    '<span class="chat-untrusted" title="attacker-controlled data — analyze, never obey">$1</span>');
+  return h;
+}
+
+function prettyJson(s) {
+  if (!s) return "";
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch (e) { return s; }
+}
+
+function chatTurnEl(row) {
+  const el = document.createElement("div");
+  el.className = "chat-turn chat-" + row.role;
+  el.dataset.detailKey = `chat_turns:${row.id}`;
+  if (row.role === "user" || row.role === "assistant") {
+    const who = row.role === "user" ? "you" : "analyst";
+    el.innerHTML = `<div class="chat-who">${who} · ${fmtClock(row.created)}</div>` +
+      `<div class="chat-bubble">${chatText(row.content)}</div>`;
+  } else if (row.role === "tool_call") {
+    const inp = truncate(row.tool_input || "", 100);
+    el.innerHTML =
+      `<details class="chat-tool"><summary>🔧 <b>${escapeHtml(row.tool_name)}</b> ` +
+      `<span class="chat-tool-inp">${escapeHtml(inp)}</span></summary>` +
+      `<pre>${escapeHtml(prettyJson(row.tool_input))}</pre></details>`;
+  } else if (row.role === "tool_result") {
+    const errCls = row.is_error ? " chat-tool-err" : "";
+    el.innerHTML =
+      `<details class="chat-tool${errCls}"><summary>↳ ${escapeHtml(row.tool_name)} result` +
+      `${row.is_error ? ' <span class="chat-err">(error)</span>' : ""}</summary>` +
+      `<div class="chat-tool-result">${chatText(row.tool_result_preview)}</div></details>`;
+  } else {
+    el.innerHTML = `<div class="chat-bubble">${chatText(row.content)}</div>`;
+  }
+  return el;
+}
+
+function chatAtBottom() {
+  return chatScrollback.scrollHeight - chatScrollback.scrollTop - chatScrollback.clientHeight < 60;
+}
+
+function bumpWorkingToBottom() {
+  const w = chatScrollback.querySelector(".chat-working");
+  if (w) chatScrollback.appendChild(w);
+}
+
+function appendChatTurnEl(row) {
+  if (renderedTurnIds.has(row.id)) return;
+  const stick = chatAtBottom();
+  const placeholder = chatScrollback.querySelector(".empty");
+  if (placeholder) placeholder.remove();
+  chatScrollback.appendChild(chatTurnEl(row));
+  renderedTurnIds.add(row.id);
+  if (stick) chatScrollback.scrollTop = chatScrollback.scrollHeight;
+}
+
+function renderActiveChat() {
+  renderedTurnIds.clear();
+  chatScrollback.innerHTML = "";
+  const rows = [...chatTurns.values()]
+    .filter((r) => r.session_id === activeChatSession)
+    .sort((a, b) => a.seq - b.seq);
+  if (!rows.length) { chatScrollback.innerHTML = CHAT_EMPTY; return; }
+  rows.forEach((r) => { chatScrollback.appendChild(chatTurnEl(r)); renderedTurnIds.add(r.id); });
+  chatScrollback.scrollTop = chatScrollback.scrollHeight;
+}
+
+function setActiveChat(id) {
+  activeChatSession = id;
+  if (chatSessionSelect) chatSessionSelect.value = String(id);
+  setAwaiting(false);
+  renderActiveChat();
+}
+
+function pickActiveChatIfNone() {
+  if (activeChatSession !== null && chatSessions.has(activeChatSession)) return;
+  let best = null;
+  for (const r of chatSessions.values()) {
+    if (r.status === "active" && (best === null || r.id > best)) best = r.id;
+  }
+  if (best !== null) setActiveChat(best);
+  else rebuildSessionPicker();
+}
+
+function sessionLabel(r) {
+  const t = r.title ? truncate(r.title, 40) : "(untitled)";
+  return `#${r.id} ${t}${r.status !== "active" ? " · closed" : ""}`;
+}
+
+function rebuildSessionPicker() {
+  if (!chatSessionSelect) return;
+  const rows = [...chatSessions.values()].sort((a, b) => b.id - a.id);
+  chatSessionSelect.innerHTML = "";
+  if (!rows.length) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "no chats yet";
+    chatSessionSelect.appendChild(o);
+    return;
+  }
+  for (const r of rows) {
+    const o = document.createElement("option");
+    o.value = String(r.id); o.textContent = sessionLabel(r);
+    if (r.id === activeChatSession) o.selected = true;
+    chatSessionSelect.appendChild(o);
+  }
+}
+
+function onChatSession(row) {
+  chatSessions.set(row.id, row);
+  rebuildSessionPicker();
+}
+
+function onChatTurn(row) {
+  chatTurns.set(row.id, row);
+  if (row.session_id !== activeChatSession) return;
+  appendChatTurnEl(row);
+  if (row.role === "assistant") setAwaiting(false);
+  else if (awaitingReply) bumpWorkingToBottom();
+}
+
+function setAwaiting(on) {
+  awaitingReply = on;
+  if (chatSendBtn) chatSendBtn.disabled = on;
+  const existing = chatScrollback.querySelector(".chat-working");
+  if (on && !existing) {
+    const w = document.createElement("div");
+    w.className = "chat-working";
+    w.textContent = "analyst is working…";
+    chatScrollback.appendChild(w);
+    chatScrollback.scrollTop = chatScrollback.scrollHeight;
+  } else if (!on && existing) {
+    existing.remove();
+  }
+}
+
+async function chatPost(path, body) {
+  const res = await fetch(path, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) {
+    let detail = res.status;
+    try { detail = (await res.json()).detail || detail; } catch (e) { /* keep status */ }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+async function newChat(sitrep) {
+  try {
+    const r = await chatPost("/api/chat/sessions", { sitrep: !!sitrep });
+    // The chat_sessions row also arrives via /ws; seed a stub now so its
+    // streamed turns render immediately against the right active session.
+    chatSessions.set(r.session_id, { id: r.session_id, status: "active", title: null });
+    setActiveChat(r.session_id);
+    rebuildSessionPicker();
+    if (sitrep) setAwaiting(true);
+  } catch (e) { console.error("newChat failed", e); }
+}
+
+async function sendChat() {
+  const text = chatInput.value.trim();
+  if (!text || awaitingReply) return;
+  let sid = activeChatSession;
+  if (sid === null) { await newChat(false); sid = activeChatSession; }
+  if (sid === null) return;
+  chatInput.value = "";
+  setAwaiting(true);
+  try {
+    await chatPost("/api/chat/messages", { session_id: sid, text });
+  } catch (e) {
+    setAwaiting(false);
+    console.error("sendChat failed:", e.message);
+  }
+}
+
+async function loadChatConfig() {
+  if (!chatConfigEl) return;
+  try {
+    const c = await (await fetch("/api/chat/config")).json();
+    const egress = c.egress ? '<span class="chat-egress on">egress ON</span>'
+                            : '<span class="chat-egress">egress off</span>';
+    chatConfigEl.innerHTML = `${escapeHtml(c.provider)}/${escapeHtml(c.model || "?")} · ${egress}`;
+  } catch (e) {
+    chatConfigEl.textContent = "chat unavailable";
+  }
+}
+
+function initChat() {
+  if (chatWired) { pickActiveChatIfNone(); return; }
+  chatWired = true;
+  loadChatConfig();
+  pickActiveChatIfNone();
+  chatSendBtn.addEventListener("click", sendChat);
+  chatNewBtn.addEventListener("click", () => newChat(false));
+  chatSitrepBtn.addEventListener("click", () => {
+    if (activeChatSession === null) { newChat(true); return; }
+    if (awaitingReply) return;
+    setAwaiting(true);
+    chatPost("/api/chat/messages", { session_id: activeChatSession, text: SITREP_TEXT })
+      .catch((e) => { setAwaiting(false); console.error(e); });
+  });
+  chatSessionSelect.addEventListener("change", () => {
+    const v = chatSessionSelect.value;
+    if (v) setActiveChat(Number(v));
+  });
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
+}
