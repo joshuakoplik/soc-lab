@@ -37,7 +37,27 @@
     <button class="tab-btn active" data-tab="defense" role="tab" aria-selected="true">Defender &amp; Attacker</button>
     <button class="tab-btn" data-tab="diary" role="tab" aria-selected="false">Attacker Diary</button>
     <button class="tab-btn" data-tab="telemetry" role="tab" aria-selected="false">Live Telemetry</button>
+    <button class="tab-btn" data-tab="analyst" role="tab" aria-selected="false">Analyst</button>
   </div>
+
+  <section class="panel tab-panel" id="panel-analyst" data-tab="analyst">
+    <div class="panel-head">
+      <h2>Analyst Chat</h2>
+      <span class="panel-sub">ask what's going on &middot; dig into the details &middot; <span id="chat-config" class="chat-config">connecting&hellip;</span></span>
+    </div>
+    <div class="chat-controls">
+      <select id="chat-session-select" aria-label="Chat session"></select>
+      <button id="chat-new" class="chat-btn">New chat</button>
+      <button id="chat-sitrep" class="chat-btn">SITREP</button>
+    </div>
+    <div id="chat-scrollback" class="chat-scrollback">
+      <div class="empty">start a chat, or hit SITREP for a fast situational summary&hellip;</div>
+    </div>
+    <div class="chat-input-row">
+      <textarea id="chat-input" rows="2" placeholder="ask the analyst&hellip;  (Enter to send, Shift+Enter for a newline)"></textarea>
+      <button id="chat-send" class="chat-btn chat-send">Send</button>
+    </div>
+  </section>
 
   <section class="panel tab-panel" id="panel-diary" data-tab="diary">
     <div class="panel-head">
