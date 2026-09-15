@@ -546,7 +546,16 @@ def run_turn(conn, session_id, hunt_id, conv, provider, provider_name, user_text
         return msg, False
 
     llm_call_tracker.finish_call(conn, call_id, "completed", usage=result.usage)
-    reply = result.final_text or "[no text reply]"
+    reply = (result.final_text or "").strip()
+    if not reply:
+        # Reasoning models (kimi-k3 via GMI, etc.) sometimes end a turn with the
+        # answer in their reasoning channel and an EMPTY content field -- the
+        # provider returns final_text="" with the text in result.thinking. Fall
+        # back to that so a thorough investigation doesn't surface as a blank
+        # "[no text reply]" (observed live: a SITREP that ran 23 tool calls).
+        thinking = (result.thinking or "").strip()
+        reply = (f"_(the model returned only its reasoning, with no final message)_\n\n{thinking}"
+                 if thinking else "[no text reply]")
     analyst_store.add_turn(conn, session_id, "assistant", content=reply)
     return reply, True
 
