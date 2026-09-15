@@ -48,6 +48,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+# The interactive analyst-chat router (its own read-write connection; the poller
+# below stays mode=ro). Imported after load_dotenv() above so the analyst's
+# provider config is already in the environment.
+import chat  # noqa: E402
+
 DB_PATH = Path(os.environ.get("SOC_DASHBOARD_DB", Path(__file__).resolve().parent.parent / "soc.db"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 POLL_INTERVAL_S = float(os.environ.get("SOC_DASHBOARD_POLL_INTERVAL", "1.5"))
@@ -78,6 +83,10 @@ TABLES = {
     "incident_evidence":     ("incident_evidence",      300),
     "hunt_notes":            ("hunt_note",              300),
     "leads":                 ("lead",                   150),
+    "chat_sessions":         ("chat_session",            40),
+    "chat_turns":            ("chat_turn",              400),
+    "chat_notes":            ("chat_note",              100),
+    "chat_actions":          ("chat_action",            100),
 }
 
 # These get UPDATEd in place after insert (candidates.status flips
@@ -93,7 +102,10 @@ TABLES = {
 # need snapshot-diffing like the others; hunt_notes/incident_evidence are
 # insert-only.
 MUTABLE_TABLES = {"candidates", "redteam_sessions", "pending_actions", "llm_calls",
-                  "hunt_sessions", "incidents", "leads"}
+                  "hunt_sessions", "incidents", "leads",
+                  # chat_sessions.status/title/updated change in place; the turn/
+                  # note/action tables are insert-only, so an id-cursor is right.
+                  "chat_sessions"}
 
 
 def connect_ro() -> sqlite3.Connection:
@@ -148,12 +160,20 @@ broadcaster = Broadcaster()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Make sure the chat_* tables exist before poll_loop (which reads them) or a
+    # browser bootstrap queries them -- against a soc.db that predates the chat
+    # feature they wouldn't otherwise appear until the analyst first ran.
+    try:
+        chat.ensure_schema()
+    except Exception as exc:  # noqa: BLE001 - the dashboard must still come up
+        print(f"[chat] schema ensure failed (chat disabled?): {exc}")
     task = asyncio.create_task(poll_loop())
     yield
     task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(chat.router)
 
 
 def fetch_bootstrap() -> dict:
