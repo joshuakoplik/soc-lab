@@ -430,6 +430,13 @@ chunk, compact a handoff note, exit).
 - Reset: `.labctl/` is regenerable and reconciled from `/proc`; there's nothing to
   clear via `reset.sh`. Real `block_ip` rules an agent placed are still cleared by
   `./reset.sh --network` as before.
+- **Dashboard "Lab" tab** (`dashboard/labctl_control.py`, `/api/lab/*`): the
+  browser UI for all of the above. Unlike the analyst chat it writes no `soc.db` —
+  it imports `pipeline.labctl` and runs the same code path `./labctl` does. Reads
+  poll `GET /api/lab/status` (server-cached; keeps `docker ps` off the 1.5s WS
+  poller); mutating actions run under one global lock (409 on contention); a
+  destructive reset needs `confirm=true` (server-enforced) plus a UI dialog; every
+  action is logged to `.labctl/logs/actions.log`. Keep the dashboard loopback-only.
 
 ## Working in this codebase
 

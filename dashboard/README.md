@@ -51,3 +51,28 @@ Config (repo-root `.env`):
 
 The same agent is also runnable head-less from the CLI:
 `python3 pipeline/analyst/agent.py --sitrep` (see `pipeline/analyst/agent.py`).
+
+## The Lab tab (drive lab state from the browser)
+
+The **Lab** tab is the UI for the lab manager (`pipeline/labctl`). It shows lab
+state — current mode/posture, which agents and infra are running, the standing
+hunt and any active attack runs, supervisor policy — and lets you drive it: switch
+modes, start/stop the hunter/attacker/ingest/dashboard, spin NPC flocks up/down,
+start/stop the supervisor `watch` loop and toggle its policies, and run resets.
+
+Same architecture exception as the Analyst tab, but simpler: the router
+(`dashboard/labctl_control.py`, mounted at `/api/lab/*`) does **not** write
+`soc.db` at all — it imports `pipeline.labctl` and runs the *same* code path
+`./labctl` uses, executing the existing scripts (`lab-mode.sh` / `reset.sh` /
+`npc-range` Makefile) as subprocesses. The poll loop keeps its `mode=ro`
+connection. Actions run in a worker thread under a single global lock (a second
+concurrent action → 409). Live agent state (hunt/redteam sessions) still streams
+over the existing WebSocket; the tab additionally polls `GET /api/lab/status`
+(server-cached ~4s) for the docker/process/mode view while it's the visible tab,
+so `docker compose ps` stays off the fast poll path.
+
+Powerful by nature (it can start the attacker or wipe the DB), so keep the server
+loopback-only (the default `SOC_DASHBOARD_HOST=127.0.0.1`). A destructive reset
+(`--db`/`--all`) requires an explicit confirm — a browser dialog **and** a
+server-side `confirm=true` (a 409 otherwise). Every action is appended to
+`.labctl/logs/actions.log`.

@@ -891,7 +891,7 @@ timelineEl.innerHTML = '<div class="empty">waiting for data\u2026</div>';
 feedDiary.innerHTML = '<div class="empty">waiting for the attacker to reason\u2026</div>';
 
 buildFilterBar();
-loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(() => { connectWS(); initChat(); });
+loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(() => { connectWS(); initChat(); initLab(); });
 
 
 // ---------- Analyst Chat ----------
@@ -1141,4 +1141,211 @@ function initChat() {
   chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
   });
+}
+
+// ======================================================================
+// Lab Manager tab -- Phase 2. Polls GET /api/lab/status while the tab is
+// visible and POSTs actions to /api/lab/*. Mirrors the chat tab's shape:
+// the browser kicks an action, the panel re-fetches status. `docker` status
+// is server-cached, so a ~5s poll is cheap.
+// ======================================================================
+const labBody = document.getElementById("lab-body");
+const labConfigEl = document.getElementById("lab-config");
+let labWired = false;
+let labPollTimer = null;
+let labConfig = null;
+let labBusy = false;
+
+function labPanelActive() {
+  const p = document.getElementById("panel-lab");
+  return p && p.classList.contains("active");
+}
+
+async function labPost(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  return data;
+}
+
+async function loadLabConfig() {
+  if (!labConfigEl) return;
+  try {
+    labConfig = await (await fetch("/api/lab/config")).json();
+    labConfigEl.textContent = `modes: ${labConfig.modes.join(", ")}`;
+  } catch (e) {
+    labConfigEl.textContent = "lab manager unavailable";
+  }
+}
+
+function procRow(name, p) {
+  const pid = p.pid ? ` <span class="lab-dim">pid ${p.pid}${p.adopted ? " · adopted" : ""}</span>` : "";
+  const dot = p.up ? '<span class="lab-dot up"></span>' : '<span class="lab-dot"></span>';
+  const btns = p.up
+    ? `<button class="lab-btn" data-act="proc" data-name="${name}" data-op="stop">stop</button>
+       <button class="lab-btn" data-act="proc" data-name="${name}" data-op="restart">restart</button>`
+    : `<button class="lab-btn" data-act="proc" data-name="${name}" data-op="start">start</button>`;
+  return `<div class="lab-row">${dot}<span class="lab-name">${escapeHtml(name)}</span>
+            <span class="lab-state">${p.up ? "up" : "down"}${pid}</span>
+            <span class="lab-actions">${btns}</span></div>`;
+}
+
+function renderLab(s) {
+  if (!labBody) return;
+  const modes = (labConfig && labConfig.modes) || ["easy", "hard", "wordpress", "northwind", "dealer"];
+  const modeOpts = modes.map((m) => `<option value="${m}"${m === s.mode ? " selected" : ""}>${m}</option>`).join("");
+  const pol = s.policies || {};
+  const polBoxes = Object.keys(pol).map((k) => {
+    const label = k.replace("policy_", "");
+    return `<label class="lab-toggle"><input type="checkbox" data-act="policy" data-key="${k}"${pol[k] ? " checked" : ""}> ${label}</label>`;
+  }).join("");
+  const sup = s.supervisor || {};
+  const h = s.signals && s.signals.hunter;
+  const runs = (s.signals && s.signals.active_attack_runs) || [];
+
+  let procs = "";
+  Object.keys(s.processes || {}).forEach((name) => { procs += procRow(name, s.processes[name]); });
+
+  labBody.innerHTML = `
+    <div class="lab-grid">
+      <div class="lab-card">
+        <h3>Mode</h3>
+        <div class="lab-line">current: <b>${escapeHtml(s.mode || "—")}</b> · posture: ${escapeHtml(s.posture || "—")}</div>
+        <div class="lab-controls">
+          <select id="lab-mode-select">${modeOpts}</select>
+          <input id="lab-mode-target" class="lab-input" placeholder="dealer target (optional)">
+          <button class="lab-btn" data-act="mode" data-verb="switch">switch</button>
+          <button class="lab-btn" data-act="mode" data-verb="up">up</button>
+          <button class="lab-btn" data-act="mode" data-verb="down">down</button>
+        </div>
+      </div>
+
+      <div class="lab-card">
+        <h3>Processes</h3>
+        ${procs}
+      </div>
+
+      <div class="lab-card">
+        <h3>Supervisor <span class="lab-dim">${sup.up ? "running · pid " + sup.pid : "stopped"}</span></h3>
+        <div class="lab-controls">
+          ${sup.up
+            ? '<button class="lab-btn" data-act="sup" data-op="stop">stop watch</button>'
+            : '<button class="lab-btn" data-act="sup" data-op="start">start watch</button>'}
+        </div>
+        <div class="lab-policies">${polBoxes}</div>
+      </div>
+
+      <div class="lab-card">
+        <h3>NPC flocks</h3>
+        <div class="lab-controls">
+          <input id="lab-flock-template" class="lab-input" placeholder="template (e.g. dev-shop)">
+          <button class="lab-btn" data-act="flock" data-op="up">up</button>
+          <input id="lab-flock-name" class="lab-input" placeholder="flock name / all">
+          <button class="lab-btn" data-act="flock" data-op="down">down</button>
+        </div>
+      </div>
+
+      <div class="lab-card">
+        <h3>Signals</h3>
+        <div class="lab-line">${h ? `hunt #${h.hunt_id} · ${escapeHtml(h.status)} · ${h.chunk_count} chunks · ${escapeHtml(h.provider)}/${escapeHtml(h.model)}` : "no active hunt"}</div>
+        <div class="lab-line">${runs.length ? "attack runs: " + runs.map((r) => `#${r.id}(${escapeHtml(r.stage)})`).join(", ") : "no active attack runs"}</div>
+      </div>
+
+      <div class="lab-card lab-danger">
+        <h3>Reset</h3>
+        <div class="lab-controls">
+          <button class="lab-btn" data-act="reset" data-flags="--hunt">--hunt</button>
+          <button class="lab-btn" data-act="reset" data-flags="--network">--network</button>
+          <button class="lab-btn" data-act="reset" data-flags="--queue">--queue</button>
+          <button class="lab-btn lab-btn-danger" data-act="reset" data-flags="--db" data-confirm="1">--db (wipe)</button>
+        </div>
+      </div>
+    </div>
+    ${s.lab_status_text ? `<details class="lab-details"><summary>lab-mode.sh status</summary><pre>${escapeHtml(s.lab_status_text)}</pre></details>` : ""}
+    <div id="lab-msg" class="lab-msg"></div>`;
+}
+
+function labMsg(text, isErr) {
+  const el = document.getElementById("lab-msg");
+  if (el) { el.textContent = text; el.className = "lab-msg" + (isErr ? " err" : ""); }
+}
+
+async function refreshLab(withDocker) {
+  if (!labBody) return;
+  try {
+    const q = withDocker === false ? "?docker=false" : "";
+    const s = await (await fetch("/api/lab/status" + q)).json();
+    renderLab(s);
+  } catch (e) {
+    labBody.innerHTML = `<div class="empty">lab status failed: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+async function labAction(fn) {
+  if (labBusy) return;
+  labBusy = true;
+  try {
+    await fn();
+    await refreshLab();       // reflect the change (docker view included)
+  } catch (e) {
+    labMsg(String(e.message || e), true);
+  } finally {
+    labBusy = false;
+  }
+}
+
+function onLabClick(ev) {
+  const t = ev.target.closest("[data-act]");
+  if (!t) return;
+  const act = t.dataset.act;
+
+  if (act === "mode") {
+    const mode = document.getElementById("lab-mode-select").value;
+    const target = (document.getElementById("lab-mode-target").value || "").trim() || null;
+    labMsg(`running: ${t.dataset.verb} ${mode}…`);
+    labAction(() => labPost("/api/lab/mode", { verb: t.dataset.verb, mode, target }));
+  } else if (act === "proc") {
+    labMsg(`${t.dataset.op} ${t.dataset.name}…`);
+    labAction(() => labPost("/api/lab/process", { name: t.dataset.name, action: t.dataset.op }));
+  } else if (act === "sup") {
+    labMsg(`supervisor ${t.dataset.op}…`);
+    labAction(() => labPost("/api/lab/supervisor", { action: t.dataset.op }));
+  } else if (act === "policy") {
+    const policies = {}; policies[t.dataset.key] = t.checked;
+    labMsg(`policy ${t.dataset.key} → ${t.checked}`);
+    labAction(() => labPost("/api/lab/supervisor", { action: "policies", policies }));
+  } else if (act === "flock") {
+    if (t.dataset.op === "up") {
+      const template = (document.getElementById("lab-flock-template").value || "").trim();
+      if (!template) { labMsg("enter a flock template", true); return; }
+      labMsg(`flock up ${template}…`);
+      labAction(() => labPost("/api/lab/flock", { action: "up", name: template }));
+    } else {
+      const name = (document.getElementById("lab-flock-name").value || "").trim() || "--all";
+      labMsg(`flock down ${name}…`);
+      labAction(() => labPost("/api/lab/flock", { action: "down", name }));
+    }
+  } else if (act === "reset") {
+    const flags = t.dataset.flags.split(" ");
+    const confirmNeeded = t.dataset.confirm === "1";
+    if (confirmNeeded && !window.confirm(`Run reset.sh ${flags.join(" ")}? This is destructive and wipes state.`)) return;
+    labMsg(`reset ${flags.join(" ")}…`);
+    labAction(() => labPost("/api/lab/reset", { flags, confirm: confirmNeeded }));
+  }
+}
+
+function initLab() {
+  if (labWired) return;
+  labWired = true;
+  loadLabConfig();
+  if (labBody) labBody.addEventListener("click", onLabClick);
+  // refresh immediately when the Lab tab is opened
+  const labTabBtn = document.querySelector('.tab-btn[data-tab="lab"]');
+  if (labTabBtn) labTabBtn.addEventListener("click", () => refreshLab());
+  // poll only while the tab is visible (keeps docker ps off the idle path)
+  labPollTimer = setInterval(() => { if (labPanelActive() && !labBusy) refreshLab(); }, 5000);
 }

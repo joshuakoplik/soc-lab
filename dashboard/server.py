@@ -53,6 +53,10 @@ from fastapi.staticfiles import StaticFiles
 # provider config is already in the environment.
 import chat  # noqa: E402
 
+# The lab-control router (Phase-2 "Lab" tab). Imports pipeline.labctl and runs
+# lab actions as subprocesses; does NOT write soc.db (the poller stays mode=ro).
+import labctl_control  # noqa: E402
+
 DB_PATH = Path(os.environ.get("SOC_DASHBOARD_DB", Path(__file__).resolve().parent.parent / "soc.db"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 POLL_INTERVAL_S = float(os.environ.get("SOC_DASHBOARD_POLL_INTERVAL", "1.5"))
@@ -174,6 +178,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(chat.router)
+app.include_router(labctl_control.router)
 
 
 def fetch_bootstrap() -> dict:
