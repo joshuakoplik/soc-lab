@@ -67,8 +67,11 @@ Pickers where names are unfamiliar:
   README); if the cache isn't cloned yet the modal offers a one-click fetch
   (shallow `git clone`) and a few well-known suggestions. You can also type any
   `software/CVE` or image ref.
-- **NPC flock** template and live-flock names are dropdowns (from
-  `npc-range/templates/` and the live `.run/` flocks).
+- **NPC flocks**: the template to spin up is a dropdown (from
+  `npc-range/templates/`); each live flock is a row showing its client count and
+  whether its **traffic generator** (the benign client containers, compose
+  profile `traffic`) is running, with per-flock **traffic on/off** and **down**
+  buttons. Traffic state is detected from the `com.soclab.kind=client` containers.
 - **Hunter** and **attacker** launch via a modal to pick provider/model and set
   their budget/iteration params (and, for the hunter, the supervisor's
   idle-timeout / attack-drain knobs). The **model** is a provider-aware dropdown

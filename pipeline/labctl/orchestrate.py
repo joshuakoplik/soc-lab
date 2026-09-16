@@ -138,6 +138,10 @@ def flock(action, template=None, name=None, network=None, extra_vars=None, timeo
             argv = ["make", "-C", NPC_DIR, "down-all"]
         else:
             argv = ["make", "-C", NPC_DIR, "down", f"FLOCK={name}"]
+    elif action in ("traffic-start", "traffic-stop"):
+        if not name:
+            return {"rc": 1, "stdout": "", "stderr": f"flock {action} needs a flock name", "argv": []}
+        argv = ["make", "-C", NPC_DIR, action, f"FLOCK={name}"]
     elif action in ("status", "reconcile"):
         argv = ["make", "-C", NPC_DIR, action]
     else:
@@ -177,6 +181,36 @@ def list_live_flocks():
     except OSError:
         pass
     return sorted(out)
+
+
+def flocks_status():
+    """Per live flock: {name, clients, traffic}. `clients` is how many workstation
+    clients the flock was created with (manifest); `traffic` is whether their
+    containers (compose profile 'traffic', label com.soclab.kind=client) are
+    currently running -- i.e. the benign traffic generator is on. One `docker ps`
+    for all flocks; skipped entirely when no flocks are live."""
+    names = list_live_flocks()
+    if not names:
+        return []
+    flocks = {}
+    for name in names:
+        clients = 0
+        try:
+            with open(os.path.join(NPC_RUN_DIR, name, "manifest.json")) as f:
+                clients = len(json.load(f).get("clients", []))
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+        flocks[name] = {"name": name, "clients": clients, "traffic": False}
+    res = _run(["docker", "ps", "--filter", "label=com.soclab.kind=client",
+                "--format", "{{.Labels}}"], timeout=15)
+    if res["rc"] == 0:
+        for line in res["stdout"].splitlines():
+            for kv in line.split(","):
+                if kv.startswith("com.soclab.flock="):
+                    fl = kv.split("=", 1)[1].strip()
+                    if fl in flocks:
+                        flocks[fl]["traffic"] = True
+    return [flocks[n] for n in names]
 
 
 _catalog_cache = {"mtime": None, "data": None}
@@ -322,7 +356,7 @@ def status(include_docker=True, docker_timeout=60):
         "switched_at": lm.get("switched_at"),
         "processes": _process_view(),
         "supervisor": supervisor_state(),
-        "flocks": list_live_flocks(),
+        "flocks": flocks_status(),
         "signals": signals.summary(),
         "policies": {k: cfg[k] for k in cfg if k.startswith("policy_")},
         "config": {

@@ -63,6 +63,11 @@ def _cmd_status(args):
     runs = data["signals"]["active_attack_runs"]
     if runs:
         print("active attack runs: " + ", ".join(f"#{r['id']}({r['stage']})" for r in runs))
+    flocks = data.get("flocks") or []
+    if flocks:
+        print("flocks: " + ", ".join(
+            f"{f['name']}(clients {f['clients']}, traffic {'on' if f['traffic'] else 'off'})"
+            for f in flocks))
     pol = data["policies"]
     print("policies: " + ", ".join(f"{k.replace('policy_', '')}={'on' if v else 'off'}"
                                     for k, v in pol.items()))
@@ -135,9 +140,10 @@ def build_parser():
     cl.add_argument("--hunt", action="store_true")
     cl.add_argument("--confirm", action="store_true")
 
-    fl = sub.add_parser("flock", help="NPC flocks (make -C npc-range)")
-    fl.add_argument("action", choices=["up", "down", "status", "reconcile"])
-    fl.add_argument("name", nargs="?", default=None, help="template (up) or flock name / --all (down)")
+    fl = sub.add_parser("flock", help="NPC flocks + traffic generator (make -C npc-range)")
+    fl.add_argument("action", choices=["up", "down", "status", "reconcile", "traffic-start", "traffic-stop"])
+    fl.add_argument("name", nargs="?", default=None,
+                    help="template (up), or flock name (down / traffic-start / traffic-stop)")
     fl.add_argument("--network", default=None)
 
     st = sub.add_parser("status", help="whole-lab status")
@@ -183,7 +189,7 @@ def main(argv=None):
         return _print_result(orchestrate.clean(what, confirm=args.confirm))
     if cmd == "flock":
         template = args.name if args.action == "up" else None
-        name = args.name if args.action == "down" else None
+        name = args.name if args.action in ("down", "traffic-start", "traffic-stop") else None
         return _print_result(orchestrate.flock(args.action, template=template,
                                                name=name, network=args.network))
     if cmd == "status":

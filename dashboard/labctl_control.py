@@ -224,11 +224,11 @@ async def config_update(body: ConfigUpdate):
 
 @router.post("/flock")
 async def flock_action(body: FlockAction):
-    if body.action not in ("up", "down", "status", "reconcile"):
+    if body.action not in ("up", "down", "status", "reconcile", "traffic-start", "traffic-stop"):
         raise HTTPException(status_code=400, detail=f"bad flock action '{body.action}'")
     _audit("flock", f"{body.action} {body.name or ''}".strip())
     template = body.name if body.action == "up" else None
-    name = body.name if body.action == "down" else None
+    name = body.name if body.action in ("down", "traffic-start", "traffic-stop") else None
     return await _mutate(orchestrate.flock, body.action, template, name, body.network)
 
 

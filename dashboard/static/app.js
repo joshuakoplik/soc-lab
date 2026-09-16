@@ -1223,8 +1223,18 @@ function renderLab(s) {
   const tmplOpts = ['<option value="">template…</option>']
     .concat(templates.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`)).join("");
   const liveFlocks = s.flocks || [];
-  const flockOpts = ['<option value="--all">all flocks</option>']
-    .concat(liveFlocks.map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`)).join("");
+  const flockRows = liveFlocks.length ? liveFlocks.map((f) => {
+    const dot = f.traffic ? '<span class="lab-dot up"></span>' : '<span class="lab-dot"></span>';
+    const trafBtn = f.clients > 0
+      ? (f.traffic
+          ? `<button class="lab-btn" data-act="flock-traffic" data-op="stop" data-flock="${escapeHtml(f.name)}">traffic off</button>`
+          : `<button class="lab-btn" data-act="flock-traffic" data-op="start" data-flock="${escapeHtml(f.name)}">traffic on</button>`)
+      : '<span class="lab-dim">no clients</span>';
+    return `<div class="lab-row">${dot}<span class="lab-name">${escapeHtml(f.name)}</span>
+              <span class="lab-state">clients ${f.clients} · traffic ${f.traffic ? "on" : "off"}</span>
+              <span class="lab-actions">${trafBtn}
+                <button class="lab-btn" data-act="flock-down" data-flock="${escapeHtml(f.name)}">down</button></span></div>`;
+  }).join("") : '<div class="lab-dim" style="padding:4px 0">no live flocks</div>';
 
   const pol = s.policies || {};
   const polBoxes = Object.keys(pol).map((k) => {
@@ -1275,15 +1285,12 @@ function renderLab(s) {
       </div>
 
       <div class="lab-card">
-        <h3>NPC flocks</h3>
+        <h3>NPC flocks <span class="lab-dim">traffic = benign client generator</span></h3>
         <div class="lab-controls">
           <select id="lab-flock-template">${tmplOpts}</select>
           <button class="lab-btn" data-act="flock" data-op="up">up</button>
         </div>
-        <div class="lab-controls">
-          <select id="lab-flock-name">${flockOpts}</select>
-          <button class="lab-btn" data-act="flock" data-op="down">down</button>
-        </div>
+        ${flockRows}
       </div>
 
       <div class="lab-card">
@@ -1640,16 +1647,17 @@ function onLabClick(ev) {
   } else if (act === "timers") {
     openTimersModal();
   } else if (act === "flock") {
-    if (t.dataset.op === "up") {
-      const template = document.getElementById("lab-flock-template").value;
-      if (!template) { labMsg("pick a flock template", true); return; }
-      labMsg(`flock up ${template}…`);
-      labAction(() => labPost("/api/lab/flock", { action: "up", name: template }));
-    } else {
-      const name = document.getElementById("lab-flock-name").value || "--all";
-      labMsg(`flock down ${name}…`);
-      labAction(() => labPost("/api/lab/flock", { action: "down", name }));
-    }
+    const template = document.getElementById("lab-flock-template").value;
+    if (!template) { labMsg("pick a flock template", true); return; }
+    labMsg(`flock up ${template}…`);
+    labAction(() => labPost("/api/lab/flock", { action: "up", name: template }));
+  } else if (act === "flock-traffic") {
+    const action = t.dataset.op === "start" ? "traffic-start" : "traffic-stop";
+    labMsg(`${action} ${t.dataset.flock}…`);
+    labAction(() => labPost("/api/lab/flock", { action, name: t.dataset.flock }));
+  } else if (act === "flock-down") {
+    labMsg(`flock down ${t.dataset.flock}…`);
+    labAction(() => labPost("/api/lab/flock", { action: "down", name: t.dataset.flock }));
   } else if (act === "reset") {
     const flags = t.dataset.flags.split(" ");
     const confirmNeeded = t.dataset.confirm === "1";
