@@ -998,3 +998,12 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 .lab-form label.lab-toggle { justify-content: flex-start; }
 .lab-form .lab-input { min-width: 220px; }
 .lab-hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
+/* Lab launch modals: model dropdown + custom escape hatch */
+.lab-hidden { display: none !important; }
+.lab-form select {
+  background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
+  font: inherit; font-size: 12px; min-width: 180px;
+}
+.lab-form label > select + input.lab-input { margin-left: 6px; min-width: 160px; }

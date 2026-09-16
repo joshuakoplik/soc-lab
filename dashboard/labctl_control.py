@@ -142,6 +142,9 @@ async def get_config():
         "destructive_reset_flags": sorted(orchestrate.DESTRUCTIVE_RESET_FLAGS),
         "flock_templates": orchestrate.list_flock_templates(),
         "dealer_suggestions": list(orchestrate.DEALER_SUGGESTIONS),
+        "providers": list(orchestrate.CURATED_MODELS.keys()),
+        "models": orchestrate.models_by_provider(),
+        "default_model": dict(orchestrate.PROVIDER_DEFAULT_MODEL),
     }
 
 

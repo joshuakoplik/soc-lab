@@ -1445,8 +1445,54 @@ async function openDealerPicker() {
 
 // ---------- hunter / attacker launch ----------
 function providerSelect(id, current) {
-  return `<select id="${id}">` + LAB_PROVIDERS.map((p) =>
+  const provs = (labConfig && labConfig.providers) || LAB_PROVIDERS;
+  return `<select id="${id}">` + provs.map((p) =>
     `<option value="${p}"${p === current ? " selected" : ""}>${p}</option>`).join("") + "</select>";
+}
+
+// A provider-aware model <select> + a hidden "custom" input for anything not in
+// the list (the agents accept any model string, so the list is a convenience).
+function modelOptionsHtml(provider, current) {
+  const models = (labConfig && labConfig.models && labConfig.models[provider]) || [];
+  const def = (labConfig && labConfig.default_model && labConfig.default_model[provider]) || "";
+  const sel = current || def;
+  const seen = new Set();
+  let opts = "";
+  models.forEach((m) => {
+    if (m && !seen.has(m)) { seen.add(m); opts += `<option value="${escapeHtml(m)}"${m === sel ? " selected" : ""}>${escapeHtml(m)}</option>`; }
+  });
+  if (sel && !seen.has(sel)) opts = `<option value="${escapeHtml(sel)}" selected>${escapeHtml(sel)}</option>` + opts;
+  opts += '<option value="__custom__">custom…</option>';
+  return opts;
+}
+
+function modelFieldHtml(prefix, provider, current) {
+  return `<select id="${prefix}-model">${modelOptionsHtml(provider, current)}</select>` +
+         `<input id="${prefix}-model-custom" class="lab-input lab-hidden" placeholder="custom model id">`;
+}
+
+// Wire a modal's provider+model selects: switching provider repopulates the
+// model list; choosing "custom..." reveals the free-text input.
+function wireModelControls(card, prefix) {
+  const provSel = card.querySelector(`#${prefix}-provider`);
+  const modelSel = card.querySelector(`#${prefix}-model`);
+  const customIn = card.querySelector(`#${prefix}-model-custom`);
+  function syncCustom() {
+    const isCustom = modelSel.value === "__custom__";
+    customIn.classList.toggle("lab-hidden", !isCustom);
+    if (isCustom) customIn.focus();
+  }
+  provSel.addEventListener("change", () => {
+    modelSel.innerHTML = modelOptionsHtml(provSel.value, null);
+    syncCustom();
+  });
+  modelSel.addEventListener("change", syncCustom);
+}
+
+function readModel(card, prefix) {
+  const sel = card.querySelector(`#${prefix}-model`).value;
+  if (sel === "__custom__") return card.querySelector(`#${prefix}-model-custom`).value.trim() || null;
+  return sel || null;
 }
 
 function openHunterLaunch() {
@@ -1455,7 +1501,7 @@ function openHunterLaunch() {
   const card = openLabModal("Launch threat hunter", `
     <div class="lab-form">
       <label>provider ${providerSelect("hl-provider", hp.provider || "gmi")}</label>
-      <label>model <input id="hl-model" class="lab-input" value="${escapeHtml(hp.model || "")}"></label>
+      <label>model ${modelFieldHtml("hl", hp.provider || "gmi", hp.model)}</label>
       <label>max iterations <input id="hl-maxiter" class="lab-input" type="number" placeholder="15"></label>
       <label>context budget <input id="hl-ctxbudget" class="lab-input" type="number" placeholder="70000"></label>
       <label class="lab-toggle"><input id="hl-new" type="checkbox"> start a fresh hunt (--new)</label>
@@ -1465,9 +1511,10 @@ function openHunterLaunch() {
       <label>attack drain max (s) <input id="hl-drain" class="lab-input" type="number" value="${tm.attack_drain_max || ""}"></label>
       <div class="lab-modal-foot"><button class="lab-btn" id="hl-go">launch hunter</button></div>
     </div>`);
+  wireModelControls(card, "hl");
   card.querySelector("#hl-go").addEventListener("click", async () => {
     const provider = card.querySelector("#hl-provider").value;
-    const model = card.querySelector("#hl-model").value.trim() || null;
+    const model = readModel(card, "hl");
     const extra = [];
     const mi = card.querySelector("#hl-maxiter").value.trim();
     if (mi) extra.push("--max-iterations", mi);
@@ -1493,16 +1540,17 @@ function openAttackerLaunch() {
   const card = openLabModal("Launch red-team attacker", `
     <div class="lab-form">
       <label>provider ${providerSelect("al-provider", hp.provider || "gmi")}</label>
-      <label>model <input id="al-model" class="lab-input" value="${escapeHtml(hp.model || "")}"></label>
+      <label>model ${modelFieldHtml("al", hp.provider || "gmi", hp.model)}</label>
       <label>max iterations <input id="al-maxiter" class="lab-input" type="number" placeholder="30"></label>
       <label>global token budget <input id="al-budget" class="lab-input" type="number" placeholder="2000000"></label>
       <label class="lab-toggle"><input id="al-loop" type="checkbox"> loop assess until done (--loop)</label>
       <div class="lab-dim">runs a campaign against the active mode's target(s). Gated tools still need approval unless the target is auto-whitelisted.</div>
       <div class="lab-modal-foot"><button class="lab-btn" id="al-go">launch attacker</button></div>
     </div>`);
+  wireModelControls(card, "al");
   card.querySelector("#al-go").addEventListener("click", async () => {
     const provider = card.querySelector("#al-provider").value;
-    const model = card.querySelector("#al-model").value.trim() || null;
+    const model = readModel(card, "al");
     const extra = [];
     const mi = card.querySelector("#al-maxiter").value.trim();
     if (mi) extra.push("--max-iterations", mi);

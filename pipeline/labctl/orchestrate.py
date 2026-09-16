@@ -152,6 +152,58 @@ def flock(action, template=None, name=None, network=None, extra_vars=None, timeo
 # dealer/Vulhub catalog). All stdlib filesystem reads -- cheap, no subprocess.
 # --------------------------------------------------------------------------- #
 
+# Per-provider model options for the launch dropdowns. The agents accept any
+# model string, so these are conveniences, not an allowlist -- the UI keeps a
+# "custom..." escape hatch. gmi's default is kimi-k3 (this lab's default model),
+# not the agents' bare gpt-4o-mini default.
+CURATED_MODELS = {
+    "claude": ["claude-opus-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    "gmi": ["moonshotai/kimi-k3", "openai/gpt-4o-mini"],
+    "local": ["qwen3:8b", "qwen3:32b", "kimi-k3"],
+    "fireworks": [],
+}
+PROVIDER_DEFAULT_MODEL = {
+    "claude": "claude-sonnet-4-6",
+    "gmi": "moonshotai/kimi-k3",
+    "local": "qwen3:8b",
+    "fireworks": "",
+}
+
+
+def list_ollama_models():
+    """Best-effort: the models actually pulled on the ollama host (GET /api/tags).
+    Local models vary per machine, so a live query beats a static list. Returns []
+    on any error (host down, no env, timeout) -- the curated fallback covers it."""
+    import json as _json
+    import urllib.request
+    host = os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+    if not host.startswith(("http://", "https://")):
+        host = "http://" + host
+    try:
+        with urllib.request.urlopen(host.rstrip("/") + "/api/tags", timeout=2) as r:
+            data = _json.loads(r.read().decode("utf-8", "replace"))
+        return [m["name"] for m in data.get("models", []) if m.get("name")]
+    except Exception:  # noqa: BLE001 - any failure -> fall back to curated
+        return []
+
+
+def models_by_provider():
+    """{provider: [model, ...]} for the launch dropdowns. For `local`, live ollama
+    tags are merged ahead of the curated fallback (deduped, order preserved)."""
+    out = {}
+    for prov, curated in CURATED_MODELS.items():
+        if prov == "local":
+            merged, seen = [], set()
+            for m in list_ollama_models() + curated:
+                if m and m not in seen:
+                    seen.add(m)
+                    merged.append(m)
+            out[prov] = merged
+        else:
+            out[prov] = list(curated)
+    return out
+
+
 def list_flock_templates():
     """NPC flock template names (npc-range/templates/*.yaml, minus extension)."""
     names = []
