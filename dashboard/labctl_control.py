@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.labctl import config as lab_config  # noqa: E402
+from pipeline.labctl import models as lab_models  # noqa: E402
 from pipeline.labctl import orchestrate, procman, state  # noqa: E402
 
 router = APIRouter(prefix="/api/lab")
@@ -142,10 +143,19 @@ async def get_config():
         "destructive_reset_flags": sorted(orchestrate.DESTRUCTIVE_RESET_FLAGS),
         "flock_templates": orchestrate.list_flock_templates(),
         "dealer_suggestions": list(orchestrate.DEALER_SUGGESTIONS),
-        "providers": list(orchestrate.CURATED_MODELS.keys()),
-        "models": orchestrate.models_by_provider(),
-        "default_model": dict(orchestrate.PROVIDER_DEFAULT_MODEL),
+        "providers": list(lab_models.PROVIDERS),
+        "models": await asyncio.to_thread(lab_models.models_by_provider, cfg["models_refresh_interval"]),
+        "default_model": dict(lab_models.PROVIDER_DEFAULT_MODEL),
     }
+
+
+@router.post("/models/refresh")
+async def models_refresh():
+    """Force a live re-query of every provider's model list (Refresh in the
+    launch modal). Slow-ish (network per provider) so it's under the mutate lock."""
+    _audit("models", "refresh")
+    data = await _mutate(lab_models.refresh_catalog)
+    return {"refreshed": data.get("refreshed"), "providers": data.get("providers")}
 
 
 @router.get("/dealer_catalog")

@@ -71,7 +71,14 @@ Pickers where names are unfamiliar:
   `npc-range/templates/` and the live `.run/` flocks).
 - **Hunter** and **attacker** launch via a modal to pick provider/model and set
   their budget/iteration params (and, for the hunter, the supervisor's
-  idle-timeout / attack-drain knobs).
+  idle-timeout / attack-drain knobs). The **model** is a provider-aware dropdown
+  backed by a persisted catalog (`.labctl/models.json`): claude and local are
+  queried live (Anthropic `/v1/models`, ollama `/api/tags` — so `local` shows
+  what's actually pulled, never a made-up tag); gmi/fireworks fall back to a
+  maintained seed because their list endpoints reject our key. The supervisor
+  refreshes the catalog on a long interval (`models_refresh_interval`, models
+  rarely change), there's a ↻ button in the modal to force a re-query, and a
+  "custom…" option reaches anything not listed.
 
 Same architecture exception as the Analyst tab, but simpler: the router
 (`dashboard/labctl_control.py`, mounted at `/api/lab/*`) does **not** write

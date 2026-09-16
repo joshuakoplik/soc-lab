@@ -22,6 +22,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 STATE_DIR = os.path.join(ROOT, ".labctl")          # gitignored process registry + logs
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
+MODELS_FILE = os.path.join(STATE_DIR, "models.json")  # cached per-provider model catalog
 LOG_DIR = os.path.join(STATE_DIR, "logs")
 CONFIG_FILE = os.path.join(ROOT, "labctl.toml")     # gitignored, optional
 SOC_DB = os.path.join(ROOT, "soc.db")
@@ -34,6 +35,7 @@ DEFAULTS = {
     # supervisor cadence
     "poll_interval": 20.0,        # seconds between watch ticks
     "detect_interval": 30.0,      # seconds between one-shot detect/rules.py runs
+    "models_refresh_interval": 21600.0,  # how often the supervisor refreshes the model catalog (models rarely change)
     # policy timers
     "idle_timeout": 600.0,        # stop the hunter after it's been idle this long
     "attack_drain_max": 900.0,    # hard ceiling on post-attack drain before forcing a stop
@@ -49,7 +51,8 @@ DEFAULTS = {
 }
 
 _BOOL_KEYS = {k for k in DEFAULTS if k.startswith("policy_")}
-_FLOAT_KEYS = {"poll_interval", "detect_interval", "idle_timeout", "attack_drain_max", "stop_timeout"}
+_FLOAT_KEYS = {"poll_interval", "detect_interval", "idle_timeout", "attack_drain_max",
+               "stop_timeout", "models_refresh_interval"}
 
 
 def _coerce(key, val):

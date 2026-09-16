@@ -25,7 +25,7 @@ import signal
 import sys
 import time
 
-from . import config, orchestrate, procman, signals, state
+from . import config, models, orchestrate, procman, signals, state
 
 _stop = False
 _stop_agents_on_exit = False
@@ -57,6 +57,7 @@ def run(once=False, stop_agents_on_exit=False):
     drain_armed = False
     drain_since = None
     last_detect = 0.0
+    last_models = 0.0
 
     _log(f"starting; policies="
          f"{{infra:{cfg['policy_keep_infra']}, detect:{cfg['policy_auto_detect']}, "
@@ -82,6 +83,16 @@ def run(once=False, stop_agents_on_exit=False):
             last_detect = now
             if res["rc"] != 0:
                 _log(f"detect run rc={res['rc']}: {res['stderr'].strip()[:200]}")
+
+        # 2b. refresh the model catalog on a long interval (models rarely change)
+        if (now - last_models) >= cfg["models_refresh_interval"]:
+            try:
+                cat = models.refresh_catalog()
+                counts = {p: len(v) for p, v in cat.get("providers", {}).items()}
+                _log(f"refreshed model catalog: {counts}")
+            except Exception as e:  # noqa: BLE001 - never let a refresh kill the loop
+                _log(f"model catalog refresh failed: {e}")
+            last_models = now
 
         # 3/4. hunter idle + attack-finish drain
         hs = signals.hunter_state()

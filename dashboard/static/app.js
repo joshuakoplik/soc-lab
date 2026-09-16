@@ -1467,8 +1467,10 @@ function modelOptionsHtml(provider, current) {
 }
 
 function modelFieldHtml(prefix, provider, current) {
-  return `<select id="${prefix}-model">${modelOptionsHtml(provider, current)}</select>` +
-         `<input id="${prefix}-model-custom" class="lab-input lab-hidden" placeholder="custom model id">`;
+  return `<span class="lab-model-field">` +
+         `<select id="${prefix}-model">${modelOptionsHtml(provider, current)}</select>` +
+         `<button type="button" class="lab-btn lab-btn-sm" id="${prefix}-model-refresh" title="re-query providers">↻</button>` +
+         `<input id="${prefix}-model-custom" class="lab-input lab-hidden" placeholder="custom model id"></span>`;
 }
 
 // Wire a modal's provider+model selects: switching provider repopulates the
@@ -1487,6 +1489,20 @@ function wireModelControls(card, prefix) {
     syncCustom();
   });
   modelSel.addEventListener("change", syncCustom);
+  const refreshBtn = card.querySelector(`#${prefix}-model-refresh`);
+  if (refreshBtn) refreshBtn.addEventListener("click", async () => {
+    refreshBtn.disabled = true; const prev = refreshBtn.textContent; refreshBtn.textContent = "…";
+    try {
+      await labPost("/api/lab/models/refresh", {});
+      await loadLabConfig();                       // pull the fresh catalog into labConfig
+      modelSel.innerHTML = modelOptionsHtml(provSel.value, null);
+      syncCustom();
+    } catch (e) {
+      labMsg(String(e.message || e), true);
+    } finally {
+      refreshBtn.disabled = false; refreshBtn.textContent = prev;
+    }
+  });
 }
 
 function readModel(card, prefix) {

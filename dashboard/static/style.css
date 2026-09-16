@@ -1007,3 +1007,5 @@ h1 .muted { color: var(--muted); font-weight: 400; }
   font: inherit; font-size: 12px; min-width: 180px;
 }
 .lab-form label > select + input.lab-input { margin-left: 6px; min-width: 160px; }
+.lab-model-field { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lab-model-field .lab-btn-sm { padding: 2px 7px; }
