@@ -25,6 +25,25 @@ VALID_MODES = ("easy", "hard", "wordpress", "northwind", "dealer")
 # Destructive reset flags that must not run without an explicit confirm.
 DESTRUCTIVE_RESET_FLAGS = {"--db", "--all"}
 
+DEALER_CACHE = os.path.join(config.ROOT, "dealer-range", ".cache", "vulhub")
+NPC_TEMPLATES_DIR = os.path.join(NPC_DIR, "templates")
+NPC_RUN_DIR = os.path.join(NPC_DIR, ".run")
+
+# A few well-known Vulhub targets to seed the dealer combo box when the local
+# cache isn't cloned yet. Suggestions only -- the field stays free-text, since
+# "dealer's choice" is the whole open-ended Vulhub catalog (software/CVE or a
+# docker image ref), not a fixed list.
+DEALER_SUGGESTIONS = (
+    "struts2/CVE-2017-5638",
+    "spring/CVE-2022-22965",
+    "weblogic/CVE-2019-2725",
+    "fastjson/1.2.24-rce",
+    "gitlab/CVE-2021-22205",
+    "httpd/CVE-2021-41773",
+    "log4j/CVE-2021-44228",
+    "couchdb/CVE-2017-12635",
+)
+
 
 def _run(argv, timeout=600):
     """Run a command from the repo root, capturing text. Returns a result dict
@@ -129,6 +148,133 @@ def flock(action, template=None, name=None, network=None, extra_vars=None, timeo
 
 
 # --------------------------------------------------------------------------- #
+# Enumeration for the dashboard pickers (flock templates, live flocks, the
+# dealer/Vulhub catalog). All stdlib filesystem reads -- cheap, no subprocess.
+# --------------------------------------------------------------------------- #
+
+def list_flock_templates():
+    """NPC flock template names (npc-range/templates/*.yaml, minus extension)."""
+    names = []
+    try:
+        for f in os.listdir(NPC_TEMPLATES_DIR):
+            if f.endswith(".yaml"):
+                names.append(f[:-5])
+            elif f.endswith(".yml"):
+                names.append(f[:-4])
+    except OSError:
+        return []
+    return sorted(set(names))
+
+
+def list_live_flocks():
+    """Names of live flocks -- npc-range/.run/<flock>/manifest.json dirs."""
+    out = []
+    try:
+        for name in os.listdir(NPC_RUN_DIR):
+            d = os.path.join(NPC_RUN_DIR, name)
+            if os.path.isdir(d) and os.path.exists(os.path.join(d, "manifest.json")):
+                out.append(name)
+    except OSError:
+        pass
+    return sorted(out)
+
+
+_catalog_cache = {"mtime": None, "data": None}
+
+
+def _read_readme_meta(entry_dir):
+    """(title, description) pulled from an entry's README, best-effort. Vulhub
+    ships README.md (English) + README.zh-cn.md; prefer the English one."""
+    for fname in ("README.md", "README.en.md", "readme.md"):
+        path = os.path.join(entry_dir, fname)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return None, None
+        title, desc = None, None
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith("#"):
+                if title is None:
+                    title = s.lstrip("#").strip()
+                continue
+            if title is not None and desc is None and not s.startswith(("![", "[!", "|", ">", "-", "*")):
+                desc = s
+                break
+        if desc:
+            desc = (desc[:240] + "…") if len(desc) > 240 else desc
+        return title, desc
+    return None, None
+
+
+def dealer_catalog(force=False):
+    """The Vulhub catalog available in the local cache, with light metadata.
+
+    Returns {cached, count, entries:[{target, software, cve, title, description}]}.
+    `cached` is False when the shallow Vulhub clone hasn't been fetched yet --
+    the UI then offers a 'fetch catalog' action (fetch_dealer_catalog). Memoized
+    on the cache dir's mtime so repeated opens of the picker are instant."""
+    if not os.path.isdir(DEALER_CACHE):
+        return {"cached": False, "count": 0, "entries": []}
+    try:
+        mtime = os.path.getmtime(DEALER_CACHE)
+    except OSError:
+        mtime = None
+    if not force and _catalog_cache["data"] is not None and _catalog_cache["mtime"] == mtime:
+        return _catalog_cache["data"]
+
+    entries = []
+    try:
+        softwares = sorted(os.listdir(DEALER_CACHE))
+    except OSError:
+        softwares = []
+    for software in softwares:
+        if software.startswith("."):
+            continue
+        sw_dir = os.path.join(DEALER_CACHE, software)
+        if not os.path.isdir(sw_dir):
+            continue
+        try:
+            subs = sorted(os.listdir(sw_dir))
+        except OSError:
+            continue
+        for sub in subs:
+            entry_dir = os.path.join(sw_dir, sub)
+            if not os.path.isdir(entry_dir):
+                continue
+            if not (os.path.exists(os.path.join(entry_dir, "docker-compose.yml"))
+                    or os.path.exists(os.path.join(entry_dir, "docker-compose.yaml"))):
+                continue
+            title, desc = _read_readme_meta(entry_dir)
+            entries.append({
+                "target": f"{software}/{sub}",
+                "software": software,
+                "cve": sub,
+                "title": title or f"{software} {sub}",
+                "description": desc or "",
+            })
+    data = {"cached": True, "count": len(entries), "entries": entries}
+    _catalog_cache["mtime"] = mtime
+    _catalog_cache["data"] = data
+    return data
+
+
+def fetch_dealer_catalog(timeout=1200):
+    """Shallow-clone the Vulhub catalog into the dealer cache (make -C
+    dealer-range cache). Slow (a git clone); run under the mutate lock. Invalidates
+    the in-memory catalog memo so the next dealer_catalog() re-walks."""
+    res = _run(["make", "-C", "dealer-range", "cache"], timeout=timeout)
+    _catalog_cache["mtime"] = None
+    _catalog_cache["data"] = None
+    return res
+
+
+# --------------------------------------------------------------------------- #
 # Detection -> one-shot detect/rules.py (there is no scheduler in-repo)
 # --------------------------------------------------------------------------- #
 
@@ -176,6 +322,7 @@ def status(include_docker=True, docker_timeout=60):
         "switched_at": lm.get("switched_at"),
         "processes": _process_view(),
         "supervisor": supervisor_state(),
+        "flocks": list_live_flocks(),
         "signals": signals.summary(),
         "policies": {k: cfg[k] for k in cfg if k.startswith("policy_")},
         "config": {

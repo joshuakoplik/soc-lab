@@ -956,3 +956,45 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 }
 .lab-msg { margin-top: 10px; font-size: 12px; color: var(--muted); min-height: 16px; }
 .lab-msg.err { color: var(--status-critical); }
+
+/* ---------- Lab tab: topbar, dealer row, modals, forms (Phase 2) ---------- */
+.lab-topbar { display: flex; align-items: center; gap: 10px; margin: 2px 0 10px; }
+.lab-btn-sm { padding: 1px 6px; font-size: 11px; margin-left: 6px; }
+.lab-dealer-row { margin-top: 8px; }
+.lab-dealer-chosen { font-size: 13px; color: var(--text-primary); font-family: ui-monospace, monospace; }
+#lab-flock-template, #lab-flock-name {
+  background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
+  font: inherit; font-size: 12px; min-width: 150px;
+}
+
+.lab-modal-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: color-mix(in srgb, #000 55%, transparent);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.lab-modal-card {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 10px; width: min(680px, 100%); max-height: 82vh;
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+}
+.lab-modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; border-bottom: 1px solid var(--border);
+}
+.lab-modal-head h3 { margin: 0; font-size: 14px; }
+.lab-modal-body { padding: 12px 14px; overflow: auto; }
+.lab-modal-foot { margin-top: 12px; display: flex; gap: 8px; align-items: center; }
+.lab-cat-search { width: 100%; box-sizing: border-box; margin-bottom: 10px; }
+#lab-cat-list { max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.lab-cat-row { padding: 8px 10px; border-top: 1px solid var(--border); cursor: pointer; }
+.lab-cat-row:first-child { border-top: none; }
+.lab-cat-row:hover { background: var(--surface-3); }
+.lab-cat-target { font-family: ui-monospace, monospace; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.lab-cat-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.lab-form { display: flex; flex-direction: column; gap: 10px; }
+.lab-form label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--text-secondary); }
+.lab-form label.lab-toggle { justify-content: flex-start; }
+.lab-form .lab-input { min-width: 220px; }
+.lab-hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }

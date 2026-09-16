@@ -89,6 +89,11 @@ class ProcessAction(BaseModel):
     action: str            # start | stop | restart
     provider: str | None = None
     model: str | None = None
+    extra: list[str] = []  # extra CLI args passed through to the agent
+
+
+class ConfigUpdate(BaseModel):
+    updates: dict          # {known labctl.toml key: value}
 
 
 class FlockAction(BaseModel):
@@ -135,7 +140,23 @@ async def get_config():
                                        "poll_interval", "detect_interval")},
         "hunter": {"provider": cfg["hunter_provider"], "model": cfg["hunter_model"]},
         "destructive_reset_flags": sorted(orchestrate.DESTRUCTIVE_RESET_FLAGS),
+        "flock_templates": orchestrate.list_flock_templates(),
+        "dealer_suggestions": list(orchestrate.DEALER_SUGGESTIONS),
     }
+
+
+@router.get("/dealer_catalog")
+async def dealer_catalog():
+    """The Vulhub catalog in the local cache, with light metadata, for the dealer
+    picker. `cached=false` means the shallow clone hasn't been fetched yet."""
+    return await asyncio.to_thread(orchestrate.dealer_catalog)
+
+
+@router.post("/dealer_catalog/fetch")
+async def dealer_catalog_fetch():
+    """Shallow-clone the Vulhub catalog (slow). Under the mutate lock."""
+    _audit("dealer_catalog", "fetch")
+    return await _mutate(orchestrate.fetch_dealer_catalog)
 
 
 # --------------------------------------------------------------------------- #
@@ -159,8 +180,8 @@ async def process_action(body: ProcessAction):
         raise HTTPException(status_code=400, detail=f"unknown process '{body.name}'")
     if body.action not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail=f"bad action '{body.action}'")
-    opts = {"provider": body.provider, "model": body.model}
-    _audit("process", f"{body.action} {body.name}")
+    opts = {"provider": body.provider, "model": body.model, "extra": body.extra or []}
+    _audit("process", f"{body.action} {body.name} {' '.join(body.extra or [])}".strip())
 
     def _do():
         if body.action == "stop":
@@ -170,6 +191,20 @@ async def process_action(body: ProcessAction):
         started, entry = fn(body.name, opts)
         return {"name": body.name, "action": body.action,
                 "started": started, "pid": entry.get("pid") if entry else None}
+
+    return await _mutate(_do)
+
+
+@router.post("/config")
+async def config_update(body: ConfigUpdate):
+    """Write known labctl.toml keys (policy toggles, idle_timeout, attack_drain_max,
+    hunter_provider/model). The running supervisor re-reads on its next tick."""
+    _audit("config", str(body.updates))
+
+    def _do():
+        lab_config.write_config(body.updates)
+        cfg = lab_config.load()
+        return {k: cfg[k] for k in body.updates if k in cfg}
 
     return await _mutate(_do)
 

@@ -84,13 +84,14 @@ def load():
     return cfg
 
 
-def write_policies(policies):
-    """Merge a {policy_*: bool, ...} dict into labctl.toml (create if absent).
+def write_config(updates):
+    """Merge a {key: value, ...} dict into labctl.toml (create if absent).
 
-    Used by the Phase-2 dashboard to toggle supervisor policy live. Only known
-    keys are written; unknown keys are ignored so the UI can't inject junk.
-    Best-effort atomic replace. Requires no tomllib to WRITE (we emit trivial
-    TOML by hand), only to read it back.
+    Used by the dashboard to change supervisor policy AND timers (idle_timeout,
+    attack_drain_max, ...) and the default hunter provider/model live. Only known
+    DEFAULTS keys are written; unknown keys are ignored so the UI can't inject
+    junk. Best-effort atomic replace. Requires no tomllib to WRITE (we emit
+    trivial TOML by hand), only to read it back.
     """
     known = set(DEFAULTS)
     merged = {}
@@ -103,7 +104,7 @@ def write_policies(policies):
                         merged[k] = v
         except (OSError, ValueError):
             pass
-    for k, v in policies.items():
+    for k, v in updates.items():
         if k in known:
             merged[k] = _coerce(k, v)
     lines = []
@@ -118,3 +119,7 @@ def write_policies(policies):
     with open(tmp, "w") as f:
         f.write("\n".join(lines) + "\n")
     os.replace(tmp, CONFIG_FILE)
+
+
+# Back-compat alias: the supervisor-policy path still calls write_policies.
+write_policies = write_config
