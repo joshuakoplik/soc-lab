@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# labctl -- the SOC lab manager. Thin wrapper (like lab-mode.sh) that picks the
+# venv interpreter if present -- the venv carries the provider SDKs the agents
+# labctl launches need, and fastapi/uvicorn for the dashboard -- then runs the
+# stdlib-only pipeline.labctl package.
+#
+#   ./labctl status                    -- whole-lab view (mode, procs, policies)
+#   ./labctl up easy                   -- bring a mode up + reconcile procs
+#   ./labctl start hunter              -- launch the threat hunter (tracked PID)
+#   ./labctl watch                     -- run the supervisor policy loop (fg)
+#
+# labctl COMPLEMENTS the existing scripts; lab-mode.sh / reset.sh / npcctl.py all
+# still work standalone. See pipeline/labctl/README.md.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+PY="${PYTHON:-python3}"
+if [ -x .venv/bin/python3 ]; then
+  PY=".venv/bin/python3"
+fi
+
+exec "$PY" -m pipeline.labctl "$@"

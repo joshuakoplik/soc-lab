@@ -23,6 +23,7 @@ product.
 ./lab-mode.sh {up|down|switch} {easy|hard|wordpress|northwind}   # writes lab_mode.json
 ./lab-mode.sh status                   # primary mode + live docker state for all four
 ./reset.sh [--network|--db|--queue|--hunt|--status] [--no-kill]   # reset baseline; default (no flags) does network+db+queue. --hunt clears just the standing hunt's state
+./labctl {status|up|down|switch|start|stop|watch} ...   # lab manager -- orchestrates the above + owns agent/infra process lifecycle (see below)
 docker compose ps / logs -f <svc> / down [-v]
 ```
 
@@ -390,6 +391,45 @@ write-ups included, since every one of them is regenerable and machine-specific.
 Compare `--controls on` vs `--controls off` output when evaluating whether a
 prompt change actually improved injection resistance, not just whether verdicts
 changed.
+
+### 7. Lab manager (`pipeline/labctl/`, top-level `labctl`)
+
+The orchestration layer, and the one component allowed to know lab *meta*: which
+mode is up, which agents/infra are running, whether an attack run just finished.
+It **complements** the other scripts — `lab-mode.sh`, `reset.sh`, `npcctl.py`,
+`reset_lab.py` all still work standalone; `labctl` calls them via subprocess (cwd
+pinned to repo root) and reimplements none of them. Stdlib-only (like `ingest.py`)
+so it never needs the venv; it *launches* the dashboard with the venv interpreter.
+
+**The invariant that motivates it:** individual components should behave without
+artificial cross-agent constraints. The hunter must not contain logic about
+"attack runs" — that is a whole-lab concern. So `labctl` reads signals the agents
+**already** emit (`hunt_sessions.status`/`chunk_count`, `redteam_sessions.status`)
+and observes OS process state; it changes **no agent internals**. Stopping the
+hunter is a plain SIGTERM (the hunter's own clean-drain path: finish the in-flight
+chunk, compact a handoff note, exit).
+
+- **Process registry (`state.py`, `.labctl/state.json`, gitignored).** There were
+  no PID files for the agents before this. `reconcile()` (run on every invocation)
+  prunes dead/mismatched PIDs via `/proc/<pid>/cmdline` and **adopts** live matching
+  processes it didn't launch — so a hand-started hunter, or the dashboard `reset.sh`
+  relaunched from `/proc`, is still tracked. It tolerates `reset.sh`'s `pkill -f`
+  killing agents behind its back. Matching requires a python `argv[0]` so a shell
+  wrapper mentioning a script path isn't mistaken for the process.
+- **`procman.py`** launches detached (`start_new_session`, the `jobs.py` pattern);
+  **`orchestrate.py`** is the single implementation of every action + the composite
+  `status`; **`signals.py`** does read-only (`mode=ro`) `soc.db` reads.
+- **Supervisor (`watch`, `supervisor.py`)** enforces four policies each tick,
+  cfg re-read live: keep `ingest`/dashboard alive; run one-shot `detect/rules.py`
+  every `detect_interval` (no in-repo cron otherwise); stop the hunter after
+  `idle_timeout` of real idleness; and on an attack-run finish **arm a drain** —
+  keep the hunter running to finish its analysis, stop it once the post-attack feed
+  goes idle, bounded by `attack_drain_max`. It never auto-*starts* a hunt (that
+  spends tokens — an operator decision). Config: defaults ← `labctl.toml` ←
+  `LABCTL_*` env.
+- Reset: `.labctl/` is regenerable and reconciled from `/proc`; there's nothing to
+  clear via `reset.sh`. Real `block_ip` rules an agent placed are still cleared by
+  `./reset.sh --network` as before.
 
 ## Working in this codebase
 

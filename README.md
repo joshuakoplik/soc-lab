@@ -86,6 +86,19 @@ Optional live view of everything landing in `soc.db`:
 python3 dashboard/server.py                  # http://127.0.0.1:8095, read-only
 ```
 
+Or drive the whole lab through the manager, which orchestrates the scripts above
+and owns the agent/infra process lifecycle (start/stop, keep-alive, stop the idle
+hunter, stop the hunter once an attack run finishes):
+
+```bash
+./labctl status                              # mode, running procs, policies
+./labctl up easy                             # mode up + ensure ingest/dashboard
+./labctl start hunter                        # launch the defender (tracked PID)
+./labctl watch                               # supervisor policy loop (background it)
+```
+
+See `pipeline/labctl/README.md`.
+
 ---
 
 ## Lab modes
