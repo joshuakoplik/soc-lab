@@ -41,7 +41,9 @@ dispatch_tool/TOOLS directly, none of which this module touches.
 import argparse
 import json
 import os
+import re
 import signal
+import subprocess
 import sys
 import time
 
@@ -170,6 +172,15 @@ HUNTER_SYSTEM_PROMPT = (
     "false positives here -- record an observation and keep watching, do NOT open or "
     "hand off an incident on them alone. Open an incident only when you can name the "
     "malicious ACT, not merely the connection.\n\n"
+
+    "READ YOUR SIGNATURES. An IDS/SIEM alert (a Suricata or Wazuh signature) is NOT a "
+    "verdict that an attack happened -- it means traffic matched that rule's detection "
+    "logic, i.e. the activity that MAY characterize such an event. Rules vary enormously "
+    "in fidelity: a broad ET SCAN/POLICY/INFO rule fires on a bare connection or port, "
+    "while a specific rule matches a known exploit payload and cites a CVE. Before you "
+    "weight an alert as evidence -- especially before opening or handing off on it -- "
+    "call explain_signature(source, signature_id) to read the actual rule and judge how "
+    "much it proves. A high count of a low-fidelity signature is volume, not a breach.\n\n"
 
     "YOUR WORK PRODUCT IS INCIDENTS, NOT ACTIONS. You have no response tools -- no "
     "alerts, no blocks, no pages. A separate analyst responder does that, and it acts "
@@ -442,6 +453,100 @@ def tool_correlate(conn, src_ip):
     return json.dumps({"src_ip": src_ip, "candidates": [dict(r) for r in rows]})
 
 
+# --- signature-source lookup -------------------------------------------------
+# A firing IDS/SIEM signature only means traffic matched a rule's detection
+# logic. The rule DEFINITION (infrastructure config -- NOT attacker-controlled,
+# so safe to show unfenced) tells the hunter how specific that match is: a broad
+# SCAN/POLICY/INFO rule keyed on a port/flag is a weak indicator; a rule with a
+# content/pcre payload match and a CVE reference is strong. Rules don't change
+# during a run, so results are cached per (source, id).
+_SIG_RULE_CACHE = {}
+_SURICATA_RULES = "/var/lib/suricata/rules/suricata.rules"
+_SIG_BROAD_CLASSTYPES = ("attempted-recon", "network-scan", "not-suspicious",
+                         "misc-activity", "protocol-command-decode", "policy-violation")
+
+
+def _docker_grep(container, args, timeout=8):
+    """Read-only lookup inside a sensor container. Best-effort: '' on any failure."""
+    try:
+        r = subprocess.run(["docker", "exec", container, *args],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.stdout
+    except Exception:  # noqa: BLE001 - docker missing / container down / timeout
+        return ""
+
+
+def _explain_suricata(sid):
+    line = _docker_grep("soc-suricata", ["grep", "-m1", f"sid:{sid};", _SURICATA_RULES]).strip()
+    if not line:
+        return {"error": f"no Suricata rule found for sid {sid}"}
+    def cap(pat):
+        m = re.search(pat, line)
+        return m.group(1).strip() if m else None
+    msg = cap(r'msg:"([^"]*)"')
+    classtype = cap(r'classtype:([^;]+);')
+    has_payload = ("content:" in line) or ("pcre:" in line)
+    refs = re.findall(r'reference:([^;]+);', line)
+    lo = (msg or "").lower()
+    broad = (classtype in _SIG_BROAD_CLASSTYPES) or any(
+        t in lo for t in ("et scan", "et policy", "et info", " scan ", "port scan"))
+    if broad or not has_payload:
+        fidelity = ("LOW -- broad indicator. This fires on the activity PATTERN (a "
+                    "connection, a port, a protocol/flag), not on a confirmed attack. "
+                    "Treat as 'activity that MAY characterize this', not proof.")
+    else:
+        fidelity = ("HIGHER -- matches a specific content/payload signature"
+                    + (" with an external reference (likely a known exploit/CVE)" if refs else ""))
+    return {"source": "suricata", "sid": sid, "msg": msg, "classtype": classtype,
+            "matches_payload": has_payload, "references": refs, "fidelity": fidelity,
+            "rule": line[:1200]}
+
+
+def _explain_wazuh(rid):
+    files = _docker_grep("soc-wazuh", ["grep", "-rl", f'rule id="{rid}"',
+                                       "/var/ossec/ruleset/rules", "/var/ossec/etc/rules"]).strip().splitlines()
+    if not files:
+        return {"error": f"no Wazuh rule found for id {rid}"}
+    awk = f'/<rule id="{rid}"/{{p=1}} p{{print}} p&&/<\\/rule>/{{exit}}'
+    block = _docker_grep("soc-wazuh", ["awk", awk, files[0]]).strip()
+    if not block:
+        return {"error": f"Wazuh rule {rid} found in {files[0]} but block not extractable"}
+    def cap(pat):
+        m = re.search(pat, block)
+        return m.group(1).strip() if m else None
+    level = cap(r'level="(\d+)"')
+    lvl = int(level) if level and level.isdigit() else None
+    desc = cap(r'<description>([^<]*)</description>')
+    groups = re.findall(r'<group>([^<]*)</group>', block)
+    if lvl is not None and lvl < 5:
+        fidelity = "LOW -- low-level/informational rule; matching it is not an alarm on its own."
+    else:
+        fidelity = ("read the match logic below (regex/match/if_sid) -- how specific this is "
+                    "depends on what it keys on, not just that it fired.")
+    return {"source": "wazuh", "rule_id": rid, "level": lvl, "description": desc,
+            "groups": groups, "fidelity": fidelity, "rule": block[:1500]}
+
+
+def tool_explain_signature(source, signature_id):
+    """Look up the SOURCE RULE behind a Suricata/Wazuh signature so the model can
+    judge what it actually detects. Rule text is infrastructure config, not
+    attacker-controlled -- returned unfenced. Cached per (source, id)."""
+    if signature_id in (None, ""):
+        return json.dumps({"error": "signature_id is required"})
+    source = (source or "").strip().lower()
+    if source not in ("suricata", "wazuh"):
+        return json.dumps({"error": "source must be 'suricata' or 'wazuh'"})
+    key = (source, str(signature_id))
+    if key not in _SIG_RULE_CACHE:
+        out = (_explain_suricata(str(signature_id)) if source == "suricata"
+               else _explain_wazuh(str(signature_id)))
+        out["note"] = ("A firing signature means traffic MATCHED this rule's logic -- it "
+                       "names the activity that may characterize an event, not proof the "
+                       "event occurred. Weight it by the fidelity above.")
+        _SIG_RULE_CACHE[key] = out
+    return json.dumps(_SIG_RULE_CACHE[key], default=str)
+
+
 def tool_get_llm_transcript(conn, session_id):
     """Northwind /chat transcript rows for a session. Everything the user/model
     exchanged is untrusted evidence -- fenced."""
@@ -678,6 +783,15 @@ TOOLS = [
     {"name": "correlate",
      "description": "Other candidates sharing this src_ip, so you see a campaign not a fragment.",
      "input_schema": _obj({"src_ip": _S}, ["src_ip"])},
+    {"name": "explain_signature",
+     "description": "Look up the SOURCE RULE behind an IDS/SIEM signature to judge what it really "
+                    "detects. A firing signature means traffic MATCHED a rule's logic -- the "
+                    "activity that may characterize an event, not proof it happened. A broad "
+                    "SCAN/POLICY/INFO rule (keyed on a port/flag) is a weak indicator; a specific "
+                    "content/payload signature with a CVE reference is strong. source: 'suricata' "
+                    "(signature_id = the SID, events.ids_signature_id) or 'wazuh' (signature_id = "
+                    "the rule id, events.siem_rule_id).",
+     "input_schema": _obj({"source": _S, "signature_id": _S}, ["source", "signature_id"])},
     {"name": "get_llm_transcript",
      "description": "Northwind /chat transcript rows for a session (all content fenced as untrusted).",
      "input_schema": _obj({"session_id": _S}, ["session_id"])},
@@ -752,6 +866,8 @@ def dispatch_tool(conn, hunt_id, chunk, name, tool_input):
             return tool_enrich_ip(conn, ti.get("src_ip")), False
         if name == "correlate":
             return tool_correlate(conn, ti.get("src_ip")), False
+        if name == "explain_signature":
+            return tool_explain_signature(ti.get("source"), ti.get("signature_id")), False
         if name == "get_llm_transcript":
             return tool_get_llm_transcript(conn, ti.get("session_id")), False
         if name == "search_notebook":
