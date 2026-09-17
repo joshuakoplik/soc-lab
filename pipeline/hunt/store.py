@@ -47,11 +47,12 @@ _SIBLING_SCHEMAS = (
     os.path.join(PIPELINE, "triage", "schema.sql"),   # triage + action tables
 )
 
-# The action tables the hunter attributes to an incident + hunt. candidate_id
-# stays NOT NULL (an incident is always seeded from candidates, so there is
-# always a representative candidate to attribute to); incident_id/hunt_id are
-# added nullable so the legacy triage path (injection_asr) is untouched -- it
-# keeps writing candidate_id and leaves these NULL.
+# The triage action tables, migrated to carry incident_id/hunt_id (nullable).
+# Historical: the hunter wrote these when it still held response tools. Since
+# the handoff split it holds none (the analyst responder acts, into its own
+# chat_actions), so nothing writes hunt_id here any more; the columns stay
+# for old rows and because the migration is additive. candidate_id stays NOT
+# NULL so the legacy triage path (injection_asr) is untouched.
 _ACTION_TABLES = (
     "agent_alerts", "block_recommendations", "block_ip_calls", "human_pages",
     "northwind_control_calls", "northwind_quarantine_calls",

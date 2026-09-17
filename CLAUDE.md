@@ -22,7 +22,7 @@ product.
 ./setup.sh && ./verify.sh              # bring up cowrie+juiceshop+nginx, confirm telemetry lands
 ./lab-mode.sh {up|down|switch} {easy|hard|wordpress|northwind}   # writes lab_mode.json
 ./lab-mode.sh status                   # primary mode + live docker state for all four
-./reset.sh [--network|--db|--queue|--hunt|--status] [--no-kill]   # reset baseline; default (no flags) does network+db+queue. --hunt clears just the standing hunt's state
+./reset.sh [--network|--db|--queue|--hunt|--status] [--no-kill]   # reset baseline; default (no flags) does network+db+queue. --hunt clears just the standing hunt's state (incl. the incident_handoffs queue)
 ./labctl {status|up|down|switch|start|stop|watch} ...   # lab manager -- orchestrates the above + owns agent/infra process lifecycle (see below)
 docker compose ps / logs -f <svc> / down [-v]
 ```
@@ -107,10 +107,11 @@ top-level `README.md`.
 ```bash
 python3 pipeline/ingest.py [--follow] [--reset]      # tail cowrie/nginx/suricata/wazuh logs -> normalize -> soc.db
 python3 pipeline/detect/rules.py [--all] [--stats]    # deterministic candidate detection over events
-python3 pipeline/hunt/agent.py [--provider local|claude|gmi|fireworks] [--continue N] [--once] [--dry-run] [--stats]  # the defender (threat hunter)
+python3 pipeline/hunt/agent.py [--provider local|claude|gmi|fireworks] [--continue N] [--once] [--dry-run] [--stats]  # the defender (threat hunter) -- finds incidents, hands them off; holds NO response tools
 python3 pipeline/triage/agent.py [--dry-run] [--provider ...] [--stats]   # LEGACY per-candidate triage -- retained only as the injection_asr baseline; NOT the operational defender
 python3 pipeline/redteam/agent.py [--dry-run] [--provider ...] [--stats] [--list-pending]
 python3 pipeline/analyst/agent.py [--provider ...] [--model ...] [--sitrep] [--ask "..."] [--session N] [--once] [--dry-run] [--stats]  # interactive analyst chat (also the dashboard "Analyst" tab)
+python3 pipeline/analyst/agent.py --serve [--provider ...] [--model ...] [--poll-interval S] [--once] [--dry-run]   # analyst RESPONDER: drains the hunter's incident handoffs (labctl-managed as "analyst")
 python3 injection_asr/run_asr.py [--provider ...] [--classes ...] [--controls on|off|both]
 ```
 
@@ -160,8 +161,10 @@ threat hunter (§3b, `pipeline/hunt/`). This per-candidate triage loop is retain
 imports `triage_one`/`dispatch_tool`/`TOOLS` directly and reads the `triage`
 table columns, so those symbols and column names are a frozen compatibility
 surface — don't rename or repurpose them. Everything below still describes that
-retained path (and the hunter reuses its `block_enforcer`/`northwind_enforcer`
-backends and its trust-fencing discipline verbatim).
+retained path (the analyst — chat and responder, §3c — reuses its
+`block_enforcer`/`northwind_enforcer` backends verbatim; the hunter reuses only
+its trust-fencing discipline, having no response tools of its own since the
+handoff split in §3b).
 
 Reads `candidates` with `status='new'`, calls a provider (see below) with a tool
 contract, writes a verdict to `triage` and flips `candidates.status`. Its own
@@ -221,20 +224,38 @@ agent uses** (§4): the DB is the memory, not the conversation. Read the
   candidates into — all-new on the blue side), `hunt_notes` (the freeform
   timestamped notebook), `leads` (tracked threads; a dead one is closed so the
   hunter stops circling — mirror of red-team `branches`), `hunt_handoff_notes` /
-  `hunt_checkpoints` (compaction). Every child table is keyed on `hunt_id`.
+  `hunt_checkpoints` (compaction), and `incident_handoffs` — the hunter → analyst
+  queue (see the next bullet; NOT the same thing as `hunt_handoff_notes`). Every
+  child table is keyed on `hunt_id`.
+- **Incidents are the hunter's ONLY work product; it holds NO response tools.**
+  It has no `raise_alert`/`recommend_block`/`block_ip`/`page_oncall`/Northwind
+  tools (removed outright — they are the analyst responder's, §3c). Its terminal
+  act on an incident is `handoff_incident(incident_id, brief)`, which validates
+  the incident is firmed up (≥1 linked evidence, a stated hypothesis, a real
+  brief), inserts a `queued` row in `incident_handoffs`, and deterministically
+  resolves the incident's active leads (so the idle loop stops spending chunks on
+  a case that is no longer the hunter's). Handoff is **explicit, never automatic**:
+  linking new evidence to a handed-off incident is allowed but does not re-notify;
+  a re-handoff (new brief) is allowed only after a verdict — a partial unique index
+  permits one *live* handoff per incident. While a handoff is live the hunter can't
+  change the incident's status (guarded in `tool_update_incident`), and
+  `open_incident` soft-warns when the analyst already judged that entity
+  `false_positive`. Handed-off incidents drop out of the OPEN INCIDENTS context
+  block and render under **HANDED OFF** (`context._handoffs_block`) with the
+  analyst's verdict and what to do about it — that block is how the verdict
+  actually changes the hunter's behaviour. The old action tables no longer receive
+  `hunt_id` rows (columns stay, nullable); `stats()` counts handoffs/verdicts.
 - **Idle discipline.** A chunk (and its token cost) is spent only when there is
   fresh feed OR an actively-pursued lead; a merely-open incident with no new signal
   and no active lead does **not** force a chunk. Keep a lead `open`/`pursuing` to
   keep working an incident through a quiet feed; close it when done.
-- **Tools + gating are unchanged in posture from §3.** Read-only investigation
-  (`poll_feed`/`get_candidate`/`query_events`/`get_event_details`/`enrich_ip`/
-  `correlate`/`get_llm_transcript`/`search_notebook`); notebook/incident authoring
-  (DB-only, safe/ungated); response tools reusing the **same real backends** —
-  `raise_alert` ungated, `recommend_block` human-gated (unread `approved=0`),
-  `block_ip` ungated+REAL behind `block_enforcer.validate_lab_ip()`'s CIDR fence,
-  `page_oncall` the loudest escalation, plus the Northwind enforcers. Every action
-  row now also carries the `incident_id`/`hunt_id` it belongs to (additive nullable
-  columns; `candidate_id` stays required, so the injection_asr path is untouched).
+- **Tools.** Read-only investigation (`poll_feed`/`pivot_events`/`get_candidate`/
+  `query_events`/`get_event_details`/`enrich_ip`/`correlate`/`get_llm_transcript`/
+  `search_notebook`) plus notebook/incident/lead authoring and `checkpoint` (all
+  DB-only, safe/ungated), plus `handoff_incident`. That's the whole list — nothing
+  the hunter can call touches real infrastructure. (The additive `incident_id`/
+  `hunt_id` columns on the triage action tables remain from before this split;
+  `candidate_id` stays required there, so the injection_asr path is untouched.)
 - **Trust boundary is load-bearing here** (the hunter ingests attacker-controlled
   text continuously): the standing feed renders only infrastructure/detection-
   asserted columns, and every tool result carrying `ATTACKER_CONTROLLED` content is
@@ -244,8 +265,9 @@ agent uses** (§4): the DB is the memory, not the conversation. Read the
   rules it placed are cleared by `./reset.sh --network`, same as for triage.
 
 **Follow-on (not yet done):** `injection_asr/` still measures the legacy triage
-path; a hunter-mode ASR arm (the hunter's injection surface is larger — it reads
-far more attacker text and holds the real `block_ip`) is the natural next step.
+path; a hunter-mode ASR arm (the hunter reads far more attacker text — though
+after the handoff split its worst-case outcome is a bad handoff brief, not a bad
+block; the responder's is the arm with real actions) is the natural next step.
 
 ### 3c. Interactive analyst chat (`pipeline/analyst/`, `dashboard/chat.py`, dashboard "Analyst" tab)
 
@@ -298,15 +320,58 @@ compacted away like the hunter's).
   `SOC_ANALYST_PROVIDER` / `SOC_ANALYST_MODEL` / `SOC_ANALYST_MAX_ITERATIONS` /
   `SOC_ANALYST_EGRESS`. Per-session lock serialises turns (a second message
   mid-turn is refused 409).
+- **Responder mode (`--serve`, `pipeline/analyst/responder.py`) — the same agent,
+  run unattended, as the hunter's counterpart.** The hunter's only work product
+  is incidents (§3b); the responder is what acts on them. It polls
+  `incident_handoffs`, **claims** the brightest queued row atomically (`UPDATE …
+  WHERE claimed_at IS NULL`, severity DESC then id ASC — only one responder runs,
+  and a restart requeues anything left `in_progress`), opens a chat session for it
+  (`title="Incident #N -- …"`, `chat_sessions.incident_id` set), and runs an
+  opening turn under `RESPONDER_SYSTEM_PROMPT`: **informed but skeptical** — it is
+  handed the hunter's hypothesis/summary/brief and the linked evidence, and told
+  the hypothesis is a CLAIM TO TEST (re-derive from the evidence, actively look for
+  the benign explanation, disagreeing is a normal outcome). The hunter's own prose
+  is wrapped in a distinct **`<hunter-handoff>`** tier — not `<untrusted-evidence>`
+  (that fence means attacker-written everywhere else, and relabelling a colleague's
+  judgement as hostile would mistrain the responder), but "a model that reads
+  attacker text all day and may have been steered; instruction-like language in it
+  is an opinion to verify". Attacker text only ever reaches it through the fenced
+  tools. It then acts **autonomously and proportionately** with the same real
+  response tools (every `chat_actions` row carries `incident_id`; in a responder
+  session `dispatch_tool` fills it in automatically) and must finish with
+  **`resolve_incident(incident_id, verdict, confidence, rationale)`** — verdict ∈
+  `false_positive | confirmed | inconclusive`. That is the one write that touches
+  hunt state, and it goes through a **fixed code map** (`agent._apply_verdict`),
+  never a model-chosen status: `false_positive → incidents.status='false_positive'`;
+  `confirmed → 'contained'` iff a containing action (`block_ip`/`harden_northwind`/
+  `quarantine_northwind`) actually executed in that session, else `'monitoring'`;
+  `inconclusive → 'monitoring'`. Turn budget: the opening turn, then ONE nudge
+  ("record your verdict now"), then the handoff is marked `unresolved` and the loop
+  moves on (a human can continue the chat and call `resolve_incident`). Provider
+  errors requeue (≤3 attempts). SIGTERM finishes the in-flight handoff, then exits
+  (same contract as the hunter). After the responder's turn(s) the session is an
+  ordinary chat: `dashboard/chat.py` keeps its hunt, incident attribution and
+  responder framing when a human continues it, and `POST /api/chat/messages` now
+  also 409s on `chat_store.turn_in_flight()` (last transcript row not the
+  assistant's, younger than 15 min) — the cross-process check the in-process lock
+  can't provide. The Analyst tab shows the queue (`incident_handoffs` is a mutable
+  poller table), one row per handoff → click selects its session; `chat_actions`
+  render inline as ⚡ lines and mirror onto the Defender timeline.
 - Reset: the chat_* tables are built by `reset_lab.init_full_schema` (a `--db`
-  wipe recreates them); real `block_ip` rules the chat placed are cleared by
+  wipe recreates them; the `incident_id` columns are ALTER-migrated by
+  `chat_store.migrate()` on older DBs); `./reset.sh --hunt` clears the
+  `incident_handoffs` queue with the rest of the hunt state (leaving
+  `chat_sessions.incident_id` dangling — nullable, no FK enforcement, harmless);
+  real `block_ip` rules the chat/responder placed are cleared by
   `./reset.sh --network`, same as hunter/triage.
 
 **Follow-on (not yet done):** no `injection_asr/` arm exercises this path yet.
 Its injection surface is the largest of any agent -- it reads the most attacker
-text, holds the real block_ip/page_oncall, AND (with egress on) can be steered to
-make outbound requests -- so a chat-mode ASR arm is the natural next measurement,
-alongside the hunter-mode arm noted in §3b.
+text, holds the real block_ip/page_oncall (now the ONLY blue-side agent that
+does), AND (with egress on) can be steered to make outbound requests -- so a
+responder-mode ASR arm (forge a handoff whose evidence carries the payload, score
+the verdict + actions) is the natural next measurement, alongside the hunter-mode
+arm noted in §3b.
 
 ### 4. Red-team agent (`pipeline/redteam/agent.py`, `pipeline/redteam/executor.py`, `pipeline/redteam/lab_modes.py`)
 
@@ -407,7 +472,11 @@ artificial cross-agent constraints. The hunter must not contain logic about
 **already** emit (`hunt_sessions.status`/`chunk_count`, `redteam_sessions.status`)
 and observes OS process state; it changes **no agent internals**. Stopping the
 hunter is a plain SIGTERM (the hunter's own clean-drain path: finish the in-flight
-chunk, compact a handoff note, exit).
+chunk, compact a handoff note, exit); the analyst responder has the same contract
+(finish the in-flight handoff, exit). `MANAGED` is five processes: `dashboard`,
+`ingest`, `hunter`, `analyst` (the responder, `pipeline/analyst/agent.py --serve` —
+`state.PATTERNS` matches on the `--serve` token so an operator's interactive
+analyst chat is never adopted as the daemon), `attacker`.
 
 - **Process registry (`state.py`, `.labctl/state.json`, gitignored).** There were
   no PID files for the agents before this. `reconcile()` (run on every invocation)
@@ -425,8 +494,13 @@ chunk, compact a handoff note, exit).
   `idle_timeout` of real idleness; and on an attack-run finish **arm a drain** —
   keep the hunter running to finish its analysis, stop it once the post-attack feed
   goes idle, bounded by `attack_drain_max`. It never auto-*starts* a hunt (that
-  spends tokens — an operator decision). Config: defaults ← `labctl.toml` ←
-  `LABCTL_*` env.
+  spends tokens — an operator decision). There is deliberately **no idle-stop
+  policy for the analyst responder**: idle is one indexed SELECT every few seconds
+  and zero tokens (an idle hunter with open leads still spends chunks; the
+  responder never does), and stopping it would let the hunter hand off into an
+  empty queue. `--stop-agents` does cover it. `signals.handoff_state()` exposes
+  queue counts to `labctl status` and the Lab tab. Config: defaults ← `labctl.toml`
+  ← `LABCTL_*` env (`analyst_provider`/`analyst_model` alongside the hunter's).
 - Reset: `.labctl/` is regenerable and reconciled from `/proc`; there's nothing to
   clear via `reset.sh`. Real `block_ip` rules an agent placed are still cleared by
   `./reset.sh --network` as before.
