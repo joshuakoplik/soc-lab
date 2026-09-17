@@ -54,7 +54,10 @@
   <section class="panel tab-panel" id="panel-analyst" data-tab="analyst">
     <div class="panel-head">
       <h2>Analyst Chat</h2>
-      <span class="panel-sub">ask what's going on &middot; dig into the details &middot; <span id="chat-config" class="chat-config">connecting&hellip;</span></span>
+      <span class="panel-sub">incidents handed off by the hunter &middot; ask what's going on &middot; dig into the details &middot; <span id="chat-config" class="chat-config">connecting&hellip;</span></span>
+    </div>
+    <div id="chat-queue" class="chat-queue">
+      <div class="empty">no incidents handed off yet</div>
     </div>
     <div class="chat-controls">
       <select id="chat-session-select" aria-label="Chat session"></select>

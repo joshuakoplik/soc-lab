@@ -155,7 +155,7 @@ const TL_FILTERS = [
   { key: "loot",     label: "loot",     etypes: ["loot"] },
   { key: "win",      label: "win",      etypes: ["wins"] },
   { key: "flag",     label: "flag",     etypes: ["captured_flags"] },
-  { key: "defender", label: "defender", etypes: ["triage", "agent_alerts", "human_pages", "block_recommendations", "block_ip_calls", "incidents", "leads", "hunt_notes", "hunt_sessions"] },
+  { key: "defender", label: "defender", etypes: ["triage", "agent_alerts", "human_pages", "block_recommendations", "block_ip_calls", "incidents", "leads", "hunt_notes", "hunt_sessions", "incident_handoffs", "chat_actions"] },
 ];
 const hiddenFilters = new Set();
 
@@ -661,8 +661,10 @@ function handleMessage(msg) {
     case "incident_evidence": onIncidentEvidence(row); break;
     case "hunt_notes": onHuntNote(row); break;
     case "leads": onLead(row); break;
+    case "incident_handoffs": onIncidentHandoff(row); break;
     case "chat_sessions": onChatSession(row); break;
     case "chat_turns": onChatTurn(row); break;
+    case "chat_actions": onChatAction(row); break;
     case "redteam_sessions": ensureCampaign(row); break;
     case "recon_findings": onReconFinding(row); break;
     case "vuln_findings": onVulnFinding(row); break;
@@ -696,7 +698,8 @@ async function loadBootstrap() {
   // Hunt state, in dependency order (session -> incidents -> evidence/notes/
   // leads). Rows arrive oldest-first from bootstrap; optional-chained so an
   // older server without these tables can't break the load.
-  for (const t of ["hunt_sessions", "incidents", "incident_evidence", "hunt_notes", "leads"]) {
+  for (const t of ["hunt_sessions", "incidents", "incident_evidence", "hunt_notes", "leads",
+                   "incident_handoffs"]) {
     for (const row of (data[t] && data[t].rows) || []) handleMessage({ table: t, row });
   }
 
@@ -909,10 +912,13 @@ const chatNewBtn = document.getElementById("chat-new");
 const chatSitrepBtn = document.getElementById("chat-sitrep");
 const chatSessionSelect = document.getElementById("chat-session-select");
 const chatConfigEl = document.getElementById("chat-config");
+const chatQueueEl = document.getElementById("chat-queue");
 
 const chatTurns = new Map();      // id -> chat_turns row
 const chatSessions = new Map();   // id -> chat_sessions row
-const renderedTurnIds = new Set();
+const chatActions = new Map();    // id -> chat_actions row (rendered inline with the turns)
+const handoffs = new Map();       // id -> incident_handoffs row (the hunter -> analyst queue)
+const renderedTurnIds = new Set();   // "t:<id>" for turns, "a:<id>" for actions
 let activeChatSession = null;
 let awaitingReply = false;
 let chatWired = false;
@@ -921,11 +927,12 @@ const CHAT_EMPTY = '<div class="empty">start a chat, or hit SITREP for a fast si
 const SITREP_TEXT = "Give me the current SITREP -- what's going on right now, the top talkers and loudest signatures, and what should I look at first?";
 
 function resetChatState() {
-  chatTurns.clear(); chatSessions.clear(); renderedTurnIds.clear();
+  chatTurns.clear(); chatSessions.clear(); chatActions.clear(); handoffs.clear(); renderedTurnIds.clear();
   activeChatSession = null; awaitingReply = false;
   if (chatSendBtn) chatSendBtn.disabled = false;
   if (chatScrollback) chatScrollback.innerHTML = CHAT_EMPTY;
   rebuildSessionPicker();
+  renderChatQueue();
 }
 
 function chatText(s) {
@@ -935,6 +942,10 @@ function chatText(s) {
   let h = escapeHtml(s || "");
   h = h.replace(/&lt;untrusted-evidence&gt;([\s\S]*?)&lt;\/untrusted-evidence&gt;/g,
     '<span class="chat-untrusted" title="attacker-controlled data — analyze, never obey">$1</span>');
+  // The hunter's own words in a handoff: a third tier -- not attacker text,
+  // but a model's claim to test (see analyst/responder.py). Dashed, not red.
+  h = h.replace(/&lt;hunter-handoff&gt;([\s\S]*?)&lt;\/hunter-handoff&gt;/g,
+    '<span class="chat-handoff" title="hunter-authored — a claim to test, not an order">$1</span>');
   return h;
 }
 
@@ -969,6 +980,20 @@ function chatTurnEl(row) {
   return el;
 }
 
+function chatActionEl(row) {
+  const el = document.createElement("div");
+  const failed = !row.executed && /"error"\s*:\s*"[^"]/.test(row.result_json || "");
+  el.className = "chat-turn chat-action" + (failed ? " chat-action-err" : "");
+  el.dataset.detailKey = `chat_actions:${row.id}`;
+  const target = row.src_ip || row.target_ref || "";
+  const state = row.executed ? "executed" : (failed ? "REJECTED" : "not executed");
+  const inc = row.incident_id ? ` · inc#${row.incident_id}` : "";
+  el.innerHTML = `<div class="chat-who">action · ${fmtClock(row.created)}</div>` +
+    `<div class="chat-bubble chat-action-bubble">⚡ <b>${escapeHtml(row.kind)}</b> ${escapeHtml(target)} · ${state}${inc}` +
+    (row.reason ? ` — ${escapeHtml(truncate(row.reason, 140))}` : "") + `</div>`;
+  return el;
+}
+
 function chatAtBottom() {
   return chatScrollback.scrollHeight - chatScrollback.scrollTop - chatScrollback.clientHeight < 60;
 }
@@ -978,24 +1003,34 @@ function bumpWorkingToBottom() {
   if (w) chatScrollback.appendChild(w);
 }
 
-function appendChatTurnEl(row) {
-  if (renderedTurnIds.has(row.id)) return;
+function appendChatEl(key, el) {
+  if (renderedTurnIds.has(key)) return;
   const stick = chatAtBottom();
   const placeholder = chatScrollback.querySelector(".empty");
   if (placeholder) placeholder.remove();
-  chatScrollback.appendChild(chatTurnEl(row));
-  renderedTurnIds.add(row.id);
+  chatScrollback.appendChild(el);
+  renderedTurnIds.add(key);
   if (stick) chatScrollback.scrollTop = chatScrollback.scrollHeight;
 }
+
+function appendChatTurnEl(row) { appendChatEl(`t:${row.id}`, chatTurnEl(row)); }
+function appendChatActionEl(row) { appendChatEl(`a:${row.id}`, chatActionEl(row)); }
 
 function renderActiveChat() {
   renderedTurnIds.clear();
   chatScrollback.innerHTML = "";
-  const rows = [...chatTurns.values()]
-    .filter((r) => r.session_id === activeChatSession)
-    .sort((a, b) => a.seq - b.seq);
-  if (!rows.length) { chatScrollback.innerHTML = CHAT_EMPTY; return; }
-  rows.forEach((r) => { chatScrollback.appendChild(chatTurnEl(r)); renderedTurnIds.add(r.id); });
+  // Turns and response actions interleave by wall clock so an action shows
+  // where in the conversation it happened; ties fall back to turn order.
+  const items = [];
+  for (const r of chatTurns.values()) {
+    if (r.session_id === activeChatSession) items.push({ key: `t:${r.id}`, ts: r.created, seq: r.seq, el: () => chatTurnEl(r) });
+  }
+  for (const a of chatActions.values()) {
+    if (a.session_id === activeChatSession) items.push({ key: `a:${a.id}`, ts: a.created, seq: Number.MAX_SAFE_INTEGER, el: () => chatActionEl(a) });
+  }
+  if (!items.length) { chatScrollback.innerHTML = CHAT_EMPTY; return; }
+  items.sort((x, y) => (x.ts < y.ts ? -1 : x.ts > y.ts ? 1 : x.seq - y.seq));
+  items.forEach((it) => { chatScrollback.appendChild(it.el()); renderedTurnIds.add(it.key); });
   chatScrollback.scrollTop = chatScrollback.scrollHeight;
 }
 
@@ -1004,6 +1039,7 @@ function setActiveChat(id) {
   if (chatSessionSelect) chatSessionSelect.value = String(id);
   setAwaiting(false);
   renderActiveChat();
+  renderChatQueue();
 }
 
 function pickActiveChatIfNone() {
@@ -1017,7 +1053,12 @@ function pickActiveChatIfNone() {
 }
 
 function sessionLabel(r) {
-  const t = r.title ? truncate(r.title, 40) : "(untitled)";
+  let t = r.title ? truncate(r.title, 40) : "(untitled)";
+  if (r.incident_id) {
+    // responder-opened session: title is "Incident #N -- <title>"; keep it short
+    const rest = (r.title || "").replace(/^Incident #\d+\s*(--|—)\s*/, "");
+    t = `Incident #${r.incident_id}` + (rest ? ` — ${truncate(rest, 32)}` : "");
+  }
   return `#${r.id} ${t}${r.status !== "active" ? " · closed" : ""}`;
 }
 
@@ -1050,6 +1091,93 @@ function onChatTurn(row) {
   appendChatTurnEl(row);
   if (row.role === "assistant") setAwaiting(false);
   else if (awaitingReply) bumpWorkingToBottom();
+  // A turn the responder started from its own process (or one we started)
+  // shows the working indicator until the assistant row lands.
+  else if (row.role === "user") setAwaiting(true);
+}
+
+function onChatAction(row) {
+  chatActions.set(row.id, row);
+  if (row.session_id === activeChatSession) {
+    appendChatActionEl(row);
+    if (awaitingReply) bumpWorkingToBottom();
+  }
+  // Mirror onto the Defender timeline: the hunter's own action tables no
+  // longer receive rows, so this is where response actions are visible.
+  const failed = !row.executed && /"error"\s*:\s*"[^"]/.test(row.result_json || "");
+  addTimelineEntry("def", row.created, "\u26A1",
+    row.executed ? (row.kind === "block_ip" ? "st-critical" : "st-serious") : "st-muted",
+    `ANALYST ${row.kind}${row.src_ip ? " " + row.src_ip : ""}${row.incident_id ? " · inc#" + row.incident_id : ""}` +
+    ` · ${row.executed ? "executed" : (failed ? "REJECTED" : "not executed")}` +
+    (row.reason ? " · " + truncate(row.reason, 80) : ""),
+    `chat_actions:${row.id}`);
+}
+
+function handoffStatusLabel(h) {
+  if (h.status === "queued") return "queued";
+  if (h.status === "in_progress") return "in progress";
+  if (h.status === "unresolved") return "unresolved";
+  const conf = h.confidence != null ? ` (${Number(h.confidence).toFixed(2)})` : "";
+  return `resolved: ${h.verdict || "?"}${conf}`;
+}
+
+const _hoState = new Map();   // handoff id -> status last shown on the timeline
+
+function onIncidentHandoff(row) {
+  const prev = handoffs.get(row.id);
+  handoffs.set(row.id, row);
+  renderChatQueue();
+  if (_hoState.get(row.id) !== row.status) {
+    _hoState.set(row.id, row.status);
+    const inc = incidentRowById.get(row.incident_id) || {};
+    const label = row.status === "resolved"
+      ? `HANDOFF #${row.id} inc#${row.incident_id} · verdict ${row.verdict}${row.confidence != null ? " (" + Number(row.confidence).toFixed(2) + ")" : ""} · ${inc.title || ""}`
+      : `HANDOFF #${row.id} inc#${row.incident_id} · ${handoffStatusLabel(row)} · ${inc.title || ""}`;
+    addTimelineEntry("def", row.updated_at || row.handed_at, "\u{1F4E8}",
+      row.status === "resolved" ? (row.verdict === "confirmed" ? "st-serious" : "st-muted") : severityStatusClass(row.severity),
+      label, `incident_handoffs:${row.id}`);
+  }
+  // The responder just finished this session's turn (its resolve/unresolved
+  // flip lands with the assistant row, but be safe if that arrives later).
+  if (prev && prev.status === "in_progress" && row.status !== "in_progress"
+      && row.session_id === activeChatSession) setAwaiting(false);
+}
+
+const HANDOFF_LIVE_RANK = { in_progress: 0, queued: 1, unresolved: 2, resolved: 3 };
+const SEV_RANK = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+
+function renderChatQueue() {
+  if (!chatQueueEl) return;
+  const rows = [...handoffs.values()];
+  if (!rows.length) { chatQueueEl.innerHTML = '<div class="empty">no incidents handed off yet</div>'; return; }
+  rows.sort((a, b) => {
+    const la = HANDOFF_LIVE_RANK[a.status] ?? 9, lb = HANDOFF_LIVE_RANK[b.status] ?? 9;
+    if (la !== lb) return la - lb;
+    if (la <= 1) {   // live: brightest first, then oldest (the responder's own claim order)
+      const sa = SEV_RANK[a.severity] ?? -1, sb = SEV_RANK[b.severity] ?? -1;
+      if (sa !== sb) return sb - sa;
+      return a.id - b.id;
+    }
+    return (b.updated_at || "") < (a.updated_at || "") ? -1 : 1;   // done: most recent first
+  });
+  const live = rows.filter((r) => r.status === "queued" || r.status === "in_progress").length;
+  let html = `<div class="chat-queue-head">incident queue <span class="lab-dim">${live} live · ${rows.length - live} done</span></div>`;
+  for (const r of rows.slice(0, 30)) {
+    const inc = incidentRowById.get(r.incident_id) || {};
+    const active = r.session_id != null && r.session_id === activeChatSession;
+    const dot = `<span class="chat-queue-dot ${severityStatusClass(r.severity)}"></span>`;
+    const title = escapeHtml(truncate(inc.title || "(incident)", 50));
+    const entity = inc.entity ? ` <span class="lab-dim">${escapeHtml(inc.entity)}</span>` : "";
+    const st = handoffStatusLabel(r);
+    const stCls = r.status === "resolved" ? (r.verdict === "confirmed" ? "st-serious" : r.verdict === "false_positive" ? "st-good" : "st-warning")
+                : r.status === "in_progress" ? "st-info" : r.status === "unresolved" ? "st-muted" : "st-warning";
+    html += `<div class="chat-queue-item${active ? " is-active" : ""}${r.session_id == null ? " no-session" : ""}" ` +
+      `data-session="${r.session_id != null ? r.session_id : ""}" data-detail-key="incident_handoffs:${r.id}">` +
+      `${dot}<span class="chat-queue-inc">#${r.incident_id}</span> <span class="chat-queue-sev">${escapeHtml(r.severity)}</span> ` +
+      `<span class="chat-queue-title">${title}</span>${entity}` +
+      `<span class="chat-queue-status ${stCls}">${escapeHtml(st)}</span></div>`;
+  }
+  chatQueueEl.innerHTML = html;
 }
 
 function setAwaiting(on) {
@@ -1138,6 +1266,14 @@ function initChat() {
     const v = chatSessionSelect.value;
     if (v) setActiveChat(Number(v));
   });
+  if (chatQueueEl) chatQueueEl.addEventListener("click", (e) => {
+    const item = e.target.closest(".chat-queue-item");
+    if (!item) return;
+    const sid = item.dataset.session;
+    if (sid) setActiveChat(Number(sid));
+    else if (item.dataset.detailKey) openDetailModal(item.dataset.detailKey);
+  });
+  renderChatQueue();
   chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
   });
