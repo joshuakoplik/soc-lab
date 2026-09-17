@@ -217,55 +217,89 @@ def _fresh_cursors(conn, append_only, mutable):
     return last_id, snapshots
 
 
+def _poll_tick(state, append_only, mutable):
+    """One poll cycle's DB work, run OFF the event loop (via asyncio.to_thread).
+
+    ALL sqlite access lives here so a slow or write-contended query can never
+    block the event loop or the HTTP handlers. Doing these synchronous queries
+    directly on the loop was how the whole dashboard could wedge -- unresponsive
+    at ~100% CPU -- when the feed was under heavy write load (or right after a
+    db swap). Returns (messages, did_reset); the async caller does the actual
+    broadcasting. `state` carries the connection + cursors across ticks; on any
+    error the caller nulls state['conn'] so the next tick reconnects cleanly."""
+    messages = []
+    did_reset = False
+    try:
+        identity = _db_identity()
+    except OSError:
+        # soc.db is mid-swap (unlinked, not yet recreated). Skip this tick;
+        # the next one sees the new file and reconnects.
+        return messages, did_reset
+
+    if state["conn"] is None or identity != state["db_identity"]:
+        # First connection, OR soc.db got unlinked-and-recreated out from under
+        # us (see _db_identity's docstring): reconnect to the new file and
+        # re-baseline exactly like a fresh start, rather than keep querying an
+        # inode nothing writes to anymore. Ids restart from scratch in the new
+        # file, so re-querying MAX(id)/snapshots is correct. A swap also tells
+        # clients to reload (did_reset): their id-keyed row maps would collide
+        # post-reset ids with pre-reset ones otherwise.
+        old = state["conn"]
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+        state["conn"] = connect_ro()
+        state["db_identity"] = identity
+        state["last_id"], state["snapshots"] = _fresh_cursors(
+            state["conn"], append_only, mutable)
+        did_reset = old is not None
+
+    conn = state["conn"]
+    last_id, snapshots = state["last_id"], state["snapshots"]
+
+    for table in append_only:
+        tag = TABLES[table][0]
+        rows = conn.execute(
+            f"SELECT * FROM {table} WHERE id > ? ORDER BY id ASC",
+            (last_id[table],),
+        ).fetchall()
+        for r in rows:
+            last_id[table] = max(last_id[table], r["id"])
+            messages.append({"table": table, "tag": tag, "row": dict(r)})
+
+    for table in mutable:
+        tag = TABLES[table][0]
+        prev = snapshots[table]
+        cur = {}
+        for r in conn.execute(f"SELECT * FROM {table}").fetchall():
+            d = dict(r)
+            cur[d["id"]] = d
+            if prev.get(d["id"]) != d:
+                messages.append({"table": table, "tag": tag, "row": d})
+        snapshots[table] = cur
+
+    return messages, did_reset
+
+
 async def poll_loop():
-    conn = connect_ro()
-    db_identity = _db_identity()
+    state = {"conn": None, "db_identity": None, "last_id": None, "snapshots": None}
     append_only = [t for t in TABLES if t not in MUTABLE_TABLES]
     mutable = [t for t in TABLES if t in MUTABLE_TABLES]
-    last_id, snapshots = _fresh_cursors(conn, append_only, mutable)
 
     while True:
         try:
-            identity = _db_identity()
-            if identity != db_identity:
-                # soc.db got unlinked-and-recreated out from under this
-                # connection (see _db_identity's docstring) -- reconnect to
-                # the new file and re-baseline exactly like a fresh start,
-                # rather than keep querying an inode nothing writes to
-                # anymore. Ids restart from scratch in the new file, so
-                # re-querying MAX(id)/snapshots here is correct, not just a
-                # patch-over. Tell connected clients too: their in-memory
-                # row maps are keyed by id, and post-reset ids WILL collide
-                # with pre-reset ones -- an unprompted bootstrap reload is
-                # the only way their local state stays consistent.
-                conn.close()
-                conn = connect_ro()
-                db_identity = identity
-                last_id, snapshots = _fresh_cursors(conn, append_only, mutable)
+            messages, did_reset = await asyncio.to_thread(
+                _poll_tick, state, append_only, mutable)
+            if did_reset:
                 await broadcaster.send({"table": "_reset", "tag": "reset", "row": {}})
-
-            for table in append_only:
-                tag = TABLES[table][0]
-                rows = conn.execute(
-                    f"SELECT * FROM {table} WHERE id > ? ORDER BY id ASC",
-                    (last_id[table],),
-                ).fetchall()
-                for r in rows:
-                    last_id[table] = max(last_id[table], r["id"])
-                    await broadcaster.send({"table": table, "tag": tag, "row": dict(r)})
-
-            for table in mutable:
-                tag = TABLES[table][0]
-                prev = snapshots[table]
-                cur = {}
-                rows = conn.execute(f"SELECT * FROM {table}").fetchall()
-                for r in rows:
-                    d = dict(r)
-                    cur[d["id"]] = d
-                    if prev.get(d["id"]) != d:
-                        await broadcaster.send({"table": table, "tag": tag, "row": d})
-                snapshots[table] = cur
+            for m in messages:
+                await broadcaster.send(m)
         except Exception as exc:  # keep polling even if one cycle hiccups
+            # Force a clean reconnect next tick rather than reusing a possibly
+            # half-closed connection (which would otherwise error every tick).
+            state["conn"] = None
             await broadcaster.send({"table": "_error", "tag": "error", "row": {"detail": str(exc)}})
         await asyncio.sleep(POLL_INTERVAL_S)
 

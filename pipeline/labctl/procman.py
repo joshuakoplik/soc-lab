@@ -126,8 +126,34 @@ def is_up(name):
     return state.live_pid(name)
 
 
-def start(name, opts=None, cfg=None):
-    """Start `name` if it isn't already up. Returns (started: bool, entry|pid)."""
+LAUNCH_SETTLE_S = float(os.environ.get("LABCTL_LAUNCH_SETTLE_S", "1.5"))
+
+
+def _crash_tail(logpath, cap=1500):
+    """The tail of a just-crashed process's log (its traceback), for surfacing
+    to the operator. Best-effort; returns '' if the log can't be read."""
+    if not logpath:
+        return ""
+    try:
+        with open(logpath, "r", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    marker = "===== labctl launched"          # only this launch's output
+    idx = text.rfind(marker)
+    if idx != -1:
+        text = text[idx:]
+    return text.strip()[-cap:]
+
+
+def start(name, opts=None, cfg=None, verify=True):
+    """Start `name` if it isn't already up. Returns (started: bool, entry).
+
+    When verify (default), wait briefly and confirm the process is still alive:
+    a misconfigured or immediately-crashing process (e.g. a DB-locked agent)
+    exits within a second, and without this the caller reports a bare "started"
+    while the process is already gone. On a fast crash the returned entry gets
+    crashed=True and error=<log tail> so the CLI/dashboard can show WHY."""
     if name not in state.PATTERNS:
         raise ValueError(f"unknown managed process: {name}")
     cfg = cfg or config.load()
@@ -135,6 +161,13 @@ def start(name, opts=None, cfg=None):
     if pid:
         return False, state.get(name) or {"pid": pid}
     entry = _launch(name, _argv_for(name, opts, cfg), _env_for(name))
+    if verify:
+        time.sleep(LAUNCH_SETTLE_S)
+        if is_up(name) is None:            # died during the settle window
+            entry = dict(entry)
+            entry["crashed"] = True
+            entry["error"] = _crash_tail(entry.get("log"))
+            state.remove(name)             # it's gone; don't leave a stale entry
     return True, entry
 
 

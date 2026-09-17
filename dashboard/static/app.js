@@ -1470,12 +1470,23 @@ async function labAction(fn) {
   labBusy = true;
   try {
     await fn();
-    await refreshLab();
   } catch (e) {
     labMsg(String(e.message || e), true);
   } finally {
+    try { await refreshLab(); } catch (_) { /* keep the error message visible */ }
     labBusy = false;
   }
+}
+
+// POST a process action and raise if the process crashed on launch, so the
+// operator sees WHY instead of a silent "started" that's already gone.
+async function postProc(body) {
+  const r = await labPost("/api/lab/process", body);
+  if (r && r.crashed) {
+    const tail = (r.error || "").split("\n").slice(-6).join("\n");
+    throw new Error(`${body.name} launched but exited immediately -- see ${body.name}.log:\n${tail}`);
+  }
+  return r;
 }
 
 // ---------- modal helper ----------
@@ -1691,7 +1702,7 @@ function openHunterLaunch() {
     labMsg(`launching hunter (${provider}${model ? "/" + model : ""})…`);
     labAction(async () => {
       if (Object.keys(updates).length) await labPost("/api/lab/config", { updates });
-      await labPost("/api/lab/process", { name: "hunter", action: "restart", provider, model, extra });
+      await postProc({ name: "hunter", action: "restart", provider, model, extra });
     });
   });
 }
@@ -1718,7 +1729,7 @@ function openAnalystLaunch() {
     if (pi) extra.push("--poll-interval", pi);
     closeLabModal();
     labMsg(`launching analyst (${provider}${model ? "/" + model : ""})…`);
-    labAction(() => labPost("/api/lab/process", { name: "analyst", action: "restart", provider, model, extra }));
+    labAction(() => postProc({ name: "analyst", action: "restart", provider, model, extra }));
   });
 }
 
@@ -1746,7 +1757,7 @@ function openAttackerLaunch() {
     if (card.querySelector("#al-loop").checked) extra.push("--loop");
     closeLabModal();
     labMsg(`launching attacker (${provider}${model ? "/" + model : ""})…`);
-    labAction(() => labPost("/api/lab/process", { name: "attacker", action: "restart", provider, model, extra }));
+    labAction(() => postProc({ name: "attacker", action: "restart", provider, model, extra }));
   });
 }
 
@@ -1801,7 +1812,7 @@ function onLabClick(ev) {
     else openAttackerLaunch();
   } else if (act === "proc") {
     labMsg(`${t.dataset.op} ${t.dataset.name}…`);
-    labAction(() => labPost("/api/lab/process", { name: t.dataset.name, action: t.dataset.op }));
+    labAction(() => postProc({ name: t.dataset.name, action: t.dataset.op }));
   } else if (act === "sup") {
     labMsg(`supervisor ${t.dataset.op}…`);
     labAction(() => labPost("/api/lab/supervisor", { action: t.dataset.op }));

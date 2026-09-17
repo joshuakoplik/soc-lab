@@ -88,6 +88,10 @@ def _cmd_start(args):
         return 2
     opts = {"provider": args.provider, "model": args.model, "extra": args.extra or []}
     started, entry = procman.start(args.name, opts)
+    if started and entry.get("crashed"):
+        sys.stderr.write(f"[!] {args.name} launched but exited immediately -- "
+                         f"see {entry.get('log')}:\n{entry.get('error', '')}\n")
+        return 1
     if started:
         print(f"started {args.name} (pid {entry['pid']}); log: {entry.get('log')}")
     else:
@@ -110,6 +114,10 @@ def _cmd_restart(args):
         return 2
     opts = {"provider": args.provider, "model": args.model, "extra": args.extra or []}
     _started, entry = procman.restart(args.name, opts)
+    if entry.get("crashed"):
+        sys.stderr.write(f"[!] {args.name} restarted but exited immediately -- "
+                         f"see {entry.get('log')}:\n{entry.get('error', '')}\n")
+        return 1
     print(f"restarted {args.name} (pid {entry.get('pid')})")
     return 0
 
