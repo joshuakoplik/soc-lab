@@ -9,6 +9,12 @@ soc.db-shm
 # Runtime state written by lab-mode.sh, not source -- see pipeline/redteam/lab_modes.py.
 lab_mode.json
 
+# Lab manager runtime: process registry + per-process logs (pipeline/labctl),
+# and the optional local policy overrides file. Machine-local, regenerable, not
+# source -- reconciled from /proc on every labctl invocation.
+.labctl/
+labctl.toml
+
 # Python
 .venv/
 __pycache__/

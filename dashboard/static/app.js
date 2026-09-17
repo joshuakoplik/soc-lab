@@ -891,7 +891,7 @@ timelineEl.innerHTML = '<div class="empty">waiting for data\u2026</div>';
 feedDiary.innerHTML = '<div class="empty">waiting for the attacker to reason\u2026</div>';
 
 buildFilterBar();
-loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(() => { connectWS(); initChat(); });
+loadBootstrap().catch((e) => console.error("bootstrap failed", e)).finally(() => { connectWS(); initChat(); initLab(); });
 
 
 // ---------- Analyst Chat ----------
@@ -1141,4 +1141,550 @@ function initChat() {
   chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
   });
+}
+
+// ======================================================================
+// Lab Manager tab -- Phase 2. Shows lab state and drives it. Does NOT
+// auto-refresh (that fights with typing/clicking): status is loaded on tab
+// open, after each action, and via the Refresh button. Powerful pickers
+// (dealer catalog, hunter/attacker launch) open modals. Mirrors the chat
+// tab's action shape: POST an action, then re-fetch status.
+// ======================================================================
+const labBody = document.getElementById("lab-body");
+const labConfigEl = document.getElementById("lab-config");
+let labWired = false;
+let labConfig = null;          // GET /api/lab/config (modes, templates, timers, hunter defaults)
+let labBusy = false;
+let labSelectedMode = null;    // mode chosen in the dropdown (persists across re-renders)
+let labDealerTarget = "";      // dealer target picked from the catalog modal
+let dealerCatalog = null;      // cached {cached, count, entries}
+let labLastStatus = null;      // last status payload, for local re-render without a fetch
+
+const LAB_PROVIDERS = ["gmi", "claude", "local", "fireworks"];
+
+function labPanelActive() {
+  const p = document.getElementById("panel-lab");
+  return p && p.classList.contains("active");
+}
+
+async function labPost(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  return data;
+}
+
+async function loadLabConfig() {
+  try {
+    labConfig = await (await fetch("/api/lab/config")).json();
+    if (labConfigEl) labConfigEl.textContent = `modes: ${labConfig.modes.join(", ")}`;
+  } catch (e) {
+    if (labConfigEl) labConfigEl.textContent = "lab manager unavailable";
+  }
+}
+
+function procRow(name, p) {
+  const pid = p.pid ? ` <span class="lab-dim">pid ${p.pid}${p.adopted ? " · adopted" : ""}</span>` : "";
+  const dot = p.up ? '<span class="lab-dot up"></span>' : '<span class="lab-dot"></span>';
+  const launchable = (name === "hunter" || name === "attacker");
+  let btns;
+  if (p.up) {
+    btns = `<button class="lab-btn" data-act="proc" data-name="${name}" data-op="stop">stop</button>`;
+    if (launchable) btns += ` <button class="lab-btn" data-act="proc-launch" data-name="${name}">relaunch…</button>`;
+    else btns += ` <button class="lab-btn" data-act="proc" data-name="${name}" data-op="restart">restart</button>`;
+  } else if (launchable) {
+    btns = `<button class="lab-btn" data-act="proc-launch" data-name="${name}">launch…</button>`;
+  } else {
+    btns = `<button class="lab-btn" data-act="proc" data-name="${name}" data-op="start">start</button>`;
+  }
+  return `<div class="lab-row">${dot}<span class="lab-name">${escapeHtml(name)}</span>
+            <span class="lab-state">${p.up ? "up" : "down"}${pid}</span>
+            <span class="lab-actions">${btns}</span></div>`;
+}
+
+function renderLab(s) {
+  if (!labBody) return;
+  labLastStatus = s;
+  const modes = (labConfig && labConfig.modes) || ["easy", "hard", "wordpress", "northwind", "dealer"];
+  const selMode = labSelectedMode || s.mode || modes[0];
+  const modeOpts = modes.map((m) => `<option value="${m}"${m === selMode ? " selected" : ""}>${m}</option>`).join("");
+  const dealerRow = selMode === "dealer"
+    ? `<div class="lab-controls lab-dealer-row">
+         <span class="lab-dim">target:</span>
+         <span class="lab-dealer-chosen">${labDealerTarget ? escapeHtml(labDealerTarget) : "<em>none chosen</em>"}</span>
+         <button class="lab-btn" data-act="dealer-pick">choose target…</button>
+       </div>`
+    : "";
+  const templates = (labConfig && labConfig.flock_templates) || [];
+  const tmplOpts = ['<option value="">template…</option>']
+    .concat(templates.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`)).join("");
+  const liveFlocks = s.flocks || [];
+  const flockRows = liveFlocks.length ? liveFlocks.map((f) => {
+    const dot = f.traffic ? '<span class="lab-dot up"></span>' : '<span class="lab-dot"></span>';
+    const trafBtn = f.clients > 0
+      ? (f.traffic
+          ? `<button class="lab-btn" data-act="flock-traffic" data-op="stop" data-flock="${escapeHtml(f.name)}">traffic off</button>`
+          : `<button class="lab-btn" data-act="flock-traffic" data-op="start" data-flock="${escapeHtml(f.name)}">traffic on</button>`)
+      : '<span class="lab-dim">no clients</span>';
+    return `<div class="lab-row">${dot}<span class="lab-name">${escapeHtml(f.name)}</span>
+              <span class="lab-state">clients ${f.clients} · traffic ${f.traffic ? "on" : "off"}</span>
+              <span class="lab-actions">${trafBtn}
+                <button class="lab-btn" data-act="flock-down" data-flock="${escapeHtml(f.name)}">down</button></span></div>`;
+  }).join("") : '<div class="lab-dim" style="padding:4px 0">no live flocks</div>';
+
+  const pol = s.policies || {};
+  const polBoxes = Object.keys(pol).map((k) => {
+    const label = k.replace("policy_", "");
+    return `<label class="lab-toggle"><input type="checkbox" data-act="policy" data-key="${k}"${pol[k] ? " checked" : ""}> ${label}</label>`;
+  }).join("");
+  const sup = s.supervisor || {};
+  const cfg = s.config || {};
+  const h = s.signals && s.signals.hunter;
+  const runs = (s.signals && s.signals.active_attack_runs) || [];
+
+  let procs = "";
+  Object.keys(s.processes || {}).forEach((name) => { procs += procRow(name, s.processes[name]); });
+
+  labBody.innerHTML = `
+    <div class="lab-topbar">
+      <button class="lab-btn" data-act="refresh">refresh</button>
+      <span class="lab-dim">no auto-refresh &middot; updates after each action</span>
+    </div>
+    <div class="lab-grid">
+      <div class="lab-card">
+        <h3>Mode</h3>
+        <div class="lab-line">current: <b>${escapeHtml(s.mode || "—")}</b> · posture: ${escapeHtml(s.posture || "—")}</div>
+        <div class="lab-controls">
+          <select id="lab-mode-select">${modeOpts}</select>
+          <button class="lab-btn" data-act="mode" data-verb="switch">switch</button>
+          <button class="lab-btn" data-act="mode" data-verb="up">up</button>
+          <button class="lab-btn" data-act="mode" data-verb="down">down</button>
+        </div>
+        ${dealerRow}
+      </div>
+
+      <div class="lab-card">
+        <h3>Processes</h3>
+        ${procs}
+      </div>
+
+      <div class="lab-card">
+        <h3>Supervisor <span class="lab-dim">${sup.up ? "running · pid " + sup.pid : "stopped"}</span></h3>
+        <div class="lab-controls">
+          ${sup.up
+            ? '<button class="lab-btn" data-act="sup" data-op="stop">stop watch</button>'
+            : '<button class="lab-btn" data-act="sup" data-op="start">start watch</button>'}
+        </div>
+        <div class="lab-policies">${polBoxes}</div>
+        <div class="lab-line lab-dim">idle_timeout ${cfg.idle_timeout || "?"}s · drain_max ${cfg.attack_drain_max || "?"}s
+          <button class="lab-btn lab-btn-sm" data-act="timers">edit…</button></div>
+      </div>
+
+      <div class="lab-card">
+        <h3>NPC flocks <span class="lab-dim">traffic = benign client generator</span></h3>
+        <div class="lab-controls">
+          <select id="lab-flock-template">${tmplOpts}</select>
+          <button class="lab-btn" data-act="flock" data-op="up">up</button>
+        </div>
+        ${flockRows}
+      </div>
+
+      <div class="lab-card">
+        <h3>Signals</h3>
+        <div class="lab-line">${h ? `hunt #${h.hunt_id} · ${escapeHtml(h.status)} · ${h.chunk_count} chunks · ${escapeHtml(h.provider)}/${escapeHtml(h.model)}` : "no active hunt"}</div>
+        <div class="lab-line">${runs.length ? "attack runs: " + runs.map((r) => `#${r.id}(${escapeHtml(r.stage)})`).join(", ") : "no active attack runs"}</div>
+      </div>
+
+      <div class="lab-card lab-danger">
+        <h3>Reset</h3>
+        <div class="lab-controls">
+          <button class="lab-btn" data-act="reset" data-flags="--hunt">--hunt</button>
+          <button class="lab-btn" data-act="reset" data-flags="--network">--network</button>
+          <button class="lab-btn" data-act="reset" data-flags="--queue">--queue</button>
+          <button class="lab-btn lab-btn-danger" data-act="reset" data-flags="--db" data-confirm="1">--db (wipe)</button>
+        </div>
+      </div>
+    </div>
+    <div id="lab-msg" class="lab-msg"></div>`;
+}
+
+function labMsg(text, isErr) {
+  const el = document.getElementById("lab-msg");
+  if (el) { el.textContent = text; el.className = "lab-msg" + (isErr ? " err" : ""); }
+}
+
+async function refreshLab() {
+  if (!labBody) return;
+  try {
+    const s = await (await fetch("/api/lab/status?docker=false")).json();
+    renderLab(s);
+  } catch (e) {
+    labBody.innerHTML = `<div class="empty">lab status failed: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+async function labAction(fn) {
+  if (labBusy) return;
+  labBusy = true;
+  try {
+    await fn();
+    await refreshLab();
+  } catch (e) {
+    labMsg(String(e.message || e), true);
+  } finally {
+    labBusy = false;
+  }
+}
+
+// ---------- modal helper ----------
+function closeLabModal() {
+  const m = document.getElementById("lab-modal");
+  if (m) m.remove();
+}
+
+function openLabModal(title, bodyHtml) {
+  closeLabModal();
+  const overlay = document.createElement("div");
+  overlay.id = "lab-modal";
+  overlay.className = "lab-modal-overlay";
+  overlay.innerHTML = `
+    <div class="lab-modal-card" role="dialog" aria-modal="true">
+      <div class="lab-modal-head">
+        <h3>${escapeHtml(title)}</h3>
+        <button class="lab-btn" data-modal="close">close</button>
+      </div>
+      <div class="lab-modal-body">${bodyHtml}</div>
+    </div>`;
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeLabModal(); });
+  overlay.querySelector('[data-modal="close"]').addEventListener("click", closeLabModal);
+  document.body.appendChild(overlay);
+  return overlay.querySelector(".lab-modal-card");
+}
+
+// ---------- dealer target picker ----------
+function catalogListHtml(entries, filter) {
+  const f = (filter || "").toLowerCase();
+  const rows = entries.filter((e) =>
+    !f || e.target.toLowerCase().includes(f) || (e.title || "").toLowerCase().includes(f) ||
+    (e.description || "").toLowerCase().includes(f)
+  ).slice(0, 400).map((e) => `
+    <div class="lab-cat-row" data-target="${escapeHtml(e.target)}">
+      <div class="lab-cat-target">${escapeHtml(e.target)}</div>
+      <div class="lab-cat-desc">${escapeHtml(e.description || e.title || "")}</div>
+    </div>`).join("");
+  return rows || '<div class="lab-dim" style="padding:8px">no matches</div>';
+}
+
+async function openDealerPicker() {
+  const card = openLabModal("Choose a Vulhub target",
+    '<input id="lab-cat-search" class="lab-input lab-cat-search" placeholder="filter by software / CVE / text, or type a target ref…">' +
+    '<div id="lab-cat-list"><div class="lab-dim" style="padding:8px">loading catalog…</div></div>' +
+    '<div id="lab-cat-foot" class="lab-modal-foot"></div>');
+  const listEl = card.querySelector("#lab-cat-list");
+  const footEl = card.querySelector("#lab-cat-foot");
+  const searchEl = card.querySelector("#lab-cat-search");
+
+  function choose(target) {
+    if (!target) return;
+    labDealerTarget = target;
+    closeLabModal();
+    if (labLastStatus) renderLab(labLastStatus);
+    labMsg(`dealer target set: ${target}`);
+  }
+
+  function wireList() {
+    listEl.querySelectorAll(".lab-cat-row").forEach((row) => {
+      row.addEventListener("click", () => choose(row.dataset.target));
+    });
+  }
+
+  function renderCat() {
+    if (!dealerCatalog) return;
+    if (dealerCatalog.cached && dealerCatalog.entries.length) {
+      listEl.innerHTML = catalogListHtml(dealerCatalog.entries, searchEl.value);
+      footEl.innerHTML = `<span class="lab-dim">${dealerCatalog.count} targets in local cache</span>`;
+      wireList();
+    } else {
+      const sugg = (labConfig && labConfig.dealer_suggestions) || [];
+      listEl.innerHTML =
+        '<div class="lab-dim" style="padding:8px">Vulhub catalog not fetched yet. Fetch it (a shallow git clone; takes a minute), or pick a well-known target below.</div>' +
+        sugg.map((t) => `<div class="lab-cat-row" data-target="${escapeHtml(t)}"><div class="lab-cat-target">${escapeHtml(t)}</div></div>`).join("");
+      footEl.innerHTML = '<button class="lab-btn" id="lab-cat-fetch">fetch Vulhub catalog</button>';
+      wireList();
+      const fetchBtn = footEl.querySelector("#lab-cat-fetch");
+      if (fetchBtn) fetchBtn.addEventListener("click", async () => {
+        fetchBtn.disabled = true; fetchBtn.textContent = "fetching… (git clone)";
+        try {
+          await labPost("/api/lab/dealer_catalog/fetch", {});
+          dealerCatalog = await (await fetch("/api/lab/dealer_catalog")).json();
+          renderCat();
+        } catch (e) {
+          footEl.innerHTML = `<span class="lab-msg err">${escapeHtml(String(e.message || e))}</span>`;
+        }
+      });
+    }
+  }
+
+  // "type a target ref" free-text: Enter accepts whatever's typed (any Vulhub
+  // software/CVE or image ref stays valid even if it's not in the cache).
+  searchEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const v = searchEl.value.trim();
+      if (v && dealerCatalog && dealerCatalog.cached &&
+          !dealerCatalog.entries.some((x) => x.target === v)) { choose(v); return; }
+      if (v && (!dealerCatalog || !dealerCatalog.cached)) { choose(v); return; }
+    }
+  });
+  searchEl.addEventListener("input", () => { if (dealerCatalog && dealerCatalog.cached) renderCat(); });
+
+  try {
+    dealerCatalog = await (await fetch("/api/lab/dealer_catalog")).json();
+  } catch (e) {
+    dealerCatalog = { cached: false, entries: [] };
+  }
+  renderCat();
+  searchEl.focus();
+}
+
+// ---------- hunter / attacker launch ----------
+function providerSelect(id, current) {
+  const provs = (labConfig && labConfig.providers) || LAB_PROVIDERS;
+  return `<select id="${id}">` + provs.map((p) =>
+    `<option value="${p}"${p === current ? " selected" : ""}>${p}</option>`).join("") + "</select>";
+}
+
+// A provider-aware model <select> + a hidden "custom" input for anything not in
+// the list (the agents accept any model string, so the list is a convenience).
+function modelOptionsHtml(provider, current) {
+  const models = (labConfig && labConfig.models && labConfig.models[provider]) || [];
+  const def = (labConfig && labConfig.default_model && labConfig.default_model[provider]) || "";
+  const sel = current || def;
+  const seen = new Set();
+  let opts = "";
+  models.forEach((m) => {
+    if (m && !seen.has(m)) { seen.add(m); opts += `<option value="${escapeHtml(m)}"${m === sel ? " selected" : ""}>${escapeHtml(m)}</option>`; }
+  });
+  if (sel && !seen.has(sel)) opts = `<option value="${escapeHtml(sel)}" selected>${escapeHtml(sel)}</option>` + opts;
+  opts += '<option value="__custom__">custom…</option>';
+  return opts;
+}
+
+function modelFieldHtml(prefix, provider, current) {
+  return `<span class="lab-model-field">` +
+         `<select id="${prefix}-model">${modelOptionsHtml(provider, current)}</select>` +
+         `<button type="button" class="lab-btn lab-btn-sm" id="${prefix}-model-refresh" title="re-query providers">↻</button>` +
+         `<input id="${prefix}-model-custom" class="lab-input lab-hidden" placeholder="custom model id"></span>`;
+}
+
+// Wire a modal's provider+model selects: switching provider repopulates the
+// model list; choosing "custom..." reveals the free-text input.
+function wireModelControls(card, prefix) {
+  const provSel = card.querySelector(`#${prefix}-provider`);
+  const modelSel = card.querySelector(`#${prefix}-model`);
+  const customIn = card.querySelector(`#${prefix}-model-custom`);
+  function syncCustom() {
+    const isCustom = modelSel.value === "__custom__";
+    customIn.classList.toggle("lab-hidden", !isCustom);
+    if (isCustom) customIn.focus();
+  }
+  provSel.addEventListener("change", () => {
+    modelSel.innerHTML = modelOptionsHtml(provSel.value, null);
+    syncCustom();
+  });
+  modelSel.addEventListener("change", syncCustom);
+  const refreshBtn = card.querySelector(`#${prefix}-model-refresh`);
+  if (refreshBtn) refreshBtn.addEventListener("click", async () => {
+    refreshBtn.disabled = true; const prev = refreshBtn.textContent; refreshBtn.textContent = "…";
+    try {
+      await labPost("/api/lab/models/refresh", {});
+      await loadLabConfig();                       // pull the fresh catalog into labConfig
+      modelSel.innerHTML = modelOptionsHtml(provSel.value, null);
+      syncCustom();
+    } catch (e) {
+      labMsg(String(e.message || e), true);
+    } finally {
+      refreshBtn.disabled = false; refreshBtn.textContent = prev;
+    }
+  });
+}
+
+function readModel(card, prefix) {
+  const sel = card.querySelector(`#${prefix}-model`).value;
+  if (sel === "__custom__") return card.querySelector(`#${prefix}-model-custom`).value.trim() || null;
+  return sel || null;
+}
+
+function openHunterLaunch() {
+  const hp = (labConfig && labConfig.hunter) || {};
+  const tm = (labConfig && labConfig.timers) || {};
+  const card = openLabModal("Launch threat hunter", `
+    <div class="lab-form">
+      <label>provider ${providerSelect("hl-provider", hp.provider || "gmi")}</label>
+      <label>model ${modelFieldHtml("hl", hp.provider || "gmi", hp.model)}</label>
+      <label>max iterations <input id="hl-maxiter" class="lab-input" type="number" placeholder="15"></label>
+      <label>context budget <input id="hl-ctxbudget" class="lab-input" type="number" placeholder="70000"></label>
+      <label class="lab-toggle"><input id="hl-new" type="checkbox"> start a fresh hunt (--new)</label>
+      <hr class="lab-hr">
+      <div class="lab-dim">supervisor auto-stop (labctl policy):</div>
+      <label>idle timeout (s) <input id="hl-idle" class="lab-input" type="number" value="${tm.idle_timeout || ""}"></label>
+      <label>attack drain max (s) <input id="hl-drain" class="lab-input" type="number" value="${tm.attack_drain_max || ""}"></label>
+      <div class="lab-modal-foot"><button class="lab-btn" id="hl-go">launch hunter</button></div>
+    </div>`);
+  wireModelControls(card, "hl");
+  card.querySelector("#hl-go").addEventListener("click", async () => {
+    const provider = card.querySelector("#hl-provider").value;
+    const model = readModel(card, "hl");
+    const extra = [];
+    const mi = card.querySelector("#hl-maxiter").value.trim();
+    if (mi) extra.push("--max-iterations", mi);
+    const cb = card.querySelector("#hl-ctxbudget").value.trim();
+    if (cb) extra.push("--context-budget", cb);
+    if (card.querySelector("#hl-new").checked) extra.push("--new");
+    const updates = {};
+    const idle = card.querySelector("#hl-idle").value.trim();
+    if (idle) updates.idle_timeout = Number(idle);
+    const drain = card.querySelector("#hl-drain").value.trim();
+    if (drain) updates.attack_drain_max = Number(drain);
+    closeLabModal();
+    labMsg(`launching hunter (${provider}${model ? "/" + model : ""})…`);
+    labAction(async () => {
+      if (Object.keys(updates).length) await labPost("/api/lab/config", { updates });
+      await labPost("/api/lab/process", { name: "hunter", action: "restart", provider, model, extra });
+    });
+  });
+}
+
+function openAttackerLaunch() {
+  const hp = (labConfig && labConfig.hunter) || {};
+  const card = openLabModal("Launch red-team attacker", `
+    <div class="lab-form">
+      <label>provider ${providerSelect("al-provider", hp.provider || "gmi")}</label>
+      <label>model ${modelFieldHtml("al", hp.provider || "gmi", hp.model)}</label>
+      <label>max iterations <input id="al-maxiter" class="lab-input" type="number" placeholder="30"></label>
+      <label>global token budget <input id="al-budget" class="lab-input" type="number" placeholder="2000000"></label>
+      <label class="lab-toggle"><input id="al-loop" type="checkbox"> loop assess until done (--loop)</label>
+      <div class="lab-dim">runs a campaign against the active mode's target(s). Gated tools still need approval unless the target is auto-whitelisted.</div>
+      <div class="lab-modal-foot"><button class="lab-btn" id="al-go">launch attacker</button></div>
+    </div>`);
+  wireModelControls(card, "al");
+  card.querySelector("#al-go").addEventListener("click", async () => {
+    const provider = card.querySelector("#al-provider").value;
+    const model = readModel(card, "al");
+    const extra = [];
+    const mi = card.querySelector("#al-maxiter").value.trim();
+    if (mi) extra.push("--max-iterations", mi);
+    const b = card.querySelector("#al-budget").value.trim();
+    if (b) extra.push("--global-token-budget", b);
+    if (card.querySelector("#al-loop").checked) extra.push("--loop");
+    closeLabModal();
+    labMsg(`launching attacker (${provider}${model ? "/" + model : ""})…`);
+    labAction(() => labPost("/api/lab/process", { name: "attacker", action: "restart", provider, model, extra }));
+  });
+}
+
+function openTimersModal() {
+  const tm = (labConfig && labConfig.timers) || (labLastStatus && labLastStatus.config) || {};
+  const card = openLabModal("Supervisor timers", `
+    <div class="lab-form">
+      <label>idle timeout (s) <input id="tm-idle" class="lab-input" type="number" value="${tm.idle_timeout || ""}"></label>
+      <label>attack drain max (s) <input id="tm-drain" class="lab-input" type="number" value="${tm.attack_drain_max || ""}"></label>
+      <label>poll interval (s) <input id="tm-poll" class="lab-input" type="number" value="${tm.poll_interval || ""}"></label>
+      <label>detect interval (s) <input id="tm-detect" class="lab-input" type="number" value="${tm.detect_interval || ""}"></label>
+      <div class="lab-modal-foot"><button class="lab-btn" id="tm-go">save</button></div>
+    </div>`);
+  card.querySelector("#tm-go").addEventListener("click", () => {
+    const updates = {};
+    const map = { "tm-idle": "idle_timeout", "tm-drain": "attack_drain_max",
+                  "tm-poll": "poll_interval", "tm-detect": "detect_interval" };
+    Object.keys(map).forEach((id) => {
+      const v = card.querySelector("#" + id).value.trim();
+      if (v) updates[map[id]] = Number(v);
+    });
+    closeLabModal();
+    labMsg("saving supervisor timers…");
+    labAction(async () => {
+      if (Object.keys(updates).length) await labPost("/api/lab/config", { updates });
+      await loadLabConfig();
+    });
+  });
+}
+
+function onLabClick(ev) {
+  const t = ev.target.closest("[data-act]");
+  if (!t) return;
+  const act = t.dataset.act;
+
+  if (act === "refresh") {
+    refreshLab();
+  } else if (act === "mode") {
+    const mode = document.getElementById("lab-mode-select").value;
+    labSelectedMode = mode;
+    const target = mode === "dealer" ? (labDealerTarget || null) : null;
+    if (mode === "dealer" && t.dataset.verb !== "down" && !target) {
+      labMsg("choose a dealer target first", true); return;
+    }
+    labMsg(`running: ${t.dataset.verb} ${mode}${target ? " " + target : ""}…`);
+    labAction(() => labPost("/api/lab/mode", { verb: t.dataset.verb, mode, target }));
+  } else if (act === "dealer-pick") {
+    openDealerPicker();
+  } else if (act === "proc-launch") {
+    if (t.dataset.name === "hunter") openHunterLaunch();
+    else openAttackerLaunch();
+  } else if (act === "proc") {
+    labMsg(`${t.dataset.op} ${t.dataset.name}…`);
+    labAction(() => labPost("/api/lab/process", { name: t.dataset.name, action: t.dataset.op }));
+  } else if (act === "sup") {
+    labMsg(`supervisor ${t.dataset.op}…`);
+    labAction(() => labPost("/api/lab/supervisor", { action: t.dataset.op }));
+  } else if (act === "policy") {
+    const policies = {}; policies[t.dataset.key] = t.checked;
+    labMsg(`policy ${t.dataset.key} → ${t.checked}`);
+    labAction(() => labPost("/api/lab/supervisor", { action: "policies", policies }));
+  } else if (act === "timers") {
+    openTimersModal();
+  } else if (act === "flock") {
+    const template = document.getElementById("lab-flock-template").value;
+    if (!template) { labMsg("pick a flock template", true); return; }
+    labMsg(`flock up ${template}…`);
+    labAction(() => labPost("/api/lab/flock", { action: "up", name: template }));
+  } else if (act === "flock-traffic") {
+    const action = t.dataset.op === "start" ? "traffic-start" : "traffic-stop";
+    labMsg(`${action} ${t.dataset.flock}…`);
+    labAction(() => labPost("/api/lab/flock", { action, name: t.dataset.flock }));
+  } else if (act === "flock-down") {
+    labMsg(`flock down ${t.dataset.flock}…`);
+    labAction(() => labPost("/api/lab/flock", { action: "down", name: t.dataset.flock }));
+  } else if (act === "reset") {
+    const flags = t.dataset.flags.split(" ");
+    const confirmNeeded = t.dataset.confirm === "1";
+    if (confirmNeeded && !window.confirm(`Run reset.sh ${flags.join(" ")}? This is destructive and wipes state.`)) return;
+    labMsg(`reset ${flags.join(" ")}…`);
+    labAction(() => labPost("/api/lab/reset", { flags, confirm: confirmNeeded }));
+  }
+}
+
+function onLabChange(ev) {
+  const el = ev.target;
+  if (el.id === "lab-mode-select") {
+    labSelectedMode = el.value;
+    if (labLastStatus) renderLab(labLastStatus);   // toggle the dealer row locally
+  }
+}
+
+function initLab() {
+  if (labWired) return;
+  labWired = true;
+  loadLabConfig().then(() => { if (labPanelActive()) refreshLab(); });
+  if (labBody) {
+    labBody.addEventListener("click", onLabClick);
+    labBody.addEventListener("change", onLabChange);
+  }
+  // load status when the Lab tab is opened; NO interval poll.
+  const labTabBtn = document.querySelector('.tab-btn[data-tab="lab"]');
+  if (labTabBtn) labTabBtn.addEventListener("click", () => refreshLab());
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLabModal(); });
 }

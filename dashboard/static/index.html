@@ -38,7 +38,18 @@
     <button class="tab-btn" data-tab="diary" role="tab" aria-selected="false">Attacker Diary</button>
     <button class="tab-btn" data-tab="telemetry" role="tab" aria-selected="false">Live Telemetry</button>
     <button class="tab-btn" data-tab="analyst" role="tab" aria-selected="false">Analyst</button>
+    <button class="tab-btn" data-tab="lab" role="tab" aria-selected="false">Lab</button>
   </div>
+
+  <section class="panel tab-panel" id="panel-lab" data-tab="lab">
+    <div class="panel-head">
+      <h2>Lab Manager</h2>
+      <span class="panel-sub">see &amp; drive lab state &middot; <span id="lab-config" class="chat-config">connecting&hellip;</span></span>
+    </div>
+    <div id="lab-body" class="lab-body">
+      <div class="empty">loading lab status&hellip;</div>
+    </div>
+  </section>
 
   <section class="panel tab-panel" id="panel-analyst" data-tab="analyst">
     <div class="panel-head">

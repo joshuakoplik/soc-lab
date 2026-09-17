@@ -51,3 +51,52 @@ Config (repo-root `.env`):
 
 The same agent is also runnable head-less from the CLI:
 `python3 pipeline/analyst/agent.py --sitrep` (see `pipeline/analyst/agent.py`).
+
+## The Lab tab (drive lab state from the browser)
+
+The **Lab** tab is the UI for the lab manager (`pipeline/labctl`). It shows lab
+state — current mode/posture, which agents and infra are running, the standing
+hunt and any active attack runs, supervisor policy — and lets you drive it: switch
+modes, start/stop the hunter/attacker/ingest/dashboard, spin NPC flocks up/down,
+start/stop the supervisor `watch` loop and toggle its policies/timers, and run
+resets.
+
+Pickers where names are unfamiliar:
+- **Dealer target** opens a modal listing the Vulhub catalog from the local cache
+  with per-entry metadata (software/CVE + a description parsed from the entry's
+  README); if the cache isn't cloned yet the modal offers a one-click fetch
+  (shallow `git clone`) and a few well-known suggestions. You can also type any
+  `software/CVE` or image ref.
+- **NPC flocks**: the template to spin up is a dropdown (from
+  `npc-range/templates/`); each live flock is a row showing its client count and
+  whether its **traffic generator** (the benign client containers, compose
+  profile `traffic`) is running, with per-flock **traffic on/off** and **down**
+  buttons. Traffic state is detected from the `com.soclab.kind=client` containers.
+- **Hunter** and **attacker** launch via a modal to pick provider/model and set
+  their budget/iteration params (and, for the hunter, the supervisor's
+  idle-timeout / attack-drain knobs). The **model** is a provider-aware dropdown
+  backed by a persisted catalog (`.labctl/models.json`): claude and local are
+  queried live (Anthropic `/v1/models`, ollama `/api/tags` — so `local` shows
+  what's actually pulled, never a made-up tag); gmi/fireworks fall back to a
+  maintained seed because their list endpoints reject our key. The supervisor
+  refreshes the catalog on a long interval (`models_refresh_interval`, models
+  rarely change), there's a ↻ button in the modal to force a re-query, and a
+  "custom…" option reaches anything not listed.
+
+Same architecture exception as the Analyst tab, but simpler: the router
+(`dashboard/labctl_control.py`, mounted at `/api/lab/*`) does **not** write
+`soc.db` at all — it imports `pipeline.labctl` and runs the *same* code path
+`./labctl` uses, executing the existing scripts (`lab-mode.sh` / `reset.sh` /
+`npc-range` Makefile) as subprocesses. The poll loop keeps its `mode=ro`
+connection. Actions run in a worker thread under a single global lock (a second
+concurrent action → 409). The tab does **not** auto-refresh (that fights with
+typing and clicking): status loads on tab-open, after each action, and via the
+Refresh button — and it fetches `?docker=false`, so `docker compose ps` never
+runs on a timer. Live agent state (hunt/redteam sessions) still streams over the
+existing WebSocket.
+
+Powerful by nature (it can start the attacker or wipe the DB), so keep the server
+loopback-only (the default `SOC_DASHBOARD_HOST=127.0.0.1`). A destructive reset
+(`--db`/`--all`) requires an explicit confirm — a browser dialog **and** a
+server-side `confirm=true` (a 409 otherwise). Every action is appended to
+`.labctl/logs/actions.log`.
