@@ -8,8 +8,8 @@
 #   ./reset.sh                    -- reset everything: network + db + queue + attacker + target
 #                                     + northwind-controls (default)
 #   ./reset.sh --network          -- only undo block_ip rules
-#   ./reset.sh --db               -- only wipe soc.db and recreate empty schema
-#   ./reset.sh --queue            -- only reseed tail_state to each log's current EOF
+#   ./reset.sh --db               -- wipe soc.db, recreate empty schema, AND reposition ingest to EOF
+#   ./reset.sh --queue            -- only reseed tail_state to each log's current EOF (no wipe)
 #   ./reset.sh --attacker         -- only rebuild soc-attacker and clear attacker/loot
 #   ./reset.sh --target           -- only rebuild the active lab-mode's target container(s)
 #   ./reset.sh --northwind-controls -- only reset Northwind's SPEC.md §5 control toggles to
@@ -19,10 +19,12 @@
 #   ./reset.sh --status           -- report current state of all three, change nothing
 #   ./reset.sh --no-kill          -- modifier: don't kill running pipeline processes first
 #
-# --db and --queue are independent on purpose (see pipeline/reset_lab.py's
-# docstring for why a --db wipe without --queue leaves the next `ingest.py
-# --follow` about to replay the entire on-disk log history back in as a
-# fresh backlog) but the default (no flags) always does all five together,
+# --db now repositions ingest to EOF itself (reset_lab.reset_db reseeds
+# tail_state after the wipe), so `--db` alone no longer leaves the next
+# `ingest.py --follow` about to replay the entire on-disk log history back in
+# as a fresh backlog -- it is self-contained and flag-order-independent.
+# --queue stays a separate flag for skipping a backlog WITHOUT wiping events.
+# The default (no flags) always does all five together,
 # so plain `./reset.sh` always leaves the lab in a state where nothing is
 # blocked, the db is empty, the queue is caught up, the attacker box is
 # back to a clean image, AND the target itself is back to a clean install
