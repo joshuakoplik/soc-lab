@@ -140,6 +140,7 @@ async def get_config():
         "timers": {k: cfg[k] for k in ("idle_timeout", "attack_drain_max",
                                        "poll_interval", "detect_interval")},
         "hunter": {"provider": cfg["hunter_provider"], "model": cfg["hunter_model"]},
+        "analyst": {"provider": cfg["analyst_provider"], "model": cfg["analyst_model"]},
         "destructive_reset_flags": sorted(orchestrate.DESTRUCTIVE_RESET_FLAGS),
         "flock_templates": orchestrate.list_flock_templates(),
         "dealer_suggestions": list(orchestrate.DEALER_SUGGESTIONS),
@@ -211,7 +212,8 @@ async def process_action(body: ProcessAction):
 @router.post("/config")
 async def config_update(body: ConfigUpdate):
     """Write known labctl.toml keys (policy toggles, idle_timeout, attack_drain_max,
-    hunter_provider/model). The running supervisor re-reads on its next tick."""
+    hunter_provider/model, analyst_provider/model). The running supervisor
+    re-reads on its next tick."""
     _audit("config", str(body.updates))
 
     def _do():

@@ -32,6 +32,9 @@ PATTERNS = {
     "dashboard": ("dashboard/server.py",),
     "ingest": ("pipeline/ingest.py", "--follow"),
     "hunter": ("pipeline/hunt/agent.py",),
+    # --serve is load-bearing: an operator's interactive `agent.py --ask` REPL
+    # must never be adopted (and then stopped) as the responder daemon.
+    "analyst": ("pipeline/analyst/agent.py", "--serve"),
     "attacker": ("pipeline/redteam/agent.py",),
     # The supervisor is manageable (start/stop, adopt-on-scan) but is NOT in
     # config.MANAGED -- it's the watcher, not one of the watched daemons, so the

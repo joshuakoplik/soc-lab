@@ -366,6 +366,8 @@ def status(include_docker=True, docker_timeout=60):
             "detect_interval": cfg["detect_interval"],
             "hunter_provider": cfg["hunter_provider"],
             "hunter_model": cfg["hunter_model"],
+            "analyst_provider": cfg["analyst_provider"],
+            "analyst_model": cfg["analyst_model"],
         },
     }
     if include_docker:

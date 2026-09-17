@@ -29,7 +29,7 @@ SOC_DB = os.path.join(ROOT, "soc.db")
 LAB_MODE_JSON = os.path.join(ROOT, "lab_mode.json")
 
 # The process names labctl tracks. Order matters only for display.
-MANAGED = ("dashboard", "ingest", "hunter", "attacker")
+MANAGED = ("dashboard", "ingest", "hunter", "analyst", "attacker")
 
 DEFAULTS = {
     # supervisor cadence
@@ -48,6 +48,13 @@ DEFAULTS = {
     # what an auto-(re)started hunter is launched as (user default: kimi-k3 on gmi)
     "hunter_provider": "gmi",
     "hunter_model": "moonshotai/kimi-k3",
+    # the analyst responder (pipeline/analyst/agent.py --serve) that drains the
+    # hunter's incident handoffs. Deliberately NO idle-stop policy for it: idle
+    # is one indexed SELECT every few seconds and zero tokens (unlike an idle
+    # hunter, which still spends chunks while it has open leads), and stopping
+    # it would let the hunter hand off into an empty queue.
+    "analyst_provider": "gmi",
+    "analyst_model": "moonshotai/kimi-k3",
 }
 
 _BOOL_KEYS = {k for k in DEFAULTS if k.startswith("policy_")}

@@ -1190,7 +1190,7 @@ async function loadLabConfig() {
 function procRow(name, p) {
   const pid = p.pid ? ` <span class="lab-dim">pid ${p.pid}${p.adopted ? " · adopted" : ""}</span>` : "";
   const dot = p.up ? '<span class="lab-dot up"></span>' : '<span class="lab-dot"></span>';
-  const launchable = (name === "hunter" || name === "attacker");
+  const launchable = (name === "hunter" || name === "analyst" || name === "attacker");
   let btns;
   if (p.up) {
     btns = `<button class="lab-btn" data-act="proc" data-name="${name}" data-op="stop">stop</button>`;
@@ -1244,6 +1244,7 @@ function renderLab(s) {
   const sup = s.supervisor || {};
   const cfg = s.config || {};
   const h = s.signals && s.signals.hunter;
+  const ho = s.signals && s.signals.handoffs;
   const runs = (s.signals && s.signals.active_attack_runs) || [];
 
   let procs = "";
@@ -1296,6 +1297,7 @@ function renderLab(s) {
       <div class="lab-card">
         <h3>Signals</h3>
         <div class="lab-line">${h ? `hunt #${h.hunt_id} · ${escapeHtml(h.status)} · ${h.chunk_count} chunks · ${escapeHtml(h.provider)}/${escapeHtml(h.model)}` : "no active hunt"}</div>
+        <div class="lab-line">${ho ? `handoffs: ${ho.queued} queued · ${ho.in_progress} in progress · ${ho.resolved} resolved · ${ho.unresolved} unresolved` : "no handoffs"}</div>
         <div class="lab-line">${runs.length ? "attack runs: " + runs.map((r) => `#${r.id}(${escapeHtml(r.stage)})`).join(", ") : "no active attack runs"}</div>
       </div>
 
@@ -1558,6 +1560,32 @@ function openHunterLaunch() {
   });
 }
 
+function openAnalystLaunch() {
+  const ap = (labConfig && labConfig.analyst) || (labConfig && labConfig.hunter) || {};
+  const card = openLabModal("Launch analyst responder", `
+    <div class="lab-form">
+      <label>provider ${providerSelect("an-provider", ap.provider || "gmi")}</label>
+      <label>model ${modelFieldHtml("an", ap.provider || "gmi", ap.model)}</label>
+      <label>max iterations <input id="an-maxiter" class="lab-input" type="number" placeholder="24"></label>
+      <label>poll interval (s) <input id="an-poll" class="lab-input" type="number" placeholder="5"></label>
+      <div class="lab-dim">drains the hunter's incident handoffs: one chat session per incident, verdict + response. Idle costs no tokens; no supervisor auto-stop.</div>
+      <div class="lab-modal-foot"><button class="lab-btn" id="an-go">launch analyst</button></div>
+    </div>`);
+  wireModelControls(card, "an");
+  card.querySelector("#an-go").addEventListener("click", async () => {
+    const provider = card.querySelector("#an-provider").value;
+    const model = readModel(card, "an");
+    const extra = [];
+    const mi = card.querySelector("#an-maxiter").value.trim();
+    if (mi) extra.push("--max-iterations", mi);
+    const pi = card.querySelector("#an-poll").value.trim();
+    if (pi) extra.push("--poll-interval", pi);
+    closeLabModal();
+    labMsg(`launching analyst (${provider}${model ? "/" + model : ""})…`);
+    labAction(() => labPost("/api/lab/process", { name: "analyst", action: "restart", provider, model, extra }));
+  });
+}
+
 function openAttackerLaunch() {
   const hp = (labConfig && labConfig.hunter) || {};
   const card = openLabModal("Launch red-team attacker", `
@@ -1633,6 +1661,7 @@ function onLabClick(ev) {
     openDealerPicker();
   } else if (act === "proc-launch") {
     if (t.dataset.name === "hunter") openHunterLaunch();
+    else if (t.dataset.name === "analyst") openAnalystLaunch();
     else openAttackerLaunch();
   } else if (act === "proc") {
     labMsg(`${t.dataset.op} ${t.dataset.name}…`);

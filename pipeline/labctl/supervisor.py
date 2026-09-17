@@ -163,7 +163,7 @@ def run(once=False, stop_agents_on_exit=False):
 
     _log("stopped")
     if _stop_agents_on_exit:
-        for name in ("hunter", "attacker"):
+        for name in ("hunter", "analyst", "attacker"):
             if procman.is_up(name):
                 _log(f"--stop-agents: stopping {name}")
                 procman.stop(name)
