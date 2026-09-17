@@ -4,19 +4,25 @@ DB + event-queue half of reset.sh (the bash wrapper handles network reset
 and killing running pipeline processes, since those are docker/process
 concerns, not sqlite ones).
 
-    python3 pipeline/reset_lab.py --db              # wipe soc.db, recreate empty schema
-    python3 pipeline/reset_lab.py --queue           # reseed tail_state to each log's current EOF
-    python3 pipeline/reset_lab.py --db --queue      # both (this is what a full reset always does)
+    python3 pipeline/reset_lab.py --db              # wipe soc.db + recreate schema + reposition ingest to EOF
+    python3 pipeline/reset_lab.py --queue           # reseed tail_state to each log's current EOF (no wipe)
+    python3 pipeline/reset_lab.py --db --queue      # both (--queue is redundant after --db, but harmless)
     python3 pipeline/reset_lab.py --status          # report table counts / tail_state staleness
 
 "--queue" means: don't touch the raw log files on disk, but tell
 ingest.py's tail_state that everything currently sitting in
-logs/{cowrie,nginx,suricata,wazuh}/*.json has already been read, so the
-next `ingest.py --follow` only picks up new activity. Without this, a
---db wipe alone leaves tail_state empty too, and the very next ingest run
-replays the entire on-disk log history back in as a fresh "backlog" --
-exactly the 155k-event/4925-candidate flood this was built to avoid
-(see the 2026-07-29 session that hand-rolled this exact sequence once).
+logs/{cowrie,nginx,suricata,wazuh}/*.json (plus the northwind telemetry)
+has already been read, so the next `ingest.py --follow` only picks up new
+activity. A wipe leaves tail_state empty too, so WITHOUT repositioning the
+very next ingest run replays the entire on-disk log history back in as a
+fresh "backlog" -- the 155k-event/4925-candidate flood this was built to
+avoid (and worse now: the accumulated suricata eve.json is multi-GB, so
+the replay also holds the WAL write lock long enough to crash the hunter/
+analyst/detect on their first write). To make that impossible to trip over,
+"--db" now does this repositioning itself (reset_db calls
+_seed_tail_state_eof after the wipe) -- so a --db reset is self-contained
+and order-independent, and "--queue" stays available on its own for
+skipping a backlog without wiping events.
 
 Schema init applies each module's own schema.sql directly (rather than
 importing ingest.py/rules.py/agent.py as libraries) because those modules
@@ -93,31 +99,21 @@ def init_full_schema(db_path=None):
     conn.commit()
 
 
-def reset_db():
-    for suffix in ("", "-wal", "-shm"):
-        path = DB_PATH + suffix
-        if os.path.exists(path):
-            os.remove(path)
-    init_full_schema()
-    print(f"[*] db wiped and re-initialized: {DB_PATH}")
+def _seed_tail_state_eof(conn):
+    """Point ingest's tail_state at each source log's current EOF, so the next
+    `ingest.py --follow` picks up only new activity and never replays on-disk
+    history. Returns the number of sources seeded.
 
-
-def reset_queue():
-    conn = ingest.connect()
+    SOURCES and TRANSCRIPT_SOURCES are separate lists (ingest.py's own split --
+    llm-transcripts.log is nested/transcript-shaped and goes into
+    llm_transcripts, not the flat events table), each with their own tail_state
+    row keyed by file path -- both need reseeding here, or a wipe leaves
+    llm-transcripts.log's queue exactly where it was before. Confirmed live more
+    than once: without this a fresh soc.db's first ingest replays the ENTIRE
+    on-disk log history back in (the 2.57GB suricata eve.json alone floods the
+    hunter and holds the WAL write lock long enough to crash every other agent
+    on startup)."""
     seeded = 0
-    # SOURCES and TRANSCRIPT_SOURCES are separate lists (ingest.py's own
-    # split -- llm-transcripts.log is nested/transcript-shaped and goes
-    # into llm_transcripts, not the flat events table), each with their
-    # own tail_state row keyed by file path -- both need reseeding here,
-    # or a --db wipe leaves llm-transcripts.log's queue exactly where it
-    # was before the wipe. Confirmed live: this was missing here, so a
-    # fresh soc.db's first `ingest.py --follow` replayed the ENTIRE
-    # on-disk llm-transcripts.log history back in, including sessions
-    # from campaigns run hours earlier -- candidates.evidence for a
-    # northwind_injection_language row built from one of those stale
-    # transcripts pointed at a session_id no longer present in the fresh
-    # events table at all, so query_events came back empty and the triage
-    # model had nothing to correlate it against.
     for source, path in ingest.SOURCES + ingest.TRANSCRIPT_SOURCES:
         if not os.path.exists(path):
             print(f"    {source:<8} {path}  [MISSING] -- nothing to seed")
@@ -127,6 +123,32 @@ def reset_queue():
         print(f"    {source:<8} {path}  seeded at offset={st.st_size}")
         seeded += 1
     conn.commit()
+    return seeded
+
+
+def reset_db():
+    for suffix in ("", "-wal", "-shm"):
+        path = DB_PATH + suffix
+        if os.path.exists(path):
+            os.remove(path)
+    init_full_schema()
+    print(f"[*] db wiped and re-initialized: {DB_PATH}")
+    # A wiped DB has an empty tail_state, so ingest would replay the entire
+    # on-disk log backlog. Reposition the ingest pipeline to EOF as part of the
+    # wipe, so `reset --db` is self-contained: no separate --queue needed, and
+    # the flag order can't matter (a --queue seed before --db used to be erased
+    # by the wipe). --queue remains available on its own to skip a backlog
+    # without wiping events.
+    conn = ingest.connect()
+    n = _seed_tail_state_eof(conn)
+    conn.close()
+    print(f"[*] ingest pipeline repositioned to EOF for {n} source(s) -- no backlog replay")
+
+
+def reset_queue():
+    conn = ingest.connect()
+    seeded = _seed_tail_state_eof(conn)
+    conn.close()
     print(f"[*] tail_state reseeded for {seeded} source(s) -- ingest.py --follow "
           "will only pick up activity from here on")
 
