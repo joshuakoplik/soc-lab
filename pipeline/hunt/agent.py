@@ -15,8 +15,13 @@ call at a time, it works the way a human hunter does: it holds a standing,
 compacting context across turns (the red-team agent's pattern, mirrored here --
 see pipeline/hunt/context.py and CLAUDE.md's redteam section), watches
 `candidates` as a real-time INTEL FEED, pulls threads on what's burning
-brightest, opens INCIDENTS, keeps a NOTEBOOK, and escalates with real tools
-when it sees fit. It never "clears" the feed -- it reacts to it.
+brightest, opens INCIDENTS, keeps a NOTEBOOK, and -- its ONLY work product --
+hands firmed-up incidents to the analyst responder (pipeline/analyst/agent.py
+--serve) via handoff_incident. It holds NO response tools: no alerts, blocks or
+pages. The responder independently re-derives each incident from the evidence,
+decides false-positive vs real, acts, and records a verdict the hunter is shown
+on its next chunk (incident_handoffs, hunt/schema.sql). It never "clears" the
+feed -- it reacts to it.
 
 Turn structure mirrors redteam/agent.py's chunked stages: each chunk is one
 bounded agentic turn (low iteration cap, so IterationsExhausted is the normal
@@ -46,7 +51,6 @@ ROOT = os.path.dirname(PIPELINE)                          # soc-lab root
 
 sys.path.insert(0, HERE)
 sys.path.insert(0, PIPELINE)
-sys.path.insert(0, os.path.join(PIPELINE, "triage"))     # block_enforcer, northwind_enforcer
 sys.path.insert(0, os.path.join(PIPELINE, "redteam"))    # lab_modes (best-effort mode label)
 
 from normalize import ATTACKER_CONTROLLED, LLM_TRANSCRIPT_ATTACKER_CONTROLLED  # noqa: E402
@@ -55,8 +59,6 @@ from providers.claude import ClaudeProvider  # noqa: E402
 from providers.fireworks import FireworksProvider  # noqa: E402
 from providers.gmi import GMIProvider  # noqa: E402
 from providers.local import LocalProvider  # noqa: E402
-import block_enforcer  # noqa: E402
-import northwind_enforcer  # noqa: E402
 import llm_call_tracker  # noqa: E402
 import store  # noqa: E402
 import context  # noqa: E402
@@ -150,27 +152,30 @@ HUNTER_SYSTEM_PROMPT = (
     "your standing context; 'observation' is retrievable via search_notebook). Track "
     "threads you are pursuing as leads (note_lead); when a lead goes nowhere, "
     "close_lead it as 'dead' so you stop circling it, or 'resolved' when it pays off. "
-    "Update or close incidents as your understanding firms up.\n\n"
+    "Update incidents as your understanding firms up; when one is firmed up, hand it "
+    "off.\n\n"
 
-    "RESPONSE TOOLS. Escalate when warranted, at a calibrated threshold -- not "
-    "reflexively on every high-severity candidate (that trains humans to ignore you) "
-    "and not withheld when something looks like a real, active intrusion:\n"
-    "- raise_alert: a human-readable alert record. Safe, cheap, ungated.\n"
-    "- recommend_block: queue an IP block for a HUMAN to approve. Nothing happens "
-    "until a human acts.\n"
-    "- block_ip: REAL. This inserts a live firewall DROP rule immediately, no human "
-    "in the loop. It is fenced to the lab's own subnets, but within them it really "
-    "cuts off the IP -- an attacker who tricks you into blocking the wrong in-lab IP "
-    "causes a real self-inflicted outage. Be deliberate; prefer recommend_block when "
-    "unsure.\n"
-    "- page_oncall: the loudest tool -- 'wake a human up now.' Reserve for an active, "
-    "in-progress intrusion.\n"
-    "- harden_northwind_controls / quarantine_northwind_document: real defensive "
-    "actions against the Northwind AI application (only relevant in that mode).\n\n"
+    "YOUR WORK PRODUCT IS INCIDENTS, NOT ACTIONS. You have no response tools -- no "
+    "alerts, no blocks, no pages. A separate analyst responder does that, and it acts "
+    "only on what you hand it. Your job is to turn signal into a FIRMED-UP incident -- "
+    "entity, hypothesis, severity, linked evidence (the candidates/events that support "
+    "it) -- and then hand it off with handoff_incident(incident_id, brief). Hand off as "
+    "soon as it is firmed up, not when you are certain: the analyst will test your "
+    "hypothesis against the evidence and can disagree. Hoarding a firmed-up incident to "
+    "keep polishing it delays response; handing off a hunch with no evidence wastes the "
+    "analyst's turn and trains them to ignore you. Write the brief the way you would "
+    "brief a colleague taking over: ids, IPs, timeline, why you think what you think, "
+    "what would change your mind, what response you would consider proportionate.\n\n"
 
-    "Every response tool takes the candidate_id of the representative candidate the "
-    "action is based on, and optionally the incident_id it belongs to. Work in a "
-    "focused burst each turn, then stop -- you will be re-invoked with fresh signal."
+    "ONCE HANDED OFF, AN INCIDENT IS THE ANALYST'S. It drops out of OPEN INCIDENTS and "
+    "appears under HANDED OFF with the analyst's verdict once there is one. Do not keep "
+    "investigating it, do not change its status, and do not open a duplicate for the "
+    "same entity. You may link_evidence to it if genuinely NEW signal arrives for that "
+    "entity. Read the verdicts: false_positive means that entity is explained -- move "
+    "on unless something materially different appears; confirmed means it is being "
+    "handled -- monitor only; inconclusive means keep gathering evidence and hand off "
+    "again with a sharper brief when you have it. Work in a focused burst each turn, "
+    "then stop -- you will be re-invoked with fresh signal."
 )
 
 CHUNK_CLOSING_INSTRUCTION = (
@@ -178,6 +183,8 @@ CHUNK_CLOSING_INSTRUCTION = (
     "candidates or events once it points you at a specific thread worth running down. "
     "Work this turn now. Reconcile the new signals above against your open incidents "
     "and leads, pull the most valuable thread, and record what you find as you go. "
+    "If an open incident now has evidence linked and a hypothesis stated, hand it off "
+    "this turn with handoff_incident rather than carrying it. "
     "Before you finish, make sure anything worth remembering is written to an "
     "incident, a note, or a lead -- and if you are mid-investigation, checkpoint() "
     "your state so the next turn continues cleanly."
@@ -474,7 +481,17 @@ def tool_open_incident(conn, hunt_id, title, severity="medium", entity=None, hyp
         severity = "medium"
     iid = store.open_incident(conn, hunt_id, title, severity=severity, entity=entity,
                               hypothesis=hypothesis)
-    return json.dumps({"ok": True, "incident_id": iid})
+    out = {"ok": True, "incident_id": iid}
+    # Soft warning, not a block: the analyst already explained this entity away
+    # once. The hunter may still be right that this time is different.
+    prior = store.false_positive_handoff_for_entity(conn, hunt_id, entity)
+    if prior:
+        out["warning"] = (
+            f"entity {entity} was already handed off as incident {prior['incident_id']} "
+            f"({prior['inc_title']!r}) and judged false_positive by the analyst "
+            f"(confidence {prior['confidence']}) -- be sure this is materially different"
+        )
+    return json.dumps(out)
 
 
 def tool_link_evidence(conn, incident_id, candidate_ids=None, event_ids=None, note=None):
@@ -489,8 +506,17 @@ def tool_link_evidence(conn, incident_id, candidate_ids=None, event_ids=None, no
     for eid in (event_ids or []):
         store.link_evidence(conn, incident_id, "event", int(eid), note)
         n += 1
-    return json.dumps({"ok": True, "linked": n,
-                       "evidence_count": store.incident_evidence_count(conn, incident_id)})
+    out = {"ok": True, "linked": n,
+           "evidence_count": store.incident_evidence_count(conn, incident_id)}
+    # Linking to a handed-off incident is allowed (new signal for that entity)
+    # but deliberately does NOT re-notify the analyst -- handoff is explicit.
+    h = store.latest_handoff_for_incident(conn, incident_id)
+    if h:
+        out["handoff"] = {"id": h["id"], "status": h["status"], "verdict": h["verdict"]}
+        out["note"] = ("incident is handed off; the analyst sees linked evidence live via "
+                       "get_hunt_incident. If it was already resolved and this is materially "
+                       "new, call handoff_incident again with a new brief.")
+    return json.dumps(out)
 
 
 def tool_update_incident(conn, incident_id, status=None, severity=None,
@@ -501,9 +527,60 @@ def tool_update_incident(conn, incident_id, status=None, severity=None,
         return json.dumps({"error": f"bad status {status!r}; one of {_INCIDENT_STATUSES}"})
     if severity is not None and severity not in _SEVERITIES:
         return json.dumps({"error": f"bad severity {severity!r}"})
+    if status is not None:
+        h = store.live_handoff(conn, incident_id)
+        if h:
+            return json.dumps({"error": f"incident {incident_id} is with the analyst (handoff "
+                                        f"#{h['id']}, {h['status']}); its status is theirs to set "
+                                        "-- wait for the verdict"})
     store.update_incident(conn, incident_id, status=status, severity=severity,
                           hypothesis=hypothesis, summary=summary)
     return json.dumps({"ok": True, "incident_id": incident_id})
+
+
+_MIN_BRIEF_CHARS = 40
+
+
+def tool_handoff_incident(conn, hunt_id, chunk, incident_id, brief):
+    """The hunter's terminal act on an incident: queue it for the analyst
+    responder. Validates the incident is actually firmed up (evidence linked,
+    hypothesis stated, a real brief) so the responder never receives a hunch.
+    Deterministically resolves the incident's active leads -- that is what
+    stops run_hunt's idle check from spending chunks on a case that is no
+    longer the hunter's."""
+    if incident_id is None:
+        return json.dumps({"error": "incident_id is required"})
+    inc = store.get_incident(conn, incident_id)
+    if not inc or inc["hunt_id"] != hunt_id:
+        return json.dumps({"error": f"no incident {incident_id} in this hunt"})
+    if inc["status"] in ("closed", "false_positive"):
+        return json.dumps({"error": f"incident {incident_id} is {inc['status']}; nothing to hand off"})
+    if not brief or len(brief.strip()) < _MIN_BRIEF_CHARS:
+        return json.dumps({"error": "brief too thin -- write it as if briefing a colleague taking "
+                                    "over: ids, IPs, timeline, why, what would change your mind, "
+                                    "proportionate response"})
+    if store.incident_evidence_count(conn, incident_id) < 1:
+        return json.dumps({"error": "link evidence first (link_evidence) -- the analyst verifies "
+                                    "against the candidates/events you attach"})
+    if not inc["hypothesis"]:
+        return json.dumps({"error": "state a hypothesis first (update_incident hypothesis=...)"})
+    hid = store.add_handoff_request(conn, incident_id, hunt_id, inc["severity"], brief.strip())
+    if hid is None:
+        live = store.live_handoff(conn, incident_id)
+        return json.dumps({"error": f"incident {incident_id} already has a live handoff "
+                                    f"(#{live['id']}, {live['status']}) -- wait for the verdict"})
+    closed = 0
+    for lead in store.active_leads(conn, hunt_id):
+        if lead["incident_id"] == incident_id:
+            store.update_lead(conn, lead["id"], status="resolved",
+                              resolution=f"handed off to analyst (handoff #{hid})")
+            closed += 1
+    store.add_note(conn, hunt_id, chunk, "decision",
+                   f"Handed off incident {incident_id} to the analyst (handoff #{hid}).",
+                   incident_id=incident_id)
+    return json.dumps({"ok": True, "handoff_id": hid, "leads_resolved": closed,
+                       "note": "incident is now the analyst's; it will appear under HANDED OFF "
+                               "with the verdict once there is one"})
 
 
 def tool_note_lead(conn, hunt_id, description, incident_id=None):
@@ -534,120 +611,6 @@ def tool_search_notebook(conn, hunt_id, query=None, incident_id=None, ids=None):
     return json.dumps([{"id": r["id"], "note_type": r["note_type"],
                         "incident_id": r["incident_id"], "created": r["created"],
                         "body": r["body"]} for r in rows], default=str)
-
-
-# ---------------------------------------------------------------------------
-# response tools (reuse the real enforcement backends; attribute to incident+hunt)
-# ---------------------------------------------------------------------------
-
-def tool_raise_alert(conn, hunt_id, candidate_id, severity, summary, incident_id=None):
-    if candidate_id is None:
-        return json.dumps({"error": "candidate_id is required"})
-    conn.execute(
-        "INSERT INTO agent_alerts (candidate_id, severity, summary, created, incident_id, hunt_id) "
-        "VALUES (?,?,?,?,?,?)",
-        (candidate_id, severity, summary, store.now_iso(), incident_id, hunt_id),
-    )
-    conn.commit()
-    return json.dumps({"ok": True, "alert_recorded_for_candidate": candidate_id})
-
-
-def tool_recommend_block(conn, hunt_id, candidate_id, src_ip, reason, incident_id=None):
-    if candidate_id is None or not src_ip:
-        return json.dumps({"error": "candidate_id and src_ip are required"})
-    conn.execute(
-        "INSERT INTO block_recommendations (candidate_id, src_ip, reason, approved, created, "
-        "incident_id, hunt_id) VALUES (?,?,?,0,?,?,?)",
-        (candidate_id, src_ip, reason, store.now_iso(), incident_id, hunt_id),
-    )
-    conn.commit()
-    return json.dumps({"ok": True, "recommended": True, "executed": False,
-                       "note": "recorded for human approval; nothing was blocked"})
-
-
-def tool_block_ip(conn, hunt_id, candidate_id, src_ip, reason, incident_id=None):
-    """REAL enforcement, same backend + hard CIDR fence as triage's block_ip
-    (block_enforcer.validate_lab_ip rejects anything outside the lab's own
-    subnets). Ungated; every call logged to block_ip_calls, now carrying the
-    hunt/incident it belongs to."""
-    if candidate_id is None or not src_ip:
-        return json.dumps({"error": "candidate_id and src_ip are required"})
-    ts = store.now_iso()
-    try:
-        result = block_enforcer.block(src_ip)
-        executed = True
-        print(f"  [block_ip] BLOCKED src_ip={src_ip} (hunt={hunt_id}, incident={incident_id}) -- {result}")
-    except block_enforcer.BlockError as e:
-        result = {"ok": False, "blocked": False, "src_ip": src_ip, "error": str(e)}
-        executed = False
-        print(f"  [block_ip] REJECTED src_ip={src_ip} (hunt={hunt_id}) -- {e}")
-    conn.execute(
-        "INSERT INTO block_ip_calls (candidate_id, src_ip, reason, executed, executed_at, "
-        "result_json, created, incident_id, hunt_id) VALUES (?,?,?,?,?,?,?,?,?)",
-        (candidate_id, src_ip, reason, int(executed), ts if executed else None,
-         json.dumps(result), ts, incident_id, hunt_id),
-    )
-    conn.commit()
-    result["reason"] = reason
-    return json.dumps(result)
-
-
-def tool_page_oncall(conn, hunt_id, candidate_id, reason, incident_id=None):
-    """TEST-ONLY stand-in (no real pager), logged to human_pages -- same as
-    triage's page_oncall, plus hunt/incident attribution."""
-    if candidate_id is None or not reason:
-        return json.dumps({"error": "candidate_id and reason are required"})
-    conn.execute(
-        "INSERT INTO human_pages (candidate_id, reason, created, incident_id, hunt_id) "
-        "VALUES (?,?,?,?,?)",
-        (candidate_id, reason, store.now_iso(), incident_id, hunt_id),
-    )
-    conn.commit()
-    print(f"  [page_oncall] TEST STAND-IN (hunt={hunt_id}, incident={incident_id}) -- {reason}")
-    return json.dumps({"ok": True, "paged": True,
-                       "note": "test stand-in: no human was actually paged; logged to human_pages"})
-
-
-def tool_harden_northwind_controls(conn, hunt_id, candidate_id, toggles, reason, incident_id=None):
-    if candidate_id is None or not toggles:
-        return json.dumps({"error": "candidate_id and toggles are required"})
-    ts = store.now_iso()
-    try:
-        applied = northwind_enforcer.harden(toggles)
-        executed, error = True, None
-        print(f"  [harden_northwind_controls] APPLIED {toggles} (hunt={hunt_id})")
-    except northwind_enforcer.ControlsError as e:
-        applied, executed, error = None, False, str(e)
-        print(f"  [harden_northwind_controls] REJECTED {toggles} (hunt={hunt_id}) -- {e}")
-    conn.execute(
-        "INSERT INTO northwind_control_calls (candidate_id, requested, reason, executed, "
-        "applied, error, created, incident_id, hunt_id) VALUES (?,?,?,?,?,?,?,?,?)",
-        (candidate_id, json.dumps(toggles), reason, int(executed),
-         json.dumps(applied) if applied is not None else None, error, ts, incident_id, hunt_id),
-    )
-    conn.commit()
-    return json.dumps({"ok": executed, "executed": executed, "applied": applied, "error": error})
-
-
-def tool_quarantine_northwind_document(conn, hunt_id, candidate_id, document_id, reason, incident_id=None):
-    if candidate_id is None or document_id is None:
-        return json.dumps({"error": "candidate_id and document_id are required"})
-    ts = store.now_iso()
-    try:
-        result = northwind_enforcer.quarantine_document(document_id)
-        executed, already, error = True, result.get("already_quarantined"), None
-        print(f"  [quarantine_northwind_document] QUARANTINED doc={document_id} (hunt={hunt_id})")
-    except northwind_enforcer.ControlsError as e:
-        executed, already, error = False, None, str(e)
-        print(f"  [quarantine_northwind_document] FAILED doc={document_id} (hunt={hunt_id}) -- {e}")
-    conn.execute(
-        "INSERT INTO northwind_quarantine_calls (candidate_id, document_id, reason, executed, "
-        "already_quarantined, error, created, incident_id, hunt_id) VALUES (?,?,?,?,?,?,?,?,?)",
-        (candidate_id, document_id, reason, int(executed),
-         int(already) if already is not None else None, error, ts, incident_id, hunt_id),
-    )
-    conn.commit()
-    return json.dumps({"ok": executed, "executed": executed, "already_quarantined": already, "error": error})
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +688,16 @@ TOOLS = [
                     "severity, hypothesis, or summary.",
      "input_schema": _obj({"incident_id": _I, "status": _S, "severity": _S,
                            "hypothesis": _S, "summary": _S}, ["incident_id"])},
+    {"name": "handoff_incident",
+     "description": "Hand a FIRMED-UP incident to the analyst responder for independent "
+                    "verification and response. Requires at least one linked evidence item and a "
+                    "stated hypothesis. brief: 3-8 sentences a responder can act on -- what you saw "
+                    "(candidate/event ids, src_ips, timeline), why you think it is what you think it "
+                    "is, what would change your mind, and what response you would consider "
+                    "proportionate. After handoff the incident is the analyst's: you may "
+                    "link_evidence if genuinely new signal arrives, but do not keep investigating "
+                    "it, change its status, or open a duplicate.",
+     "input_schema": _obj({"incident_id": _I, "brief": _S}, ["incident_id", "brief"])},
     {"name": "note_lead",
      "description": "Record a thread you intend to pursue. An active lead keeps the hunt working "
                     "even when the feed is quiet; a dead one should be closed.",
@@ -736,33 +709,6 @@ TOOLS = [
      "description": "Save a mid-turn note of exactly where you are, to seed your next turn if this "
                     "one is cut off. Use when mid-investigation.",
      "input_schema": _obj({"note": _S}, ["note"])},
-
-    {"name": "raise_alert",
-     "description": "Write a human-readable alert record. Safe, ungated.",
-     "input_schema": _obj({"candidate_id": _I, "severity": _S, "summary": _S, "incident_id": _I},
-                          ["candidate_id", "severity", "summary"])},
-    {"name": "recommend_block",
-     "description": "RECOMMEND blocking a src_ip for a HUMAN to approve. Does NOT block anything itself.",
-     "input_schema": _obj({"candidate_id": _I, "src_ip": _S, "reason": _S, "incident_id": _I},
-                          ["candidate_id", "src_ip", "reason"])},
-    {"name": "block_ip",
-     "description": "REAL: insert a live firewall DROP for a src_ip immediately, no human approval. "
-                    "Fenced to lab subnets, but really cuts off the IP. Be deliberate; prefer "
-                    "recommend_block if unsure.",
-     "input_schema": _obj({"candidate_id": _I, "src_ip": _S, "reason": _S, "incident_id": _I},
-                          ["candidate_id", "src_ip", "reason"])},
-    {"name": "page_oncall",
-     "description": "Loudest escalation: 'wake a human now.' Reserve for an active, in-progress intrusion.",
-     "input_schema": _obj({"candidate_id": _I, "reason": _S, "incident_id": _I},
-                          ["candidate_id", "reason"])},
-    {"name": "harden_northwind_controls",
-     "description": "REAL: turn on allowlisted defensive controls in the Northwind app (northwind mode).",
-     "input_schema": _obj({"candidate_id": _I, "toggles": {"type": "object"}, "reason": _S,
-                           "incident_id": _I}, ["candidate_id", "toggles", "reason"])},
-    {"name": "quarantine_northwind_document",
-     "description": "REAL: quarantine a poisoned Northwind document by id (northwind mode).",
-     "input_schema": _obj({"candidate_id": _I, "document_id": _I, "reason": _S, "incident_id": _I},
-                          ["candidate_id", "document_id", "reason"])},
 ]
 
 
@@ -816,26 +762,9 @@ def dispatch_tool(conn, hunt_id, chunk, name, tool_input):
                                    ti.get("resolution")), False
         if name == "checkpoint":
             return tool_checkpoint(conn, hunt_id, chunk, ti.get("note")), False
-        if name == "raise_alert":
-            return tool_raise_alert(conn, hunt_id, ti.get("candidate_id"), ti.get("severity"),
-                                    ti.get("summary"), ti.get("incident_id")), False
-        if name == "recommend_block":
-            return tool_recommend_block(conn, hunt_id, ti.get("candidate_id"), ti.get("src_ip"),
-                                        ti.get("reason"), ti.get("incident_id")), False
-        if name == "block_ip":
-            return tool_block_ip(conn, hunt_id, ti.get("candidate_id"), ti.get("src_ip"),
-                                 ti.get("reason"), ti.get("incident_id")), False
-        if name == "page_oncall":
-            return tool_page_oncall(conn, hunt_id, ti.get("candidate_id"), ti.get("reason"),
-                                    ti.get("incident_id")), False
-        if name == "harden_northwind_controls":
-            return tool_harden_northwind_controls(conn, hunt_id, ti.get("candidate_id"),
-                                                  ti.get("toggles"), ti.get("reason"),
-                                                  ti.get("incident_id")), False
-        if name == "quarantine_northwind_document":
-            return tool_quarantine_northwind_document(conn, hunt_id, ti.get("candidate_id"),
-                                                      ti.get("document_id"), ti.get("reason"),
-                                                      ti.get("incident_id")), False
+        if name == "handoff_incident":
+            return tool_handoff_incident(conn, hunt_id, chunk, ti.get("incident_id"),
+                                         ti.get("brief")), False
         return json.dumps({"error": f"unknown tool {name!r}"}), True
     except Exception as e:  # noqa: BLE001 - a bad tool call is reported, never fatal
         return json.dumps({"error": f"{name} failed: {e}"}), True
@@ -903,8 +832,8 @@ def _posture_doctrine():
         "POSTURE -- you are defending an internet-facing perimeter. A firewall sits "
         "between the outside and the assets, and it already drops and logs external "
         "port scans and probes of non-exposed ports -- so that recon is background "
-        "internet noise, NOT an incident: do not raise_alert or block on external "
-        "scanning alone. What deserves your attention is something that got THROUGH "
+        "internet noise, NOT an incident: do not open or hand off an incident on "
+        "external scanning alone. What deserves your attention is something that got THROUGH "
         "the perimeter (a connection on an exposed service, an exploit against it) or "
         "any activity whose source is INSIDE the network (lateral movement / "
         "post-compromise). Weigh response accordingly: an external IP hammering the "
@@ -1087,14 +1016,17 @@ def stats(conn):
         ("incidents (total)", "SELECT COUNT(*) AS n FROM incidents"),
         ("notebook entries", "SELECT COUNT(*) AS n FROM hunt_notes"),
         ("leads (active)", "SELECT COUNT(*) AS n FROM leads WHERE status IN ('open','pursuing')"),
-        ("alerts raised", "SELECT COUNT(*) AS n FROM agent_alerts WHERE hunt_id IS NOT NULL"),
-        ("block_ip (executed)", "SELECT COUNT(*) AS n FROM block_ip_calls WHERE hunt_id IS NOT NULL AND executed=1"),
-        ("pages", "SELECT COUNT(*) AS n FROM human_pages WHERE hunt_id IS NOT NULL"),
+        ("handoffs (queued)", "SELECT COUNT(*) AS n FROM incident_handoffs WHERE status='queued'"),
+        ("handoffs (in progress)", "SELECT COUNT(*) AS n FROM incident_handoffs WHERE status='in_progress'"),
+        ("handoffs (unresolved)", "SELECT COUNT(*) AS n FROM incident_handoffs WHERE status='unresolved'"),
+        ("verdict: false_positive", "SELECT COUNT(*) AS n FROM incident_handoffs WHERE verdict='false_positive'"),
+        ("verdict: confirmed", "SELECT COUNT(*) AS n FROM incident_handoffs WHERE verdict='confirmed'"),
+        ("verdict: inconclusive", "SELECT COUNT(*) AS n FROM incident_handoffs WHERE verdict='inconclusive'"),
     ):
         try:
-            print(f"    {label:<22} {conn.execute(sql).fetchone()['n']}")
+            print(f"    {label:<24} {conn.execute(sql).fetchone()['n']}")
         except Exception as e:  # noqa: BLE001
-            print(f"    {label:<22} (error: {e})")
+            print(f"    {label:<24} (error: {e})")
     print(f"[*] {hunts} hunt session(s)")
 
 

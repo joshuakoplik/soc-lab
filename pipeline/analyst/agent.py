@@ -9,6 +9,8 @@ standing threat hunter (pipeline/hunt/).
     python3 pipeline/analyst/agent.py --session 4                 # resume chat session #4 (continues its transcript)
     python3 pipeline/analyst/agent.py --dry-run                   # print system prompt + tools + first turn, call nothing
     python3 pipeline/analyst/agent.py --stats
+    python3 pipeline/analyst/agent.py --serve --provider gmi      # RESPONDER: drain the hunter's incident_handoffs queue (see responder.py)
+    python3 pipeline/analyst/agent.py --serve --dry-run           # print the responder prompt + next handoff's opening turn, claim nothing
 
 The use case is the bleary-eyed SOC analyst woken by the hunter: they open the
 chat, ask "what the hell is going on," get a fast SITREP, then dig into details
@@ -36,6 +38,16 @@ TRUST BOUNDARY (load-bearing, per CLAUDE.md). The operator's typed messages are
 the TRUSTED instruction channel. Everything a tool returns is untrusted data:
 the reused hunt tools already fence attacker-controlled columns, and the system
 prompt states the boundary explicitly.
+
+RESPONDER MODE (--serve, pipeline/analyst/responder.py): the same agent, tools
+and fences, run unattended. The hunter's ONLY work product is incidents; when
+it hands one off (incident_handoffs), the responder claims it, opens a chat
+session for it, takes an informed-but-skeptical look (the hunter's hypothesis
+is a CLAIM TO TEST, wrapped in <hunter-handoff>), decides false_positive /
+confirmed / inconclusive, acts proportionately with the same real response
+tools, and records the verdict with resolve_incident -- the one tool that
+touches hunt state, and only through a deterministic verdict -> status map.
+Afterwards the session is an ordinary chat a human can continue.
 
 External enrichment tools (dns/whois/traceroute/http/web_search) live in
 enrichment.py and are gated behind SOC_ANALYST_EGRESS (off by default) plus an
@@ -130,7 +142,9 @@ ANALYST_SYSTEM_PROMPT = (
     "- page_oncall: loudest escalation. Reserve for an active, in-progress intrusion.\n"
     "- harden_northwind_controls / quarantine_northwind_document: real defensive "
     "actions against the Northwind AI app (northwind mode only).\n"
-    "Every response action is logged and attributed to this chat session."
+    "Every response action is logged and attributed to this chat session. If this "
+    "chat is attached to a hunter incident (an 'Incident #N' session opened by the "
+    "responder), resolve_incident records your verdict on it."
 )
 
 EGRESS_PROMPT_BLOCK = (
@@ -211,24 +225,25 @@ def tool_record_finding(conn, session_id, body, note_type="finding", refs=None):
 # response tools (real backends + chat_actions audit record)
 # ---------------------------------------------------------------------------
 
-def tool_raise_alert(conn, session_id, severity, summary):
+def tool_raise_alert(conn, session_id, severity, summary, incident_id=None):
     if not summary:
         return json.dumps({"error": "summary is required"})
     analyst_store.add_action(conn, session_id, "alert", reason=summary, executed=True,
-                             result={"severity": severity})
+                             result={"severity": severity}, incident_id=incident_id)
     return json.dumps({"ok": True, "alerted": True})
 
 
-def tool_recommend_block(conn, session_id, src_ip, reason):
+def tool_recommend_block(conn, session_id, src_ip, reason, incident_id=None):
     if not src_ip or not reason:
         return json.dumps({"error": "src_ip and reason are required"})
     analyst_store.add_action(conn, session_id, "recommend_block", src_ip=src_ip, reason=reason,
-                             executed=False, result={"note": "recorded for human approval"})
+                             executed=False, result={"note": "recorded for human approval"},
+                             incident_id=incident_id)
     return json.dumps({"ok": True, "recommended": True, "executed": False,
                        "note": "recorded for human approval; nothing was blocked"})
 
 
-def tool_block_ip(conn, session_id, src_ip, reason):
+def tool_block_ip(conn, session_id, src_ip, reason, incident_id=None):
     """REAL enforcement -- same backend + hard CIDR fence as the hunter's
     block_ip (block_enforcer.validate_lab_ip rejects anything outside the lab's
     own subnets)."""
@@ -244,22 +259,23 @@ def tool_block_ip(conn, session_id, src_ip, reason):
         print(f"  [block_ip] REJECTED src_ip={src_ip} (chat={session_id}) -- {e}")
     result["reason"] = reason
     analyst_store.add_action(conn, session_id, "block_ip", src_ip=src_ip, reason=reason,
-                             executed=executed, result=result)
+                             executed=executed, result=result, incident_id=incident_id)
     return json.dumps(result)
 
 
-def tool_page_oncall(conn, session_id, reason):
-    """TEST-ONLY stand-in (no real pager), same as the hunter's page_oncall."""
+def tool_page_oncall(conn, session_id, reason, incident_id=None):
+    """TEST-ONLY stand-in (no real pager)."""
     if not reason:
         return json.dumps({"error": "reason is required"})
     analyst_store.add_action(conn, session_id, "page_oncall", reason=reason, executed=True,
-                             result={"note": "test stand-in: no human actually paged"})
+                             result={"note": "test stand-in: no human actually paged"},
+                             incident_id=incident_id)
     print(f"  [page_oncall] TEST STAND-IN (chat={session_id}) -- {reason}")
     return json.dumps({"ok": True, "paged": True,
                        "note": "test stand-in: no human was actually paged"})
 
 
-def tool_harden_northwind_controls(conn, session_id, toggles, reason):
+def tool_harden_northwind_controls(conn, session_id, toggles, reason, incident_id=None):
     if not toggles:
         return json.dumps({"error": "toggles are required"})
     try:
@@ -271,11 +287,11 @@ def tool_harden_northwind_controls(conn, session_id, toggles, reason):
         print(f"  [harden_northwind_controls] REJECTED {toggles} (chat={session_id}) -- {e}")
     analyst_store.add_action(conn, session_id, "harden_northwind", target_ref=json.dumps(toggles),
                              reason=reason, executed=executed,
-                             result={"applied": applied, "error": error})
+                             result={"applied": applied, "error": error}, incident_id=incident_id)
     return json.dumps({"ok": executed, "executed": executed, "applied": applied, "error": error})
 
 
-def tool_quarantine_northwind_document(conn, session_id, document_id, reason):
+def tool_quarantine_northwind_document(conn, session_id, document_id, reason, incident_id=None):
     if document_id is None:
         return json.dumps({"error": "document_id is required"})
     try:
@@ -287,8 +303,66 @@ def tool_quarantine_northwind_document(conn, session_id, document_id, reason):
         print(f"  [quarantine_northwind_document] FAILED doc={document_id} (chat={session_id}) -- {e}")
     analyst_store.add_action(conn, session_id, "quarantine_northwind", target_ref=str(document_id),
                              reason=reason, executed=executed,
-                             result={"result": result, "error": error})
+                             result={"result": result, "error": error}, incident_id=incident_id)
     return json.dumps({"ok": executed, "executed": executed, "result": result, "error": error})
+
+
+# ---------------------------------------------------------------------------
+# verdict (closes the hunter -> analyst loop)
+# ---------------------------------------------------------------------------
+
+# Actions that actually change the environment. A 'confirmed' verdict with one
+# of these executed means the incident is contained; without one it is real
+# but only being watched/escalated -- 'monitoring'.
+_CONTAINING_ACTION_KINDS = ("block_ip", "harden_northwind", "quarantine_northwind")
+
+
+def _apply_verdict(conn, incident_id, verdict, session_id):
+    """The deterministic verdict -> incidents.status map. This is the ONLY
+    place the analyst side writes hunt state, and it is code, not model
+    output: the model picks a verdict, never a status."""
+    if verdict == "false_positive":
+        new_status = "false_positive"
+    elif verdict == "confirmed":
+        contained = conn.execute(
+            "SELECT 1 FROM chat_actions WHERE session_id=? AND incident_id=? AND executed=1 "
+            "AND kind IN (?,?,?) LIMIT 1",
+            (session_id, incident_id, *_CONTAINING_ACTION_KINDS),
+        ).fetchone()
+        new_status = "contained" if contained else "monitoring"
+    else:  # inconclusive
+        new_status = "monitoring"
+    hunt_store.update_incident(conn, incident_id, status=new_status)
+    return new_status
+
+
+def tool_resolve_incident(conn, session_id, incident_id, verdict, confidence, rationale):
+    if incident_id is None:
+        return json.dumps({"error": "incident_id is required"})
+    if verdict not in hunt_store.HANDOFF_VERDICTS:
+        return json.dumps({"error": f"verdict must be one of {hunt_store.HANDOFF_VERDICTS}"})
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "confidence must be a number 0.0-1.0"})
+    if not 0.0 <= confidence <= 1.0:
+        return json.dumps({"error": "confidence must be between 0.0 and 1.0"})
+    if not rationale or not rationale.strip():
+        return json.dumps({"error": "rationale is required -- cite the evidence"})
+    if not hunt_store.get_incident(conn, incident_id):
+        return json.dumps({"error": f"no incident {incident_id}"})
+    h = hunt_store.live_handoff(conn, incident_id)
+    if h is None:
+        return json.dumps({"error": f"no live handoff for incident {incident_id} -- nothing to "
+                                    "resolve (it was already resolved, or never handed off)"})
+    hunt_store.resolve_handoff(conn, h["id"], verdict, confidence, rationale.strip(),
+                               session_id=session_id)
+    new_status = _apply_verdict(conn, incident_id, verdict, session_id)
+    print(f"  [resolve_incident] incident #{incident_id} -> {verdict} ({confidence:.2f}); "
+          f"status={new_status} (chat={session_id}, handoff #{h['id']})")
+    return json.dumps({"ok": True, "handoff_id": h["id"], "verdict": verdict,
+                       "confidence": confidence, "incident_status": new_status,
+                       "note": "verdict recorded; the hunter sees it on its next turn"})
 
 
 # ---------------------------------------------------------------------------
@@ -340,26 +414,46 @@ TOOLS = _REUSED_HUNT_TOOLS + [
                            "refs": {"type": "array", "items": {"type": "object"}}}, ["body"])},
 
     # ---- response (real) ----
+    # incident_id is optional on every response tool: in a responder session it
+    # defaults to the session's incident (dispatch_tool fills it in), so
+    # attribution is automatic; in an interactive chat the model may name one.
     {"name": "raise_alert",
      "description": "Write a human-readable alert record. Safe, ungated.",
-     "input_schema": _obj({"severity": _S, "summary": _S}, ["severity", "summary"])},
+     "input_schema": _obj({"severity": _S, "summary": _S, "incident_id": _I}, ["severity", "summary"])},
     {"name": "recommend_block",
      "description": "RECOMMEND blocking a src_ip for a human to approve. Does NOT block anything.",
-     "input_schema": _obj({"src_ip": _S, "reason": _S}, ["src_ip", "reason"])},
+     "input_schema": _obj({"src_ip": _S, "reason": _S, "incident_id": _I}, ["src_ip", "reason"])},
     {"name": "block_ip",
      "description": "REAL: insert a live firewall DROP for a src_ip immediately, no human approval. "
                     "Fenced to lab subnets, but really cuts off the IP. Be deliberate; prefer "
                     "recommend_block if unsure.",
-     "input_schema": _obj({"src_ip": _S, "reason": _S}, ["src_ip", "reason"])},
+     "input_schema": _obj({"src_ip": _S, "reason": _S, "incident_id": _I}, ["src_ip", "reason"])},
     {"name": "page_oncall",
      "description": "Loudest escalation: 'wake a human now.' Reserve for an active intrusion.",
-     "input_schema": _obj({"reason": _S}, ["reason"])},
+     "input_schema": _obj({"reason": _S, "incident_id": _I}, ["reason"])},
     {"name": "harden_northwind_controls",
      "description": "REAL: turn on allowlisted defensive controls in the Northwind app (northwind mode).",
-     "input_schema": _obj({"toggles": {"type": "object"}, "reason": _S}, ["toggles", "reason"])},
+     "input_schema": _obj({"toggles": {"type": "object"}, "reason": _S, "incident_id": _I},
+                          ["toggles", "reason"])},
     {"name": "quarantine_northwind_document",
      "description": "REAL: quarantine a poisoned Northwind document by id (northwind mode).",
-     "input_schema": _obj({"document_id": _I, "reason": _S}, ["document_id", "reason"])},
+     "input_schema": _obj({"document_id": _I, "reason": _S, "incident_id": _I},
+                          ["document_id", "reason"])},
+
+    # ---- verdict: the one write that touches hunt state (via a fixed map) ----
+    {"name": "resolve_incident",
+     "description": "Record your verdict on an incident the hunter handed to you and close the "
+                    "loop with the hunter. verdict: false_positive (benign/explained) | confirmed "
+                    "(real malicious or unauthorized activity) | inconclusive (evidence "
+                    "insufficient either way). confidence 0.0-1.0. rationale: the evidence-based "
+                    "reasoning, citing candidate/event ids. Call exactly once, at the end, after "
+                    "any defensive action you judged warranted. The incident's status is derived "
+                    "from your verdict and actions -- you never set it directly.",
+     "input_schema": _obj({"incident_id": _I,
+                           "verdict": {"type": "string",
+                                       "enum": ["false_positive", "confirmed", "inconclusive"]},
+                           "confidence": {"type": "number"}, "rationale": _S},
+                          ["incident_id", "verdict", "confidence", "rationale"])},
 ]
 
 
@@ -370,16 +464,26 @@ def active_tools():
     return TOOLS + (enrichment.TOOLS if enrichment.egress_enabled() else [])
 
 
-def system_prompt():
+def system_prompt(mode="chat"):
     """The system prompt, with the external-enrichment guidance appended only
-    when the egress gate is on -- so the model isn't told about tools it lacks."""
-    return ANALYST_SYSTEM_PROMPT + (EGRESS_PROMPT_BLOCK if enrichment.egress_enabled() else "")
+    when the egress gate is on -- so the model isn't told about tools it lacks.
+    mode='responder' swaps in the unattended incident-responder framing
+    (responder.RESPONDER_SYSTEM_PROMPT); same tools, same fences."""
+    if mode == "responder":
+        import responder  # local: responder imports this module's namespace lazily
+        base = responder.RESPONDER_SYSTEM_PROMPT
+    else:
+        base = ANALYST_SYSTEM_PROMPT
+    return base + (EGRESS_PROMPT_BLOCK if enrichment.egress_enabled() else "")
 
 
-def dispatch_tool(conn, session_id, hunt_id, name, tool_input):
+def dispatch_tool(conn, session_id, hunt_id, name, tool_input, incident_id=None):
     """Route one tool call. Returns (result_text, is_error). Every branch is
-    wrapped so a bad call is reported back to the model, never raised."""
+    wrapped so a bad call is reported back to the model, never raised.
+    incident_id is the session's incident (responder sessions); response
+    tools attribute to it unless the model names another."""
     ti = tool_input or {}
+    inc_id = ti.get("incident_id", incident_id)
     # External enrichment (gated): enrichment.dispatch enforces the egress gate
     # and the SSRF guard itself, and fences its own results.
     if name in enrichment._TOOL_NAMES:
@@ -426,19 +530,26 @@ def dispatch_tool(conn, session_id, hunt_id, name, tool_input):
 
         # response (real) ------------------------------------------------------
         if name == "raise_alert":
-            return tool_raise_alert(conn, session_id, ti.get("severity"), ti.get("summary")), False
+            return tool_raise_alert(conn, session_id, ti.get("severity"), ti.get("summary"),
+                                    inc_id), False
         if name == "recommend_block":
-            return tool_recommend_block(conn, session_id, ti.get("src_ip"), ti.get("reason")), False
+            return tool_recommend_block(conn, session_id, ti.get("src_ip"), ti.get("reason"),
+                                        inc_id), False
         if name == "block_ip":
-            return tool_block_ip(conn, session_id, ti.get("src_ip"), ti.get("reason")), False
+            return tool_block_ip(conn, session_id, ti.get("src_ip"), ti.get("reason"), inc_id), False
         if name == "page_oncall":
-            return tool_page_oncall(conn, session_id, ti.get("reason")), False
+            return tool_page_oncall(conn, session_id, ti.get("reason"), inc_id), False
         if name == "harden_northwind_controls":
             return tool_harden_northwind_controls(conn, session_id, ti.get("toggles"),
-                                                  ti.get("reason")), False
+                                                  ti.get("reason"), inc_id), False
         if name == "quarantine_northwind_document":
             return tool_quarantine_northwind_document(conn, session_id, ti.get("document_id"),
-                                                      ti.get("reason")), False
+                                                      ti.get("reason"), inc_id), False
+
+        # verdict ----------------------------------------------------------------
+        if name == "resolve_incident":
+            return tool_resolve_incident(conn, session_id, inc_id, ti.get("verdict"),
+                                         ti.get("confidence"), ti.get("rationale")), False
 
         return json.dumps({"error": f"unknown tool {name!r}"}), True
     except Exception as e:  # noqa: BLE001 - a bad tool call is reported, never fatal
@@ -505,22 +616,25 @@ def _recap_from_transcript(conn, session_id, cap=12):
 # one operator turn
 # ---------------------------------------------------------------------------
 
-def run_turn(conn, session_id, hunt_id, conv, provider, provider_name, user_text, max_iterations):
+def run_turn(conn, session_id, hunt_id, conv, provider, provider_name, user_text, max_iterations,
+             incident_id=None):
     """Log the operator message, run one agentic turn (logging each tool call /
     result to the transcript), log and return the assistant's reply text.
-    Returns (reply_text, ok)."""
+    Returns (reply_text, ok). incident_id ties response actions to the
+    session's hunter incident (responder sessions)."""
     analyst_store.add_turn(conn, session_id, "user", content=user_text)
 
     def execute(nm, inp):
         analyst_store.add_turn(conn, session_id, "tool_call", tool_name=nm, tool_input=inp)
-        result, is_err = dispatch_tool(conn, session_id, hunt_id, nm, inp)
+        result, is_err = dispatch_tool(conn, session_id, hunt_id, nm, inp, incident_id=incident_id)
         analyst_store.add_turn(conn, session_id, "tool_result", tool_name=nm,
                                tool_result_preview=result, is_error=is_err)
         return result, is_err
 
     call_id = llm_call_tracker.start_call(
         conn, component="analyst",
-        context_label=f"chat #{session_id}",
+        context_label=(f"incident #{incident_id} -- chat #{session_id}" if incident_id
+                       else f"chat #{session_id}"),
         provider=provider_name, model=provider.model,
         system_prompt=conv.system, user_prompt=user_text, session_id=session_id,
     )
@@ -572,6 +686,15 @@ def print_stats(conn):
                         "GROUP BY kind ORDER BY n DESC").fetchall()
     print(f"chat sessions: {s} ({a} active)")
     print(f"transcript rows: {t}")
+    try:
+        hs = conn.execute("SELECT status, COUNT(*) AS n FROM incident_handoffs GROUP BY status").fetchall()
+        vs = conn.execute("SELECT verdict, COUNT(*) AS n FROM incident_handoffs "
+                          "WHERE verdict IS NOT NULL GROUP BY verdict").fetchall()
+        print("handoffs: " + (", ".join(f"{r['status']}={r['n']}" for r in hs) or "none"))
+        if vs:
+            print("verdicts: " + ", ".join(f"{r['verdict']}={r['n']}" for r in vs))
+    except Exception as e:  # noqa: BLE001
+        print(f"handoffs: (error: {e})")
     if acts:
         print("actions:")
         for r in acts:
@@ -592,12 +715,17 @@ def main():
     ap.add_argument("--session", type=int, default=None, help="resume this chat session id")
     ap.add_argument("--sitrep", action="store_true", help="open with an automatic situational summary")
     ap.add_argument("--ask", default=None, help="send one message, print the reply")
-    ap.add_argument("--once", action="store_true", help="with --ask/--sitrep: exit after, no REPL")
+    ap.add_argument("--once", action="store_true",
+                    help="with --ask/--sitrep: exit after, no REPL; with --serve: handle one handoff then exit")
     ap.add_argument("--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS)
     ap.add_argument("--db-path", default=None, help="use this sqlite file instead of soc.db")
     ap.add_argument("--dry-run", action="store_true",
                     help="print system prompt + tools + first user turn, call nothing")
     ap.add_argument("--stats", action="store_true")
+    ap.add_argument("--serve", action="store_true",
+                    help="RESPONDER mode: drain the hunter's incident_handoffs queue unattended")
+    ap.add_argument("--poll-interval", type=int, default=5, metavar="SECONDS",
+                    help="--serve: seconds to sleep when the handoff queue is empty (default 5)")
     args = ap.parse_args()
 
     conn = analyst_store.connect(args.db_path)
@@ -605,6 +733,13 @@ def main():
     if args.stats:
         print_stats(conn)
         return
+
+    if args.serve:
+        # Pass this module object rather than letting responder import it: a
+        # bare `import agent` here would load a SECOND copy of this file (the
+        # basename-collision trap in CLAUDE.md section 3c).
+        import responder
+        return responder.serve(sys.modules[__name__], conn, args)
 
     if args.dry_run:
         first = args.ask or (SITREP_OPENING if args.sitrep else "<the operator's first question>")

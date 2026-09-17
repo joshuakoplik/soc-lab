@@ -170,8 +170,10 @@ if [ "$KILL_FIRST" = "1" ] && { [ "$DO_DB" = "1" ] || [ "$DO_QUEUE" = "1" ] || [
   # pipeline/hunt/agent.py is the standing threat-hunter (the operational
   # defender): it holds a long-lived write connection, so a --db wipe strands
   # it on the old inode and a --hunt clear would race its in-flight writes --
-  # kill it first for either, same reasoning as triage/agent.py.
-  for pattern in "pipeline/ingest.py" "pipeline/detect/rules.py" "pipeline/triage/agent.py" "pipeline/hunt/agent.py" "pipeline/redteam/agent.py" "pipeline/redteam/jobs.py"; do
+  # kill it first for either, same reasoning as triage/agent.py. The analyst
+  # responder (pipeline/analyst/agent.py --serve) is the same shape: a
+  # long-lived writer draining the incident_handoffs queue a --hunt clears.
+  for pattern in "pipeline/ingest.py" "pipeline/detect/rules.py" "pipeline/triage/agent.py" "pipeline/hunt/agent.py" "pipeline/analyst/agent.py --serve" "pipeline/redteam/agent.py" "pipeline/redteam/jobs.py"; do
     pkill -f "$pattern" 2>/dev/null && echo "    killed: $pattern" || true
   done
 fi

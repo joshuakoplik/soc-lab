@@ -148,3 +148,41 @@ CREATE TABLE IF NOT EXISTS hunt_checkpoints (
     created       TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_hunt_checkpoints_hunt ON hunt_checkpoints(hunt_id);
+
+-- The hunter -> analyst INCIDENT handoff queue. NOT the same thing as
+-- hunt_handoff_notes above (chunk-boundary compaction, an unrelated concept).
+-- The hunter's only work product is incidents: when one is firmed up
+-- (evidence linked, hypothesis stated) it calls handoff_incident, which
+-- INSERTs a row here. The analyst responder (pipeline/analyst/agent.py
+-- --serve) claims it atomically, works it in its own chat session, and records
+-- a verdict (resolve_incident). Deterministic code -- never the model -- then
+-- maps verdict -> incidents.status.
+--
+-- Ownership by column: brief/severity/handed_at are the hunter's;
+-- claimed_at/session_id/attempts/verdict/confidence/rationale/resolved_at are
+-- the analyst side's. This is the one table both agents write, by design --
+-- it IS the interface between them.
+CREATE TABLE IF NOT EXISTS incident_handoffs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id   INTEGER NOT NULL REFERENCES incidents(id),
+    hunt_id       INTEGER NOT NULL REFERENCES hunt_sessions(id),
+    severity      TEXT    NOT NULL,           -- incident severity at handoff (queue ordering snapshot)
+    brief         TEXT    NOT NULL,           -- hunter-authored handoff brief
+    status        TEXT    NOT NULL DEFAULT 'queued',  -- queued | in_progress | resolved | unresolved
+    handed_at     TEXT    NOT NULL,
+    claimed_at    TEXT,
+    session_id    INTEGER,                    -- chat_sessions.id the responder opened for it
+    attempts      INTEGER NOT NULL DEFAULT 0, -- responder claims (provider-error requeues bump it)
+    verdict       TEXT,                       -- false_positive | confirmed | inconclusive
+    confidence    REAL,                       -- 0.0 .. 1.0
+    rationale     TEXT,
+    resolved_at   TEXT,
+    updated_at    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_status   ON incident_handoffs(status);
+CREATE INDEX IF NOT EXISTS idx_handoffs_incident ON incident_handoffs(incident_id);
+CREATE INDEX IF NOT EXISTS idx_handoffs_hunt     ON incident_handoffs(hunt_id);
+-- At most ONE live handoff per incident. A resolved/unresolved one may be
+-- followed by a re-handoff (new brief, new row) if genuinely new signal arrives.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_handoffs_live
+    ON incident_handoffs(incident_id) WHERE status IN ('queued','in_progress');

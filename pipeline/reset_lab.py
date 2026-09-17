@@ -41,6 +41,7 @@ sys.path.insert(0, HERE)
 import ingest  # noqa: E402
 import llm_call_tracker  # noqa: E402
 from hunt import store as hunt_store  # noqa: E402
+from analyst import chat_store as analyst_chat_store  # noqa: E402
 
 DB_PATH = ingest.DB_PATH
 
@@ -50,6 +51,7 @@ DB_PATH = ingest.DB_PATH
 # CREATE TABLE IF NOT EXISTS. init_full_schema() calls it after the others so
 # candidates + the action tables already exist for those ALTERs to target.
 HUNT_TABLES = (
+    "incident_handoffs",   # hunter -> analyst queue; child of incidents, so first
     "hunt_checkpoints", "hunt_handoff_notes", "leads", "hunt_notes",
     "incident_evidence", "incidents", "hunt_sessions",
 )
@@ -58,9 +60,9 @@ SCHEMA_FILES = [
     os.path.join(HERE, "detect", "schema.sql"),
     os.path.join(HERE, "triage", "schema.sql"),
     os.path.join(HERE, "redteam", "schema.sql"),
-    # The analyst-chat tables (pipeline/analyst/schema.sql) are plain
-    # CREATE TABLE IF NOT EXISTS with no ALTER migrations, so unlike the hunt
-    # tables they can layer in here rather than needing an ensure_schema() call.
+    # The analyst-chat tables (pipeline/analyst/schema.sql) layer in here for
+    # the CREATE TABLE IF NOT EXISTS part; their additive incident_id ALTERs
+    # run via analyst_chat_store.ensure_schema() in init_full_schema() below.
     os.path.join(HERE, "analyst", "schema.sql"),
 ]
 
@@ -87,6 +89,7 @@ def init_full_schema(db_path=None):
             conn.executescript(f.read())
     llm_call_tracker.ensure_schema(conn)
     hunt_store.ensure_schema(conn)   # hunt tables + additive action-table migrations
+    analyst_chat_store.ensure_schema(conn)   # chat_* incident_id migrations
     conn.commit()
 
 

@@ -10,7 +10,9 @@ Graceful stop = SIGTERM once, wait up to stop_timeout, then SIGKILL. For the
 hunter this is exactly the clean drain the agent implements (hunt/agent.py:
 first SIGTERM finishes the in-flight chunk, compacts a handoff note, sets
 status='stopped', exits; a second signal is immediate) -- so labctl stops the
-hunter by SIGTERM and simply waits, and the hunter loses no context.
+hunter by SIGTERM and simply waits, and the hunter loses no context. The
+analyst responder (analyst/responder.py) has the same contract: first SIGTERM
+finishes the in-flight handoff, then exits.
 
 Interpreter policy: agents and ingest launch under the SAME interpreter labctl
 runs (sys.executable) -- the top-level `labctl` wrapper prefers .venv/bin/python3,
@@ -80,6 +82,16 @@ def _argv_for(name, opts, cfg):
             "--provider", str(opts.get("provider") or cfg["hunter_provider"]),
         ]
         model = opts.get("model") or cfg["hunter_model"]
+        if model:
+            argv += ["--model", str(model)]
+        argv += [str(a) for a in opts.get("extra", [])]
+        return argv
+    if name == "analyst":
+        argv = [
+            py, "pipeline/analyst/agent.py", "--serve",
+            "--provider", str(opts.get("provider") or cfg["analyst_provider"]),
+        ]
+        model = opts.get("model") or cfg["analyst_model"]
         if model:
             argv += ["--model", str(model)]
         argv += [str(a) for a in opts.get("extra", [])]

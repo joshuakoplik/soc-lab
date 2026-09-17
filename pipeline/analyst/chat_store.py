@@ -94,11 +94,27 @@ def connect(db_path=None):
 
 
 def ensure_schema(conn):
-    """Create the analyst chat_* tables. Safe to call on any connection; all
-    CREATE ... IF NOT EXISTS. Called by connect() and by
-    reset_lab.init_full_schema()."""
+    """Create the analyst chat_* tables and run the additive migrations. Safe
+    to call on any connection; all CREATE ... IF NOT EXISTS plus PRAGMA-guarded
+    ALTERs. Called by connect() and by reset_lab.init_full_schema()."""
     with open(os.path.join(HERE, "schema.sql")) as f:
         conn.executescript(f.read())
+    migrate(conn)
+    conn.commit()
+
+
+def _table_columns(conn, table):
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def migrate(conn):
+    """Additive, idempotent -- same pattern as hunt/store.migrate(). Adds the
+    responder's incident_id attribution column to chat_sessions and
+    chat_actions on databases that predate it."""
+    for table in ("chat_sessions", "chat_actions"):
+        have = _table_columns(conn, table)
+        if have and "incident_id" not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN incident_id INTEGER")
     conn.commit()
 
 
@@ -106,12 +122,13 @@ def ensure_schema(conn):
 # chat sessions
 # ---------------------------------------------------------------------------
 
-def start_session(conn, provider, model, lab_mode=None, hunt_id=None, title=None):
+def start_session(conn, provider, model, lab_mode=None, hunt_id=None, title=None,
+                  incident_id=None):
     ts = now_iso()
     cur = conn.execute(
         "INSERT INTO chat_sessions (started, provider, model, lab_mode, status, title, "
-        "hunt_id, created, updated) VALUES (?,?,?,?, 'active', ?,?,?,?)",
-        (ts, provider, model, lab_mode, title, hunt_id, ts, ts),
+        "hunt_id, incident_id, created, updated) VALUES (?,?,?,?, 'active', ?,?,?,?,?)",
+        (ts, provider, model, lab_mode, title, hunt_id, incident_id, ts, ts),
     )
     conn.commit()
     return cur.lastrowid
@@ -177,6 +194,29 @@ def add_turn(conn, session_id, role, content=None, tool_name=None, tool_input=No
     return cur.lastrowid
 
 
+def turn_in_flight(conn, session_id, stale_after_s=900):
+    """True if a turn appears to be running on this session in SOME process:
+    the last transcript row is not the assistant's reply (a user message or a
+    tool row) and is younger than stale_after_s. run_turn() and
+    dashboard/chat._do_turn() always append an assistant row on every handled
+    failure path, so only a hard kill can leave a dangling non-assistant row --
+    the staleness cutoff keeps that from 409-ing the session forever. This is
+    the cross-process check the dashboard's in-process per-session lock can't
+    provide once the responder (--serve) is also writing turns."""
+    row = conn.execute(
+        "SELECT role, created FROM chat_turns WHERE session_id=? ORDER BY seq DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    if not row or row["role"] == "assistant":
+        return False
+    try:
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(row["created"].replace("Z", "+00:00"))).total_seconds()
+    except (ValueError, AttributeError):
+        return False
+    return age < stale_after_s
+
+
 def transcript(conn, session_id):
     return conn.execute(
         "SELECT * FROM chat_turns WHERE session_id=? ORDER BY seq", (session_id,)
@@ -208,11 +248,11 @@ def notes(conn, session_id):
 # ---------------------------------------------------------------------------
 
 def add_action(conn, session_id, kind, src_ip=None, target_ref=None, reason=None,
-               executed=False, result=None):
+               executed=False, result=None, incident_id=None):
     cur = conn.execute(
-        "INSERT INTO chat_actions (session_id, kind, src_ip, target_ref, reason, executed, "
-        "result_json, created) VALUES (?,?,?,?,?,?,?,?)",
-        (session_id, kind, src_ip, target_ref, reason, int(bool(executed)),
+        "INSERT INTO chat_actions (session_id, incident_id, kind, src_ip, target_ref, reason, "
+        "executed, result_json, created) VALUES (?,?,?,?,?,?,?,?,?)",
+        (session_id, incident_id, kind, src_ip, target_ref, reason, int(bool(executed)),
          json.dumps(result, default=str) if result is not None else None, now_iso()),
     )
     _touch(conn, session_id)

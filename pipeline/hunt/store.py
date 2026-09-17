@@ -11,7 +11,9 @@ same way pipeline/redteam/agent.py externalizes its state. This module owns:
     candidates(updated) index the feed cursor needs.
   - the non-consuming feed cursor over `candidates` (read the stream by
     id/updated high-water mark, never by flipping candidates.status).
-  - session, incident, notebook, lead, handoff and checkpoint CRUD.
+  - session, incident, notebook, lead, chunk-handoff-note and checkpoint CRUD.
+  - the incident_handoffs queue (hunter -> analyst responder): the hunter
+    inserts, the responder claims atomically and records the verdict.
 
 Deliberately separate from agent.py (loop/tools/prompts) and context.py
 (prompt rendering) so the memory model can be unit-tested without a provider.
@@ -45,11 +47,12 @@ _SIBLING_SCHEMAS = (
     os.path.join(PIPELINE, "triage", "schema.sql"),   # triage + action tables
 )
 
-# The action tables the hunter attributes to an incident + hunt. candidate_id
-# stays NOT NULL (an incident is always seeded from candidates, so there is
-# always a representative candidate to attribute to); incident_id/hunt_id are
-# added nullable so the legacy triage path (injection_asr) is untouched -- it
-# keeps writing candidate_id and leaves these NULL.
+# The triage action tables, migrated to carry incident_id/hunt_id (nullable).
+# Historical: the hunter wrote these when it still held response tools. Since
+# the handoff split it holds none (the analyst responder acts, into its own
+# chat_actions), so nothing writes hunt_id here any more; the columns stay
+# for old rows and because the migration is additive. candidate_id stays NOT
+# NULL so the legacy triage path (injection_asr) is untouched.
 _ACTION_TABLES = (
     "agent_alerts", "block_recommendations", "block_ip_calls", "human_pages",
     "northwind_control_calls", "northwind_quarantine_calls",
@@ -274,10 +277,16 @@ def get_incident(conn, incident_id):
     return conn.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
 
 
-def list_incidents(conn, hunt_id, open_only=True):
+def list_incidents(conn, hunt_id, open_only=True, exclude_handed_off=False):
+    """exclude_handed_off drops every incident that has ANY handoff row -- used
+    only by the hunter's own OPEN INCIDENTS block (a handed-off incident is the
+    analyst's, rendered separately under HANDED OFF). The analyst's
+    list_hunt_incidents keeps the default so it still sees them."""
     sql = "SELECT * FROM incidents WHERE hunt_id=?"
     if open_only:
         sql += " AND status NOT IN ('closed','false_positive')"
+    if exclude_handed_off:
+        sql += " AND id NOT IN (SELECT incident_id FROM incident_handoffs)"
     sql += f" ORDER BY {SEVERITY_RANK_SQL} DESC, updated_at DESC"
     return conn.execute(sql, (hunt_id,)).fetchall()
 
@@ -305,6 +314,149 @@ def incident_evidence_count(conn, incident_id):
     return conn.execute(
         "SELECT COUNT(*) AS n FROM incident_evidence WHERE incident_id=?", (incident_id,)
     ).fetchone()["n"]
+
+
+# ---------------------------------------------------------------------------
+# incident handoffs (hunter -> analyst queue)
+# ---------------------------------------------------------------------------
+# The hunter side INSERTs (add_handoff_request); the analyst responder side
+# claims/requeues/resolves. See schema.sql for the column ownership split.
+
+HANDOFF_VERDICTS = ("false_positive", "confirmed", "inconclusive")
+
+
+def add_handoff_request(conn, incident_id, hunt_id, severity, brief):
+    """Queue an incident for the analyst. Returns the new handoff id, or None
+    if the incident already has a live (queued/in_progress) handoff -- the
+    partial unique index idx_handoffs_live enforces that, so this never races."""
+    ts = now_iso()
+    try:
+        cur = conn.execute(
+            "INSERT INTO incident_handoffs (incident_id, hunt_id, severity, brief, status, "
+            "handed_at, updated_at) VALUES (?,?,?,?, 'queued', ?,?)",
+            (incident_id, hunt_id, severity, brief, ts, ts),
+        )
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return None
+    conn.execute("UPDATE incidents SET updated_at=? WHERE id=?", (ts, incident_id))
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_handoff(conn, handoff_id):
+    return conn.execute("SELECT * FROM incident_handoffs WHERE id=?", (handoff_id,)).fetchone()
+
+
+def live_handoff(conn, incident_id):
+    """The queued/in_progress handoff for an incident, or None."""
+    return conn.execute(
+        "SELECT * FROM incident_handoffs WHERE incident_id=? AND status IN ('queued','in_progress') "
+        "ORDER BY id DESC LIMIT 1", (incident_id,)
+    ).fetchone()
+
+
+def latest_handoff_for_incident(conn, incident_id):
+    """Most recent handoff of ANY status for an incident, or None."""
+    return conn.execute(
+        "SELECT * FROM incident_handoffs WHERE incident_id=? ORDER BY id DESC LIMIT 1",
+        (incident_id,)
+    ).fetchone()
+
+
+def list_handoffs(conn, hunt_id, limit=12):
+    """One row per handed-off incident (its latest handoff), joined to the
+    incident for title/entity/current status. Feeds the hunter's HANDED OFF
+    context block. Live ones first, then most recently updated."""
+    return conn.execute(
+        "SELECT h.*, i.title AS inc_title, i.entity AS inc_entity, i.status AS inc_status, "
+        "i.severity AS inc_severity "
+        "FROM incident_handoffs h JOIN incidents i ON i.id = h.incident_id "
+        "WHERE h.hunt_id=? AND h.id IN (SELECT MAX(id) FROM incident_handoffs GROUP BY incident_id) "
+        "ORDER BY (h.status IN ('queued','in_progress')) DESC, h.updated_at DESC LIMIT ?",
+        (hunt_id, limit),
+    ).fetchall()
+
+
+def false_positive_handoff_for_entity(conn, hunt_id, entity):
+    """The latest resolved-as-false_positive handoff for an entity in this
+    hunt, or None -- lets open_incident warn the hunter before it re-opens a
+    thread the analyst already explained away."""
+    if not entity:
+        return None
+    return conn.execute(
+        "SELECT h.*, i.title AS inc_title FROM incident_handoffs h "
+        "JOIN incidents i ON i.id = h.incident_id "
+        "WHERE h.hunt_id=? AND i.entity=? AND h.verdict='false_positive' "
+        "ORDER BY h.id DESC LIMIT 1", (hunt_id, entity)
+    ).fetchone()
+
+
+def claim_next_handoff(conn):
+    """Atomically claim the brightest queued handoff (severity DESC, id ASC).
+    Returns the claimed row or None if the queue is empty. The UPDATE is
+    guarded on claimed_at IS NULL so two responders can never both win."""
+    row = conn.execute(
+        f"SELECT id FROM incident_handoffs WHERE status='queued' "
+        f"ORDER BY {SEVERITY_RANK_SQL} DESC, id ASC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return None
+    ts = now_iso()
+    cur = conn.execute(
+        "UPDATE incident_handoffs SET status='in_progress', claimed_at=?, "
+        "attempts=attempts+1, updated_at=? WHERE id=? AND claimed_at IS NULL",
+        (ts, ts, row["id"]),
+    )
+    conn.commit()
+    return get_handoff(conn, row["id"]) if cur.rowcount == 1 else None
+
+
+def set_handoff_session(conn, handoff_id, session_id):
+    conn.execute("UPDATE incident_handoffs SET session_id=?, updated_at=? WHERE id=?",
+                 (session_id, now_iso(), handoff_id))
+    conn.commit()
+
+
+def requeue_handoff(conn, handoff_id):
+    """Give a claimed handoff back to the queue (transient provider failure).
+    attempts is kept so the responder can cap retries."""
+    conn.execute(
+        "UPDATE incident_handoffs SET status='queued', claimed_at=NULL, updated_at=? WHERE id=?",
+        (now_iso(), handoff_id),
+    )
+    conn.commit()
+
+
+def resolve_handoff(conn, handoff_id, verdict, confidence, rationale, session_id=None):
+    ts = now_iso()
+    conn.execute(
+        "UPDATE incident_handoffs SET status='resolved', verdict=?, confidence=?, rationale=?, "
+        "resolved_at=?, session_id=COALESCE(?, session_id), updated_at=? WHERE id=?",
+        (verdict, confidence, rationale, ts, session_id, ts, handoff_id),
+    )
+    conn.commit()
+
+
+def mark_handoff_unresolved(conn, handoff_id):
+    """The responder spent its turn budget (or failed hard) without a verdict.
+    Terminal for this row; the hunter may re-hand off with a sharper brief."""
+    conn.execute(
+        "UPDATE incident_handoffs SET status='unresolved', updated_at=? WHERE id=?",
+        (now_iso(), handoff_id),
+    )
+    conn.commit()
+
+
+def requeue_stale_in_progress(conn):
+    """Startup recovery: a previous responder instance died mid-turn. Only one
+    responder runs (labctl), so anything still in_progress at startup is ours."""
+    cur = conn.execute(
+        "UPDATE incident_handoffs SET status='queued', claimed_at=NULL, updated_at=? "
+        "WHERE status='in_progress'", (now_iso(),)
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 # ---------------------------------------------------------------------------

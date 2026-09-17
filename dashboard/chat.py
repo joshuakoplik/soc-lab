@@ -124,14 +124,23 @@ def _do_turn(session_id, text):
     the poller streams to browsers."""
     conn = _conn()
     try:
-        hunt_id = analyst_store.latest_hunt_id(conn)
+        sess = analyst_store.get_session(conn, session_id)
+        # A responder-opened session ("Incident #N") keeps reading the hunt it
+        # was opened against and keeps the skeptical responder framing when a
+        # human continues it; its response actions stay attributed to the
+        # incident. Otherwise: the latest hunt, ordinary chat framing.
+        incident_id = sess["incident_id"] if sess else None
+        hunt_id = (sess["hunt_id"] if sess and sess["hunt_id"] else None) \
+            or analyst_store.latest_hunt_id(conn)
         conv = _conversations.get(session_id)
         if conv is None:
-            conv = analyst_agent.ChatConversation(_provider(), analyst_agent.system_prompt())
+            mode = "responder" if incident_id else "chat"
+            conv = analyst_agent.ChatConversation(_provider(), analyst_agent.system_prompt(mode=mode))
             conv.seed_context(analyst_agent._recap_from_transcript(conn, session_id))
             _conversations[session_id] = conv
         analyst_agent.run_turn(conn, session_id, hunt_id, conv, _provider(),
-                               _provider_name(), text, _max_iterations())
+                               _provider_name(), text, _max_iterations(),
+                               incident_id=incident_id)
     except Exception as e:  # noqa: BLE001 - never let a turn crash the server; record it
         try:
             analyst_store.add_turn(conn, session_id, "assistant",
@@ -188,7 +197,7 @@ async def list_sessions():
         conn = _conn()
         try:
             rows = conn.execute(
-                "SELECT id, started, ended, status, title, hunt_id, provider, model "
+                "SELECT id, started, ended, status, title, hunt_id, incident_id, provider, model "
                 "FROM chat_sessions ORDER BY id DESC LIMIT 50"
             ).fetchall()
             return [dict(r) for r in rows]
@@ -224,14 +233,23 @@ async def post_message(body: Message):
         conn = _conn()
         try:
             s = analyst_store.get_session(conn, body.session_id)
-            return None if not s else s["status"]
+            if not s:
+                return None, False
+            return s["status"], analyst_store.turn_in_flight(conn, body.session_id)
         finally:
             conn.close()
-    status = await asyncio.to_thread(_check)
+    status, in_flight = await asyncio.to_thread(_check)
     if status is None:
         raise HTTPException(status_code=404, detail=f"no chat session {body.session_id}")
     if status != "active":
         raise HTTPException(status_code=409, detail=f"session is {status}")
+    # Cross-process check: the analyst responder (--serve) writes turns to
+    # responder-opened sessions from its own process, which the in-process
+    # lock below cannot see. The transcript itself says whether a turn is
+    # mid-flight (last row not the assistant's reply).
+    if in_flight:
+        raise HTTPException(status_code=409,
+                            detail="a turn is in flight for this session (responder or another process)")
     if not _start_turn(body.session_id, text):
         raise HTTPException(status_code=409, detail="a turn is already running for this session")
     return {"accepted": True}

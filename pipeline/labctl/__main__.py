@@ -23,7 +23,7 @@ import sys
 
 from . import config, orchestrate, procman, state, supervisor
 
-PROC_NAMES = ("hunter", "attacker", "ingest", "dashboard", "supervisor")
+PROC_NAMES = ("hunter", "analyst", "attacker", "ingest", "dashboard", "supervisor")
 
 
 def _print_result(res, quiet_ok=True):
@@ -60,6 +60,10 @@ def _cmd_status(args):
     if h:
         print(f"hunt: #{h['hunt_id']} status={h['status']} chunks={h['chunk_count']} "
               f"({h['provider']}/{h['model']})")
+    ho = data["signals"].get("handoffs")
+    if ho:
+        print(f"handoffs: queued={ho['queued']} in_progress={ho['in_progress']} "
+              f"resolved={ho['resolved']} unresolved={ho['unresolved']}")
     runs = data["signals"]["active_attack_runs"]
     if runs:
         print("active attack runs: " + ", ".join(f"#{r['id']}({r['stage']})" for r in runs))

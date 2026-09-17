@@ -1009,3 +1009,71 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 .lab-form label > select + input.lab-input { margin-left: 6px; min-width: 160px; }
 .lab-model-field { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .lab-model-field .lab-btn-sm { padding: 2px 7px; }
+
+/* ---------- Analyst tab: hunter -> analyst incident queue + inline actions ---------- */
+.chat-queue {
+  flex: 0 0 auto;
+  max-height: 170px;
+  overflow-y: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+}
+.chat-queue-head {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 2px 4px;
+}
+.chat-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.chat-queue-item:hover { background: color-mix(in srgb, var(--text-primary) 6%, var(--surface-2)); }
+.chat-queue-item.is-active {
+  background: color-mix(in srgb, var(--side-def) 16%, var(--surface-2));
+  border-left-color: var(--side-def);
+}
+.chat-queue-item.no-session { cursor: default; opacity: 0.8; }
+.chat-queue-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+  background: currentColor; opacity: 0.9;
+}
+.chat-queue-inc { font-weight: 600; flex: 0 0 auto; }
+.chat-queue-sev { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; flex: 0 0 auto; }
+.chat-queue-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-queue-status {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.chat-action { align-self: flex-start; }
+.chat-action-bubble {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  background: var(--surface-3);
+  border-left: 3px solid var(--side-def);
+}
+.chat-action-err .chat-action-bubble {
+  border-left-color: var(--status-serious);
+  color: var(--status-serious);
+}
+.chat-handoff {
+  outline: 1px dashed var(--status-warning);
+  outline-offset: 1px;
+  padding: 0 4px;
+  border-radius: 2px;
+}

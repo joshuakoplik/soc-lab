@@ -168,9 +168,32 @@ def pending_feed_count(cursor_id, db_path=None):
         conn.close()
 
 
+def handoff_state(db_path=None):
+    """The hunter -> analyst handoff queue (incident_handoffs) as counts, or
+    None if the table doesn't exist yet. Read-only; the responder's progress
+    signal, the way hunt_sessions is the hunter's."""
+    try:
+        conn = _connect(db_path)
+    except sqlite3.Error:
+        return None
+    try:
+        if not _table_exists(conn, "incident_handoffs"):
+            return None
+        out = {"queued": 0, "in_progress": 0, "resolved": 0, "unresolved": 0}
+        for r in conn.execute("SELECT status, COUNT(*) AS n FROM incident_handoffs GROUP BY status"):
+            if r["status"] in out:
+                out[r["status"]] = r["n"]
+        return out
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
 def summary(db_path=None):
-    """Compact dict for `labctl status` / the dashboard: hunter + attack runs."""
+    """Compact dict for `labctl status` / the dashboard: hunter + handoffs + attack runs."""
     return {
         "hunter": hunter_state(db_path),
+        "handoffs": handoff_state(db_path),
         "active_attack_runs": active_attack_runs(db_path),
     }

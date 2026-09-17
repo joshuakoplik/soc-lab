@@ -87,6 +87,7 @@ TABLES = {
     "incident_evidence":     ("incident_evidence",      300),
     "hunt_notes":            ("hunt_note",              300),
     "leads":                 ("lead",                   150),
+    "incident_handoffs":     ("incident_handoff",       150),
     "chat_sessions":         ("chat_session",            40),
     "chat_turns":            ("chat_turn",              400),
     "chat_notes":            ("chat_note",              100),
@@ -107,6 +108,9 @@ TABLES = {
 # insert-only.
 MUTABLE_TABLES = {"candidates", "redteam_sessions", "pending_actions", "llm_calls",
                   "hunt_sessions", "incidents", "leads",
+                  # incident_handoffs.status/verdict/session_id are updated in place
+                  # as the responder claims and resolves them.
+                  "incident_handoffs",
                   # chat_sessions.status/title/updated change in place; the turn/
                   # note/action tables are insert-only, so an id-cursor is right.
                   "chat_sessions"}

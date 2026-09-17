@@ -19,6 +19,14 @@
 -- chat_actions below, NOT in the hunter/triage action tables: a chat action is
 -- often taken on a bare IP the operator named, with no representative
 -- candidate_id to satisfy those tables' constraint.
+--
+-- RESPONDER MODE (pipeline/analyst/agent.py --serve): the same agent also
+-- runs unattended as the analyst RESPONDER, claiming incidents the hunter
+-- handed off (pipeline/hunt/schema.sql: incident_handoffs) and working each
+-- in a chat session of its own. chat_sessions.incident_id / chat_actions.
+-- incident_id tie that session and its actions back to the incident. Those
+-- two columns are ALTER-migrated in chat_store.migrate() for pre-existing
+-- databases (CREATE TABLE IF NOT EXISTS can't add a column).
 
 -- One row per interactive chat session. A session is opened when an operator
 -- starts a conversation and stays 'active' until closed; it can be resumed
@@ -37,6 +45,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     status      TEXT    NOT NULL DEFAULT 'active', -- active | closed
     title       TEXT,                              -- short human label (first question, or set later)
     hunt_id     INTEGER,                           -- the standing hunt this chat reads shared memory from
+    incident_id INTEGER,                           -- set on responder-opened sessions ("Incident #N"); see incident_handoffs
     created     TEXT    NOT NULL,
     updated     TEXT    NOT NULL
 );
@@ -91,6 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_notes_session ON chat_notes(session_id);
 CREATE TABLE IF NOT EXISTS chat_actions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id  INTEGER NOT NULL REFERENCES chat_sessions(id),
+    incident_id INTEGER,                 -- the hunter incident this action was taken for (nullable)
     kind        TEXT    NOT NULL,
     src_ip      TEXT,                -- the IP acted on, for block/recommend
     target_ref  TEXT,                -- free-form target (document id, toggle set, candidate id, ...)
