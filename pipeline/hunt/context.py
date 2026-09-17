@@ -7,8 +7,11 @@ becomes a prompt: every chunk starts from a fresh conversation, and these
 functions rebuild the evolving picture from soc.db rows.
 
 Three things get rendered into every chunk's opening prompt:
-  1. persistent_context_block: open incidents, active leads, recent notebook
-     findings/decisions -- the standing state, always present, zero tool calls.
+  1. persistent_context_block: open incidents, HANDED OFF incidents (with the
+     analyst responder, plus its verdict once there is one -- so the hunter
+     stops circling what is no longer its to work), active leads, recent
+     notebook findings/decisions -- the standing state, always present, zero
+     tool calls.
   2. hunt_board_block: the shift-start dashboard -- new high/crit candidates,
      top talkers, loudest signatures, busiest dst ports, feed shape -- rendered
      from trusted columns as counts, so the hunter starts at altitude and never
@@ -84,7 +87,8 @@ def _no_tools_execute(name, tool_input):
 # ---------------------------------------------------------------------------
 
 def _incidents_block(conn, hunt_id):
-    rows = store.list_incidents(conn, hunt_id, open_only=True)
+    # Handed-off incidents are the analyst's; they render under HANDED OFF.
+    rows = store.list_incidents(conn, hunt_id, open_only=True, exclude_handed_off=True)
     if not rows:
         return None
     lines = []
@@ -96,6 +100,41 @@ def _incidents_block(conn, hunt_id):
             f"[incident {r['id']}] ({r['severity']}/{r['status']}) {r['title']}"
             f"{entity} -- {ev} evidence link(s){hyp}"
         )
+    return "\n".join(lines)
+
+
+def _handoffs_block(conn, hunt_id):
+    """Incidents the hunter has handed to the analyst responder, latest
+    handoff per incident: awaiting / in progress / the verdict. Each line ends
+    with what the hunter should DO about that state, so the verdict actually
+    changes its behaviour rather than just being reported."""
+    rows = store.list_handoffs(conn, hunt_id)
+    if not rows:
+        return None
+    lines = []
+    for r in rows:
+        entity = f" entity={r['inc_entity']}" if r["inc_entity"] else ""
+        head = f"[incident {r['incident_id']}] ({r['inc_severity']}) {r['inc_title']}{entity}"
+        if r["status"] == "queued":
+            tail = f"handed off {r['handed_at']} -- awaiting analyst"
+        elif r["status"] == "in_progress":
+            tail = "analyst is working it now -- do not touch"
+        elif r["status"] == "unresolved":
+            tail = ("analyst could not reach a verdict; re-hand off with a sharper brief "
+                    "if still active")
+        else:  # resolved
+            conf = f" ({r['confidence']:.2f})" if r["confidence"] is not None else ""
+            why = f': "{_preview(r["rationale"], 140)}"' if r["rationale"] else ""
+            v = r["verdict"]
+            if v == "false_positive":
+                guidance = "CLOSED; do not re-open for this entity unless materially different"
+            elif v == "confirmed":
+                guidance = (f"incident now {r['inc_status']} -- monitor only; re-hand off only "
+                            "on NEW signal")
+            else:
+                guidance = "keep gathering evidence; hand off again when you have more"
+            tail = f"analyst verdict: {v}{conf}{why} -- {guidance}"
+        lines.append(f"{head} -- {tail}")
     return "\n".join(lines)
 
 
@@ -135,6 +174,9 @@ def persistent_context_block(conn, hunt_id):
     inc = _incidents_block(conn, hunt_id)
     if inc:
         parts.append("OPEN INCIDENTS (investigations you have opened):\n" + inc)
+    ho = _handoffs_block(conn, hunt_id)
+    if ho:
+        parts.append("HANDED OFF (with the analyst -- not yours to work):\n" + ho)
     leads = _leads_block(conn, hunt_id)
     if leads:
         parts.append(
@@ -388,6 +430,9 @@ def gather_state(conn, hunt_id):
     parts = []
     inc = _incidents_block(conn, hunt_id)
     parts.append("Open incidents:\n" + inc if inc else "Open incidents: none.")
+    ho = _handoffs_block(conn, hunt_id)
+    if ho:
+        parts.append("Handed off to the analyst (not the hunter's to work):\n" + ho)
     leads = _leads_block(conn, hunt_id)
     parts.append("Active leads:\n" + leads if leads else "Active leads: none.")
     idx = _notebook_index(conn, hunt_id)
