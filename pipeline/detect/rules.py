@@ -783,6 +783,11 @@ def connect(db_path=None):
     so every existing caller is unaffected."""
     conn = sqlite3.connect(db_path or DB_PATH)
     conn.row_factory = sqlite3.Row
+    # Wait on the WAL write lock instead of dying with 'database is locked':
+    # detect runs alongside ingest (the standing writer), same as the hunter
+    # and analyst, which set the same timeout. Without this a transient
+    # contention aborts the whole detect pass and no candidates get written.
+    conn.execute("PRAGMA busy_timeout=30000")
     with open(os.path.join(HERE, "schema.sql")) as f:
         conn.executescript(f.read())
     return conn

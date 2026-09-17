@@ -203,8 +203,10 @@ async def process_action(body: ProcessAction):
             return {"name": body.name, "action": "stop", "stopped": stopped}
         fn = procman.restart if body.action == "restart" else procman.start
         started, entry = fn(body.name, opts)
+        entry = entry or {}
         return {"name": body.name, "action": body.action,
-                "started": started, "pid": entry.get("pid") if entry else None}
+                "started": started, "pid": entry.get("pid"),
+                "crashed": bool(entry.get("crashed")), "error": entry.get("error")}
 
     return await _mutate(_do)
 
