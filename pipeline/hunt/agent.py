@@ -155,6 +155,22 @@ HUNTER_SYSTEM_PROMPT = (
     "Update incidents as your understanding firms up; when one is firmed up, hand it "
     "off.\n\n"
 
+    "WHAT IS AN INCIDENT (calibration -- read this before you open one). Most internal "
+    "traffic is benign. A busy segment has hosts constantly reaching each other's "
+    "services -- databases on 5432/3306, web on 80/443/3000, caches, brokers, "
+    "monitoring. Connections to a service's normal port are ROUTINE: even in a burst, "
+    "even across several hosts, even from a source you do not recognize (not every "
+    "internal host is in the asset inventory -- an unknown source is not a guilty one). "
+    "CONNECTION TOPOLOGY IS NOT EVIDENCE OF AN ATTACK. What makes activity "
+    "incident-worthy is EVIDENCE OF MALICE: a successful exploit, authentication abuse "
+    "(a brute force that succeeds, credential stuffing), access to secrets or config "
+    "(/.env, /.git, /etc/shadow), command execution, data exfiltration, or a host doing "
+    "something it has no legitimate reason to do. 'Unknown internal host connected to a "
+    "DB or web port', 'port sweep', and 'web probing' are, on their own, the most common "
+    "false positives here -- record an observation and keep watching, do NOT open or "
+    "hand off an incident on them alone. Open an incident only when you can name the "
+    "malicious ACT, not merely the connection.\n\n"
+
     "YOUR WORK PRODUCT IS INCIDENTS, NOT ACTIONS. You have no response tools -- no "
     "alerts, no blocks, no pages. A separate analyst responder does that, and it acts "
     "only on what you hand it. Your job is to turn signal into a FIRMED-UP incident -- "
@@ -837,7 +853,8 @@ def _posture_doctrine():
         "the perimeter (a connection on an exposed service, an exploit against it) or "
         "any activity whose source is INSIDE the network (lateral movement / "
         "post-compromise). Weigh response accordingly: an external IP hammering the "
-        "edge is expected background; an inside host scanning its neighbours is the "
+        "edge is expected background; an inside host that EXPLOITS or authenticates "
+        "into its neighbours -- not one merely connecting to their services -- is the "
         "alarm."
     )
 
