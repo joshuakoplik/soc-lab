@@ -911,6 +911,10 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 .lab-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
 .lab-policies { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
 .lab-toggle { font-size: 12px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.lab-reset-opts { display: flex; flex-direction: column; gap: 5px; margin: 6px 0 10px; }
+.lab-reset-opt { font-size: 12px; color: var(--text-primary); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.lab-reset-opt input { margin: 0; cursor: pointer; }
+.lab-reset-hint { color: var(--text-secondary); font-size: 11px; }
 .lab-btn {
   background: var(--surface-3);
   color: var(--text-primary);
