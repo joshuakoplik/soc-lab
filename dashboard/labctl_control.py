@@ -184,7 +184,24 @@ async def mode_action(body: ModeAction):
     if body.verb in ("up", "switch") and body.mode not in orchestrate.VALID_MODES:
         raise HTTPException(status_code=400, detail=f"bad mode '{body.mode}'")
     _audit("mode", f"{body.verb} {body.mode or ''} {body.target or ''}".strip())
-    res = await _mutate(orchestrate.lab_mode, body.verb, body.mode, body.target)
+    # northwind's `up`/`switch` is `docker compose up -d --build --wait`, which
+    # blocks on healthchecks and can legitimately run past the 600s default; give
+    # bring-up verbs a longer window. Correctness no longer depends on this --
+    # lab-mode.sh now writes lab_mode.json BEFORE the bring-up, so a timeout here
+    # leaves the mode correctly selected while containers finish detached -- but a
+    # premature kill still surfaces as a spurious failure, so widen it.
+    timeout = 1200 if body.verb in ("up", "switch") else 600
+    res = await _mutate(orchestrate.lab_mode, body.verb, body.mode, body.target, timeout=timeout)
+    # Log the OUTCOME, not just the intent: the old code logged the action before
+    # running it, so a timed-out/failed switch looked identical to a successful
+    # one in the audit trail. rc=124 is a timeout (see orchestrate._run).
+    rc = res.get("rc") if isinstance(res, dict) else None
+    outcome = f"{body.verb} {body.mode or ''} rc={rc}".strip()
+    if rc:
+        tail = (res.get("stderr") or "").strip().splitlines()
+        if tail:
+            outcome += f" -- {tail[-1][:120]}"
+    _audit("mode", "result " + outcome)
     return res
 
 

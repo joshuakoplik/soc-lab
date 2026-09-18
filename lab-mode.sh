@@ -260,8 +260,16 @@ case "$VERB" in
     # uses a net_topology bridge, so bootstrap runs.
     [ "$MODE" = "northwind" ] || bootstrap
     echo "[*] bringing $MODE mode up (other modes, if running, are left alone)"
-    mode_up "$MODE" "$TARGET"
+    # Record the selected mode BEFORE the (possibly slow) bring-up, not after.
+    # mode_up for northwind is `docker compose up -d --build --wait`, which can
+    # block on healthchecks for minutes; a caller that kills mode_up on a
+    # timeout (e.g. labctl's subprocess timeout from the dashboard) would
+    # otherwise leave lab_mode.json stale while the detached (`-d`) containers
+    # keep coming up on their own -- and an attacker launched afterward reads
+    # the OLD mode. Mode selection is operator intent and is recorded
+    # immediately; readiness is a separate axis that `status`/docker report.
     write_state "$MODE"
+    mode_up "$MODE" "$TARGET"
     rehome_attacker "$(current_posture)"
     perimeter_sync "$MODE" "$(current_posture)"
     echo "[*] $MODE mode up; lab_mode.json primary mode set to $MODE"
@@ -293,8 +301,11 @@ case "$VERB" in
       [ "$other" = "$MODE" ] && continue
       mode_down "$other" 2>/dev/null || true
     done
-    mode_up "$MODE" "$TARGET"
+    # Record the selected mode BEFORE the bring-up (same reasoning as the `up`
+    # branch above): mode_up can be slow enough to be killed on a timeout,
+    # which would leave lab_mode.json pointing at the mode we just tore down.
     write_state "$MODE"
+    mode_up "$MODE" "$TARGET"
     rehome_attacker "$(current_posture)"
     perimeter_sync "$MODE" "$(current_posture)"
     echo "[*] $MODE mode active (exclusively)"
