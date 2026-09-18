@@ -1439,11 +1439,16 @@ function renderLab(s) {
 
       <div class="lab-card lab-danger">
         <h3>Reset</h3>
+        <div class="lab-reset-opts">
+          <label class="lab-reset-opt"><input type="checkbox" class="lab-reset-flag" value="--network" checked> network <span class="lab-reset-hint">undo block_ip rules</span></label>
+          <label class="lab-reset-opt"><input type="checkbox" class="lab-reset-flag" value="--queue" checked> queue <span class="lab-reset-hint">reseed ingest to EOF</span></label>
+          <label class="lab-reset-opt"><input type="checkbox" class="lab-reset-flag" value="--attacker" checked> attacker <span class="lab-reset-hint">rebuild kali + clear loot</span></label>
+          <label class="lab-reset-opt"><input type="checkbox" class="lab-reset-flag" value="--target" checked> target <span class="lab-reset-hint">rebuild active target</span></label>
+          <label class="lab-reset-opt"><input type="checkbox" class="lab-reset-flag" value="--hunt" checked> hunt <span class="lab-reset-hint">clear standing hunt state</span></label>
+          <label class="lab-reset-opt"><input type="checkbox" class="lab-reset-flag" value="--db" data-destructive="1" checked> db <span class="lab-reset-hint">wipe soc.db (destructive)</span></label>
+        </div>
         <div class="lab-controls">
-          <button class="lab-btn" data-act="reset" data-flags="--hunt">--hunt</button>
-          <button class="lab-btn" data-act="reset" data-flags="--network">--network</button>
-          <button class="lab-btn" data-act="reset" data-flags="--queue">--queue</button>
-          <button class="lab-btn lab-btn-danger" data-act="reset" data-flags="--db" data-confirm="1">--db (wipe)</button>
+          <button class="lab-btn lab-btn-danger" data-act="reset-all">Reset checked</button>
         </div>
       </div>
     </div>
@@ -1834,12 +1839,16 @@ function onLabClick(ev) {
   } else if (act === "flock-down") {
     labMsg(`flock down ${t.dataset.flock}…`);
     labAction(() => labPost("/api/lab/flock", { action: "down", name: t.dataset.flock }));
-  } else if (act === "reset") {
-    const flags = t.dataset.flags.split(" ");
-    const confirmNeeded = t.dataset.confirm === "1";
-    if (confirmNeeded && !window.confirm(`Run reset.sh ${flags.join(" ")}? This is destructive and wipes state.`)) return;
+  } else if (act === "reset-all") {
+    const boxes = Array.from(labBody.querySelectorAll(".lab-reset-flag:checked"));
+    if (!boxes.length) { labMsg("check at least one reset option", true); return; }
+    const flags = boxes.map((b) => b.value);
+    // reset.sh gates --db behind confirm (orchestrate.DESTRUCTIVE_RESET_FLAGS);
+    // pass confirm=true only when a destructive box is checked.
+    const destructive = boxes.some((b) => b.dataset.destructive === "1");
+    if (destructive && !window.confirm(`Run reset.sh ${flags.join(" ")}? This wipes soc.db and rebuilds containers.`)) return;
     labMsg(`reset ${flags.join(" ")}…`);
-    labAction(() => labPost("/api/lab/reset", { flags, confirm: confirmNeeded }));
+    labAction(() => labPost("/api/lab/reset", { flags, confirm: destructive }));
   }
 }
 
