@@ -1740,10 +1740,18 @@ function openAnalystLaunch() {
 
 function openAttackerLaunch() {
   const hp = (labConfig && labConfig.hunter) || {};
+  // Default the persona to what the active mode implies (northwind -> chatbot,
+  // everything else -> infra), but let the operator override. The run itself
+  // hard-fails a persona that doesn't match what's up, so a wrong pick is loud,
+  // not silent.
+  const mode = (labLastStatus && labLastStatus.mode) || "";
+  const personaDefault = mode === "northwind" ? "chatbot" : "infra";
+  const personaOpt = (v, lbl) => `<option value="${v}"${v === personaDefault ? " selected" : ""}>${lbl}</option>`;
   const card = openLabModal("Launch red-team attacker", `
     <div class="lab-form">
       <label>provider ${providerSelect("al-provider", hp.provider || "gmi")}</label>
       <label>model ${modelFieldHtml("al", hp.provider || "gmi", hp.model)}</label>
+      <label>persona <select id="al-persona">${personaOpt("infra", "infra (network / CVE)")}${personaOpt("chatbot", "chatbot (LLM app)")}<option value="auto">auto (from mode)</option></select></label>
       <label>max iterations <input id="al-maxiter" class="lab-input" type="number" placeholder="30"></label>
       <label>global token budget <input id="al-budget" class="lab-input" type="number" placeholder="2000000"></label>
       <label class="lab-toggle"><input id="al-loop" type="checkbox"> loop assess until done (--loop)</label>
@@ -1755,13 +1763,15 @@ function openAttackerLaunch() {
     const provider = card.querySelector("#al-provider").value;
     const model = readModel(card, "al");
     const extra = [];
+    const persona = card.querySelector("#al-persona").value;
+    if (persona) extra.push("--persona", persona);
     const mi = card.querySelector("#al-maxiter").value.trim();
     if (mi) extra.push("--max-iterations", mi);
     const b = card.querySelector("#al-budget").value.trim();
     if (b) extra.push("--global-token-budget", b);
     if (card.querySelector("#al-loop").checked) extra.push("--loop");
     closeLabModal();
-    labMsg(`launching attacker (${provider}${model ? "/" + model : ""})…`);
+    labMsg(`launching attacker [${persona}] (${provider}${model ? "/" + model : ""})…`);
     labAction(() => postProc({ name: "attacker", action: "restart", provider, model, extra }));
   });
 }
