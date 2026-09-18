@@ -199,6 +199,38 @@ _TARGETS = list(_MODE_CFG["targets"])
 GATED_TOOLS = _MODE_CFG["gated_tools"]
 ALLOWED_MSF_MODULES = _MODE_CFG["msf_modules"]
 
+
+def _resolve_persona():
+    """The attacker persona -- 'infra' (network/CVE targets) or 'chatbot'
+    (an LLM application). It shapes which system prompts and tool set the run
+    uses. Kept an EXPLICIT launch choice rather than silently inferred from the
+    active mode, so a stale/mismatched lab_mode can't quietly hand the wrong
+    persona to a run (the failure this was added for). Priority: an explicit
+    --persona flag (peeked from argv here because the prompt/tool selection is
+    built at import, before main() parses args), then SOC_REDTEAM_PERSONA, else
+    'auto' -> derived from whether the active mode is adapter-backed (today's
+    behavior, so an unflagged launch is unchanged). main() hard-fails a persona
+    that doesn't match what's actually up -- see the guard there. NOTE: this
+    does not yet let 'chatbot' point at an arbitrary target; the chatbot tools
+    are bound to the adapter backend (northwind_adapter), so chatbot still
+    requires an adapter-backed target to be up. A generic HTTP chatbot backend
+    is the larger 'agent manager' design, not this step."""
+    override = None
+    for i, a in enumerate(sys.argv):
+        if a == "--persona" and i + 1 < len(sys.argv):
+            override = sys.argv[i + 1]
+        elif a.startswith("--persona="):
+            override = a.split("=", 1)[1]
+    override = override or os.environ.get("SOC_REDTEAM_PERSONA")
+    if override in ("infra", "chatbot"):
+        return override
+    # 'auto' or anything unrecognized -> derive from the mode. (argparse rejects
+    # a genuinely bad --persona value later with a clean message.)
+    return "chatbot" if _MODE_CFG.get("adapter") else "infra"
+
+
+PERSONA = _resolve_persona()
+
 def _str_enum(values):
     """A string tool-parameter schema constrained to `values` -- but with the
     `enum` key OMITTED when `values` is empty. An empty `enum: []` is rejected
@@ -5225,6 +5257,14 @@ def main():
                           "level for --continue-assess -- always run 'none' first and escalate "
                           "only if the agent flails (REDTEAM_MODE_SPEC.md §5.3); runs at "
                           "different hint levels are not comparable.")
+    ap.add_argument("--persona", choices=["infra", "chatbot", "auto"], default="auto",
+                     help="attacker persona: 'infra' (network/CVE targets) or 'chatbot' "
+                          "(an LLM application). 'auto' (default) derives it from whether "
+                          "the active mode is adapter-backed, i.e. today's behavior. Must "
+                          "match what's actually up -- a chatbot run needs an adapter-backed "
+                          "target (e.g. northwind); a mismatch fails loudly at startup rather "
+                          "than silently running the wrong persona. (Resolved at import; this "
+                          "declaration is for --help and validation -- see _resolve_persona.)")
     ap.add_argument("--max-iterations", type=int, default=None,
                      help="override both stages' tool-call budget (default: "
                           f"recon={RECON_MAX_ITERATIONS}, assess={ASSESS_MAX_ITERATIONS})")
@@ -5304,6 +5344,27 @@ def main():
 
     conn = connect()
     print(f"[*] db: {DB_PATH}")
+
+    # Persona guard, before any housekeeping: the resolved PERSONA must match
+    # what's actually up. A 'chatbot' run needs an adapter-backed target
+    # (northwind_adapter) live; an 'infra' run needs a network/container mode.
+    # When --persona is 'auto' this is derived from the mode and so always
+    # agrees -- it only ever fires when an operator (or the dashboard dropdown)
+    # explicitly declared a persona that doesn't match the running mode. This
+    # turns the old silent-wrong-persona failure (stale lab_mode -> infra prompt
+    # while northwind is up) into a loud, early exit. Cheap subcommands
+    # (--stats/--audit/etc.) pass through under the default 'auto', which always
+    # matches.
+    if (PERSONA == "chatbot") != bool(_MODE_CFG.get("adapter")):
+        active = "adapter-backed (chatbot-shaped)" if _MODE_CFG.get("adapter") \
+            else "a network/container target (infra-shaped)"
+        print(f"[!] persona/target mismatch: --persona={PERSONA!r}, but the active mode "
+              f"({lab_modes.current_mode()!r}) is {active}. A 'chatbot' run needs an "
+              f"adapter-backed target (e.g. northwind) up; an 'infra' run needs a "
+              f"network mode. Bring up the matching mode, or pass the matching "
+              f"--persona / omit it for 'auto'.")
+        return
+
     # Adopt/clean up background jobs from a prior (possibly crashed) process
     # before anything else: reconcile supervisors that died, and kill orphans
     # that outlived their session and are still competing with Ollama for the
@@ -5418,6 +5479,7 @@ def main():
                   f"{'after %ds' % redteam_jobs.PROMOTE_AFTER_S if redteam_jobs.PROMOTE_AFTER_S else 'off'}")
         else:
             print("    background jobs: disabled (pass --background-jobs to enable detached crack jobs)")
+        print(f"    persona: {PERSONA}")
         print(f"    adapter: {'configured' if _MODE_CFG.get('adapter') else 'none (container-target mode)'}")
         print(f"    hint_level: {args.hint_level or 'none'}"
               + ("" if _MODE_CFG.get("adapter") else " (ignored -- container-target mode has no hint-level concept)"))
@@ -5443,7 +5505,7 @@ def main():
     session_id, attacker_ip = start_session(conn, provider_name, provider.model, hint_level=hint_level,
                                              background_jobs=args.background_jobs)
     _SESSION_BG_ENABLED[session_id] = args.background_jobs
-    print(f"[*] session {session_id} started, attacker_ip={attacker_ip}, "
+    print(f"[*] session {session_id} started, persona={PERSONA}, attacker_ip={attacker_ip}, "
           f"provider={provider_name} model={provider.model}")
 
     # Adapter-backed modes log in once here, on the fresh-campaign path only
