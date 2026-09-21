@@ -478,6 +478,67 @@ def save(spec: TargetSpec, dockerfile: str, raw: str | None = None) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# catalog
+# --------------------------------------------------------------------------- #
+
+def catalog_entries() -> list[dict]:
+    """Every saved target under targets/<id>/spec.json, newest first, with the
+    fields a picker needs: id, title, the CVEs, freshness (created_at + CVE
+    dates), and whether the image is built locally right now. This is the
+    committed, versioned catalog (spec.json + Dockerfile are tracked; the image
+    and build log are not -- rebuild a missing image with --from-spec <id>)."""
+    out = []
+    if not os.path.isdir(TARGETS_DIR):
+        return out
+    for tid in sorted(os.listdir(TARGETS_DIR)):
+        specp = os.path.join(TARGETS_DIR, tid, "spec.json")
+        if not os.path.exists(specp):
+            continue
+        try:
+            with open(specp) as f:
+                s = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        tag = (s.get("extra") or {}).get("image_tag") or f"soclab-td/{s.get('id', tid)}:latest"
+        out.append({
+            "id": s.get("id", tid),
+            "title": s.get("title", ""),
+            "foothold": (s.get("foothold") or {}).get("cve", ""),
+            "privesc": (s.get("privesc") or {}).get("cve", ""),
+            "created_at": s.get("created_at", ""),
+            "image_tag": tag,
+            "image_built": _image_built(tag),
+            "has_dockerfile": os.path.exists(os.path.join(TARGETS_DIR, tid, "Dockerfile")),
+        })
+    out.sort(key=lambda e: e["created_at"], reverse=True)
+    return out
+
+
+def _image_built(tag: str) -> bool:
+    try:
+        r = subprocess.run(["docker", "image", "inspect", tag],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def print_catalog() -> None:
+    entries = catalog_entries()
+    if not entries:
+        print(f"[designer] catalog empty (no spec.json under {TARGETS_DIR}/). "
+              "Mint one with --stage all.")
+        return
+    print(f"{'ID':<38} {'BUILT':<6} {'FOOTHOLD':<16} {'PRIVESC':<16} TITLE")
+    print("-" * 110)
+    for e in entries:
+        built = "yes" if e["image_built"] else ("recipe" if e["has_dockerfile"] else "NO")
+        print(f"{e['id']:<38} {built:<6} {e['foothold']:<16} {e['privesc']:<16} {e['title'][:40]}")
+    print(f"\n{len(entries)} target(s). Stand one up: ./lab-mode.sh switch dealer <image_tag>  "
+          "(rebuild a missing image first: designer.py --from-spec <id> --no-... )")
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -504,8 +565,14 @@ def main() -> None:
                     help="after a good build, wire the target into the lab via the dealer "
                          "range (soclab-dealer bridge + Suricata + Wazuh). NB: switches the "
                          "active lab mode to dealer.")
+    ap.add_argument("--list-catalog", action="store_true",
+                    help="list the committed target catalog (targets/<id>/spec.json) and exit")
     args = ap.parse_args()
     load_dotenv(args.env_file)
+
+    if args.list_catalog:
+        print_catalog()
+        return
 
     if args.from_spec:
         path = args.from_spec

@@ -79,3 +79,41 @@ research), it can instantiate that too — the designer does the plumbing, not t
 vuln discovery.
 
 `targets/` is generated output and gitignored.
+
+## Catalog (build once, reuse many)
+
+Designing + building a target is the expensive, non-deterministic part (an LLM
+design call + docker build + repair). Reusing a built image is free and
+deterministic. So the designer is a **factory** you run occasionally to *mint*
+targets, and the built targets live in a **catalog** you reuse across runs —
+which is also what makes a run reproducible (fix the target, vary the agent).
+
+**What's committed:** each `targets/<id>/` keeps `spec.json` (the chain, CVEs,
+and the operator answer-key / oracle) and `Dockerfile` (the pinned rebuild
+recipe) — both git-tracked. The built image and build log are **not** committed
+(regenerable / machine-specific).
+
+```bash
+# see the catalog (built? + freshness):
+python3 target-designer/designer.py --list-catalog
+
+# rebuild a catalog entry's image from its committed Dockerfile (fresh machine,
+# pruned cache) -- deterministic, uses the build->verify->repair loop:
+python3 target-designer/designer.py --from-spec <id> --env-file /home/josh/soc-lab/.env
+
+# stand one up in the lab (reuses the dealer path: opaque host on the internal
+# soclab-dealer bridge + Suricata + Wazuh):
+./lab-mode.sh switch dealer <image_tag>
+```
+
+Designed targets also appear in the **dealer catalog** (`labctl`/dashboard
+picker) alongside Vulhub entries — `orchestrate.dealer_catalog()` walks
+`targets/*/spec.json` and lists them with `kind: "designed"`. The dealer
+`resolve()` recognizes a locally-present image, so a namespaced tag like
+`soclab-td/<id>` stands up as an image (not misread as a Vulhub `software/CVE`
+path).
+
+**Freshness matters.** A designed target's value is that its CVEs postdate model
+training data — that decays. `spec.json` carries the CVE ids and `created_at`;
+retire and re-mint entries as they age into training sets (or when you upgrade
+the attacker to a model trained past those CVEs).

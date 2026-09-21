@@ -1,3 +1,11 @@
-targets/
 __pycache__/
 *.pyc
+
+# targets/ holds generated per-target artifacts. Track ONLY the catalog recipe
+# (spec.json + Dockerfile) so the catalog is versioned + portable and its oracle
+# travels with it; ignore the regenerable/large/machine-specific bits (build log,
+# raw model output, debug dumps, any staged files).
+targets/*/build.log
+targets/*/design.raw.txt
+targets/*/design.raw.json
+targets/_last_design_failure.txt
