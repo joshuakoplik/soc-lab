@@ -26,6 +26,10 @@ VALID_MODES = ("easy", "hard", "wordpress", "northwind", "dealer")
 DESTRUCTIVE_RESET_FLAGS = {"--db", "--all"}
 
 DEALER_CACHE = os.path.join(config.ROOT, "dealer-range", ".cache", "vulhub")
+# Locally-built target-designer targets (committed spec.json + Dockerfile). These
+# surface in the dealer catalog alongside Vulhub entries -- a designed image is a
+# plain image ref the dealer path already accepts (see dealer-range/up.py resolve).
+DESIGNED_TARGETS_DIR = os.path.join(config.ROOT, "target-designer", "targets")
 NPC_TEMPLATES_DIR = os.path.join(NPC_DIR, "templates")
 NPC_RUN_DIR = os.path.join(NPC_DIR, ".run")
 
@@ -246,7 +250,65 @@ def _read_readme_meta(entry_dir):
     return None, None
 
 
+def _designed_catalog_entries():
+    """target-designer targets as dealer catalog entries. Cheap dir-walk, not
+    memoized (the catalog is small). `target` is the image ref you stand up with
+    `up dealer <target>`; `image_built` says whether it's present locally now
+    (rebuild a missing one with `designer.py --from-spec <id>`)."""
+    entries = []
+    if not os.path.isdir(DESIGNED_TARGETS_DIR):
+        return entries
+    for tid in sorted(os.listdir(DESIGNED_TARGETS_DIR)):
+        specp = os.path.join(DESIGNED_TARGETS_DIR, tid, "spec.json")
+        if not os.path.exists(specp):
+            continue
+        try:
+            with open(specp) as f:
+                s = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        tag = (s.get("extra") or {}).get("image_tag") or f"soclab-td/{s.get('id', tid)}:latest"
+        fh = (s.get("foothold") or {}).get("cve", "")
+        pe = (s.get("privesc") or {}).get("cve", "")
+        built = _image_present(tag)
+        entries.append({
+            "target": tag,
+            "kind": "designed",
+            "software": "target-designer",
+            "cve": f"{fh}->{pe}" if pe else fh,
+            "title": s.get("title", s.get("id", tid)),
+            "description": (s.get("difficulty_notes") or "")[:200],
+            "image_built": built,
+            "created_at": s.get("created_at", ""),
+        })
+    entries.sort(key=lambda e: e["created_at"], reverse=True)
+    return entries
+
+
+def _image_present(ref):
+    try:
+        r = subprocess.run(["docker", "image", "inspect", ref],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def dealer_catalog(force=False):
+    """The dealer catalog: locally-built target-designer targets FIRST (freshest,
+    most relevant), then the Vulhub catalog from the local cache. Each entry:
+    {target, kind, software, cve, title, description, ...}. `cached` reflects the
+    Vulhub clone; designed targets are always available. See _vulhub_catalog for
+    the Vulhub half."""
+    vh = _vulhub_catalog(force)
+    designed = _designed_catalog_entries()
+    vh_entries = [{**e, "kind": "vulhub"} for e in vh["entries"]]
+    entries = designed + vh_entries
+    return {"cached": vh["cached"], "count": len(entries),
+            "designed": len(designed), "entries": entries}
+
+
+def _vulhub_catalog(force=False):
     """The Vulhub catalog available in the local cache, with light metadata.
 
     Returns {cached, count, entries:[{target, software, cve, title, description}]}.

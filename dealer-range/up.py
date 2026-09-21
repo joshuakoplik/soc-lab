@@ -27,6 +27,7 @@ import json
 import os
 import secrets
 import string
+import subprocess
 import sys
 
 try:
@@ -66,6 +67,16 @@ def find_compose(d):
     return None
 
 
+def _image_exists_locally(ref):
+    """True if `ref` is a docker image already present in the local daemon."""
+    try:
+        r = subprocess.run(["docker", "image", "inspect", ref],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def resolve(target):
     """(kind, compose_file, source_dir) for a Vulhub path, or ('image', None, None)."""
     cand = os.path.normpath(os.path.join(CACHE, target))
@@ -74,6 +85,12 @@ def resolve(target):
         if cf:
             return ("vulhub", cf, cand)
         die(f"'{target}' is a Vulhub directory but has no docker-compose file")
+    # A docker image already present locally (e.g. a target-designer build,
+    # soclab-td/<id>) is an IMAGE target, not a Vulhub path -- check the daemon
+    # before treating a "/"-containing ref as "software/CVE", which would
+    # otherwise wrongly die() below.
+    if _image_exists_locally(target):
+        return ("image", None, None)
     if "/" in target and os.path.isdir(CACHE):
         top = target.split("/")[0]
         near = sorted(
