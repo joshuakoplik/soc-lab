@@ -382,7 +382,8 @@ def _obj(props, required):
 # specs the hunter exposes so behaviour (and fencing) is identical.
 _REUSED_HUNT_TOOL_NAMES = {
     "poll_feed", "pivot_events", "get_candidate", "query_events",
-    "get_event_details", "enrich_ip", "correlate", "get_llm_transcript",
+    "get_event_details", "enrich_ip", "correlate", "explain_signature",
+    "get_llm_transcript",
 }
 _REUSED_HUNT_TOOLS = [t for t in hunt_agent.TOOLS if t["name"] in _REUSED_HUNT_TOOL_NAMES]
 
@@ -510,6 +511,8 @@ def dispatch_tool(conn, session_id, hunt_id, name, tool_input, incident_id=None)
             return hunt_agent.tool_enrich_ip(conn, ti.get("src_ip")), False
         if name == "correlate":
             return hunt_agent.tool_correlate(conn, ti.get("src_ip")), False
+        if name == "explain_signature":
+            return hunt_agent.tool_explain_signature(ti.get("source"), ti.get("signature_id")), False
         if name == "get_llm_transcript":
             return hunt_agent.tool_get_llm_transcript(conn, ti.get("session_id")), False
 
