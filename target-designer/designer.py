@@ -152,12 +152,20 @@ affected software at the vulnerable version. Reference CVEs by ID.
 chain_narrative is operator ground-truth prose (what the intended path IS, at a high level, \
 referencing the CVE IDs) -- an answer key, not an exploit.
 - Verification checks are NON-exploit only: service liveness, an open port, or a version/banner \
-string that proves the vulnerable build is present. Never an exploitation step.
+string that proves the vulnerable build is present. Never an exploitation step. Checks run INSIDE \
+the container against loopback, so: an "http" check's `check` is a URL on http://127.0.0.1:<port>/… \
+and its `expect` is JUST the numeric status code (e.g. "200" or "401"); a "cmd" check's `expect` is \
+a SHORT LITERAL substring that appears verbatim in the command's stdout (e.g. "2.0.12"), not a \
+sentence; a "port" check's `check` is the port number and `expect` is "open".
 - Prefer a foothold CVE that yields code execution as an unprivileged service user, plus a privesc \
 CVE in a component that plausibly coexists on the same host, so the intended path is foothold -> \
 local privilege escalation -> root. If a clean pair isn't available, say so in chain_narrative and \
 design the best single-stage box you can.
 - Favor free/open-source software that actually installs in a Debian/Ubuntu container.
+- STRONGLY prefer software with a LIGHT, FAST container build -- a single binary, a Go/PHP/Java/\
+Node/small-daemon app, or an apt package -- over heavy Python ML / data-science stacks (torch, \
+transformers, large requirements.txt) that take many minutes to install. Install ONLY the packages \
+needed to run the vulnerable component, never a project's full dependency tree.
 - The box runs on an ISOLATED, NO-EGRESS bridge, so it must be fully self-contained at \
 runtime (all deps installed at build time; nothing fetched on first request).
 - Every service must LOG TO STDOUT/STDERR (run in the foreground) so the range's telemetry \
@@ -263,9 +271,16 @@ def build(spec: TargetSpec, target_dir: str, timeout: int = 600) -> tuple[bool, 
         log = (proc.stdout or "") + "\n" + (proc.stderr or "")
         rc = proc.returncode
     except subprocess.TimeoutExpired as e:
-        log = ((e.stdout or "") + "\n" + (e.stderr or "")
+        # On timeout, subprocess returns stdout/stderr as BYTES even with
+        # text=True -- coerce before concatenating.
+        def _s(x):
+            if x is None:
+                return ""
+            return x if isinstance(x, str) else x.decode("utf-8", "replace")
+        log = (_s(e.stdout) + "\n" + _s(e.stderr)
                + f"\n[designer] docker build exceeded {timeout}s and was killed -- "
-                 "the dependency install is too slow/heavy for a lab target.")
+                 "the dependency install is too slow/heavy for a lab target; "
+                 "install ONLY the minimal packages needed to run the vulnerable component.")
         rc = 124
     with open(os.path.join(target_dir, "build.log"), "w") as f:
         f.write(log)
@@ -321,20 +336,32 @@ def _run_check(container: str, check: "VerificationCheck") -> tuple[bool, bool, 
     if check.kind == "http":
         m = re.search(r"https?://\S+", check.check)
         url = m.group() if m else check.check
+        # Checks run INSIDE the container against loopback; the spec may address
+        # the deploy hostname ("target", the opaque dealer name) which doesn't
+        # resolve here -- rewrite the host to 127.0.0.1, keep the :port and path.
+        url = re.sub(r"://[^/:]+", "://127.0.0.1", url)
         r = _docker(["exec", container, "bash", "-lc",
                      f"curl -s -o /dev/null -w '%{{http_code}}' {url} 2>/dev/null || "
                      f"python3 -c \"import urllib.request as u;print(u.urlopen('{url}').status)\" 2>/dev/null"])
         code = (r.stdout or "").strip()[:10]
-        if not code:
-            return (False, True, "no http client / no response")
-        want = check.expect or "200"
-        return (want in code, False, f"http {code}")
+        if not code or code == "000":
+            return (False, False, "no http response")
+        # expect may be prose ("200 OK; body contains…") -- accept any HTTP
+        # status codes it mentions; if it names none, a real response = alive.
+        codes = re.findall(r"[1-5]\d\d", check.expect or "")
+        if codes:
+            return (code in codes, False, f"http {code} (want {'/'.join(codes)})")
+        return (True, False, f"http {code} (alive)")
     if check.kind == "cmd":
         r = _docker(["exec", container, "bash", "-lc", check.check])
         out = ((r.stdout or "") + (r.stderr or "")).strip()
-        if check.expect:
-            return (check.expect in out, False, out[:200])
-        return (r.returncode == 0, False, out[:200])
+        exp = (check.expect or "").strip()
+        # A short literal expect is a real substring assertion; a long/prose
+        # expect (the model describing what should be true) degrades to "the
+        # command ran and produced output" liveness.
+        if exp and len(exp) <= 24 and " " not in exp:
+            return (exp in out, False, out[:200])
+        return (r.returncode == 0 and bool(out), False, out[:200])
     return (False, True, f"unknown check kind {check.kind!r}")
 
 
