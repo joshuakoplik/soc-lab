@@ -115,6 +115,13 @@ DO_HUNT=0
 DO_STATUS=0
 KILL_FIRST=1
 ANY_FLAG=0
+# Tracks whether any state-mutating stage failed. reset.sh deliberately does NOT
+# `set -e` (many steps -- docker rm of an absent container, pkill, etc. -- exit
+# non-zero as a normal outcome), so a genuinely failed stage would otherwise pass
+# silently and the script would still finish "successfully". A wiped-but-not-wiped
+# soc.db from exactly this hole bit us live. Each critical stage below sets this
+# and the script exits non-zero with a loud summary at the end.
+RESET_FAILED=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -386,7 +393,12 @@ if [ "$DO_DB" = "1" ]; then
   # flock manifests by `npc-range/npcctl.py reconcile` (also run by npcctl
   # status/up), so a --db wipe just leaves assets empty until the next npcctl
   # invocation. That's intentional: flock lifecycle is independent of reset.sh.
-  "$PY" pipeline/reset_lab.py --db
+  if ! "$PY" pipeline/reset_lab.py --db; then
+    echo "[reset] ✗ ERROR: soc.db wipe FAILED (reset_lab.py --db exited non-zero) --" >&2
+    echo "        the DB was NOT reset. See the error above; re-run once nothing is" >&2
+    echo "        holding a write lock on soc.db." >&2
+    RESET_FAILED=1
+  fi
 
   # A running `ingest.py --follow` held the OLD soc.db inode open across this
   # unlink+recreate; it would keep writing events into the detached ghost file
@@ -429,10 +441,27 @@ fi
 
 if [ "$DO_QUEUE" = "1" ]; then
   echo "[reset] reseeding ingest queue..."
-  "$PY" pipeline/reset_lab.py --queue
+  if ! "$PY" pipeline/reset_lab.py --queue; then
+    echo "[reset] ✗ ERROR: ingest queue reseed FAILED (reset_lab.py --queue exited non-zero)." >&2
+    RESET_FAILED=1
+  fi
 fi
 
 if [ "$DO_HUNT" = "1" ]; then
   echo "[reset] clearing standing hunt state (sessions/incidents/notebook/leads/cursor)..."
-  "$PY" pipeline/reset_lab.py --hunt
+  if ! "$PY" pipeline/reset_lab.py --hunt; then
+    echo "[reset] ✗ ERROR: hunt-state clear FAILED (reset_lab.py --hunt exited non-zero)." >&2
+    RESET_FAILED=1
+  fi
+fi
+
+# Surface any failed state-mutating stage loudly, and exit non-zero so a caller
+# (labctl/orchestrate.reset -> the dashboard) sees the failure instead of a
+# false success. Without this, a stage that silently no-ops (a locked-DB --db
+# wipe was the live case) leaves the operator believing the reset happened.
+if [ "$RESET_FAILED" = "1" ]; then
+  echo "" >&2
+  echo "[reset] ✗ one or more stages FAILED -- state may be only partially reset." >&2
+  echo "        Fix the error(s) above and re-run the affected flag(s)." >&2
+  exit 1
 fi
