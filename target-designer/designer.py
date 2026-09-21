@@ -8,8 +8,12 @@ Pipeline stages (run one with --stage, or the lot with --stage all):
   design    -> an LLM composes ONE foothold + ONE privesc into a single-host
                chain scenario and a docker build recipe (a TargetSpec)
   generate  -> assemble the Dockerfile from the spec
-  build     -> docker build the vulnerable image
+  build     -> build -> verify -> repair loop: docker build, run the non-exploit
+               checks, and feed any build/verify failure back to the model for a
+               corrected Dockerfile, up to --max-repair attempts
   verify    -> confirm the box stood up (liveness + vulnerable-version presence)
+  deploy    -> (--deploy) wire it into the lab via the dealer range: soclab-dealer
+               bridge + Suricata + the permanent Wazuh /lab-logs/dealer buckets
   save      -> persist spec.json + Dockerfile + build log under targets/<id>/
 
 SCOPE / SAFETY (see README.md): this instantiates the vulnerable ENVIRONMENT
@@ -154,6 +158,11 @@ CVE in a component that plausibly coexists on the same host, so the intended pat
 local privilege escalation -> root. If a clean pair isn't available, say so in chain_narrative and \
 design the best single-stage box you can.
 - Favor free/open-source software that actually installs in a Debian/Ubuntu container.
+- The box runs on an ISOLATED, NO-EGRESS bridge, so it must be fully self-contained at \
+runtime (all deps installed at build time; nothing fetched on first request).
+- Every service must LOG TO STDOUT/STDERR (run in the foreground) so the range's telemetry \
+wiring captures it into the SIEM. Prefer a foreground entrypoint that starts each service \
+without backgrounding its logs to a file only.
 
 Return ONE JSON object, no prose around it, with EXACTLY these keys:
 {
@@ -241,18 +250,194 @@ def generate_dockerfile(spec: TargetSpec) -> str:
     return "\n".join(deduped) + "\n"
 
 
-def build(spec: TargetSpec, target_dir: str, timeout: int = 1800) -> tuple[bool, str]:
-    """docker build the vulnerable image. Returns (ok, log tail)."""
+def build(spec: TargetSpec, target_dir: str, timeout: int = 600) -> tuple[bool, str]:
+    """docker build the vulnerable image. Returns (ok, log tail). A build that
+    exceeds `timeout` is a REPAIRABLE failure (return False with an explicit
+    timeout note), not a crash -- an over-heavy dependency install is the most
+    common one, and repair should slim it rather than wait 30 minutes."""
     tag = f"soclab-td/{spec.id}:latest"
-    proc = subprocess.run(
-        ["docker", "build", "-t", tag, "-f", os.path.join(target_dir, "Dockerfile"), target_dir],
-        capture_output=True, text=True, timeout=timeout)
-    log = proc.stdout + "\n" + proc.stderr
+    try:
+        proc = subprocess.run(
+            ["docker", "build", "-t", tag, "-f", os.path.join(target_dir, "Dockerfile"), target_dir],
+            capture_output=True, text=True, timeout=timeout)
+        log = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        rc = proc.returncode
+    except subprocess.TimeoutExpired as e:
+        log = ((e.stdout or "") + "\n" + (e.stderr or "")
+               + f"\n[designer] docker build exceeded {timeout}s and was killed -- "
+                 "the dependency install is too slow/heavy for a lab target.")
+        rc = 124
     with open(os.path.join(target_dir, "build.log"), "w") as f:
         f.write(log)
     spec.extra["image_tag"] = tag
-    spec.extra["build_ok"] = proc.returncode == 0
-    return proc.returncode == 0, log[-2000:]
+    spec.extra["build_ok"] = rc == 0
+    return rc == 0, log[-2500:]
+
+
+def _docker(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+
+
+def run_and_verify(spec: TargetSpec, tag: str, warmup_s: int = 12,
+                   retries: int = 3) -> tuple[list[dict], str]:
+    """Start the image on a NO-EGRESS throwaway container and run the spec's
+    NON-EXPLOIT checks (port open / http status / version-or-config string) via
+    docker exec against loopback inside the container. Returns (results, logs).
+    Each result: {name, ok, inconclusive, detail}. Never runs an exploit."""
+    name = f"td-verify-{spec.id[-12:]}"
+    _docker(["rm", "-f", name])
+    run = _docker(["run", "-d", "--name", name, "--network", "none", tag])
+    if run.returncode != 0:
+        return ([{"name": "container-start", "ok": False, "inconclusive": False,
+                  "detail": (run.stderr or run.stdout)[-800:]}], "")
+    results: list[dict] = []
+    try:
+        for check in spec.verification:
+            ok = inconc = False
+            detail = ""
+            for _ in range(retries):
+                ok, inconc, detail = _run_check(name, check)
+                if ok or inconc:
+                    break
+                time.sleep(warmup_s / retries)
+            results.append({"name": check.name, "ok": ok, "inconclusive": inconc, "detail": detail})
+        logs = (_docker(["logs", "--tail", "80", name]).stdout or "")[-3000:]
+    finally:
+        _docker(["rm", "-f", name])
+    return results, logs
+
+
+def _run_check(container: str, check: "VerificationCheck") -> tuple[bool, bool, str]:
+    """(ok, inconclusive, detail) for one non-exploit check."""
+    import re
+    if check.kind == "port":
+        m = re.search(r"\d+", check.check)
+        if not m:
+            return (False, True, "no port in check")
+        port = m.group()
+        r = _docker(["exec", container, "bash", "-lc",
+                     f"timeout 3 bash -c '</dev/tcp/127.0.0.1/{port}' && echo OPEN || echo SHUT"])
+        return ("OPEN" in (r.stdout or ""), False, (r.stdout or r.stderr).strip()[:200])
+    if check.kind == "http":
+        m = re.search(r"https?://\S+", check.check)
+        url = m.group() if m else check.check
+        r = _docker(["exec", container, "bash", "-lc",
+                     f"curl -s -o /dev/null -w '%{{http_code}}' {url} 2>/dev/null || "
+                     f"python3 -c \"import urllib.request as u;print(u.urlopen('{url}').status)\" 2>/dev/null"])
+        code = (r.stdout or "").strip()[:10]
+        if not code:
+            return (False, True, "no http client / no response")
+        want = check.expect or "200"
+        return (want in code, False, f"http {code}")
+    if check.kind == "cmd":
+        r = _docker(["exec", container, "bash", "-lc", check.check])
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if check.expect:
+            return (check.expect in out, False, out[:200])
+        return (r.returncode == 0, False, out[:200])
+    return (False, True, f"unknown check kind {check.kind!r}")
+
+
+REPAIR_SYSTEM = """You are fixing the Dockerfile for an intentionally-vulnerable LAB TARGET so it \
+BUILDS and RUNS. You are given the target spec, the current Dockerfile, and the failure output \
+(a docker build error, or a runtime verification failure). Return corrected build steps.
+
+CRITICAL: do NOT 'fix' the vulnerability or change the pinned vulnerable versions/commits -- the \
+box is SUPPOSED to be vulnerable. Only change what stops the image building or the services coming \
+up (wrong package name, missing dependency, bad path, wrong download URL, entrypoint that exits, a \
+service that backgrounds instead of logging to stdout, needing egress at runtime, etc.). Keep every \
+service logging to stdout/stderr and fully self-contained (no network at runtime).
+
+Return ONE JSON object, no prose: {"base_image": str, "dockerfile_steps": [str], "notes": str}
+(omit base_image to keep it). dockerfile_steps is the FULL corrected list of RUN/COPY/ENV/EXPOSE/CMD \
+lines, no FROM line."""
+
+
+def repair(spec: TargetSpec, dockerfile: str, failure: str, model: str) -> TargetSpec:
+    """One LLM repair turn: given the failure, return a spec with corrected
+    build steps. Preserves the CVEs/vulnerable versions."""
+    user = (
+        f"TARGET: {spec.title}\nCVEs: foothold {spec.foothold.cve} ({spec.foothold.product} "
+        f"{spec.foothold.version}), privesc {spec.privesc.cve} ({spec.privesc.product} "
+        f"{spec.privesc.version})\n\nCURRENT DOCKERFILE:\n{dockerfile}\n\n"
+        f"FAILURE OUTPUT:\n{failure[-6000:]}\n\nReturn the corrected JSON."
+    )
+    raw = llm_complete(REPAIR_SYSTEM, user, model=model)
+    d = extract_json(raw)
+    if d.get("base_image"):
+        spec.base_image = d["base_image"]
+    if d.get("dockerfile_steps"):
+        spec.dockerfile_steps = list(d["dockerfile_steps"])
+    spec.extra.setdefault("repair_notes", []).append(d.get("notes", ""))
+    return spec
+
+
+def run_build_repair(spec: TargetSpec, out: str, model: str, max_attempts: int = 4,
+                     do_verify: bool = True, build_timeout: int = 600) -> tuple[bool, int]:
+    """build -> (run + verify) -> repair on failure -> retry, up to max_attempts.
+    Persists the Dockerfile + build log each attempt and the outcome into
+    spec.json. Returns (ok, attempts_used)."""
+    for attempt in range(1, max_attempts + 1):
+        dockerfile = generate_dockerfile(spec)
+        with open(os.path.join(out, "Dockerfile"), "w") as f:
+            f.write(dockerfile)
+        print(f"[designer]   attempt {attempt}/{max_attempts}: docker build (cap {build_timeout}s) …")
+        ok, tail = build(spec, out, timeout=build_timeout)
+        if not ok:
+            print(f"[designer]   build FAILED (see {out}/build.log)")
+            failure = "DOCKER BUILD FAILED:\n" + tail
+        elif do_verify:
+            print(f"[designer]   build OK; verifying (non-exploit liveness/version) …")
+            results, logs = run_and_verify(spec, spec.extra["image_tag"])
+            fails = [r for r in results if not r["ok"] and not r["inconclusive"]]
+            for r in results:
+                mark = "ok" if r["ok"] else ("??" if r["inconclusive"] else "FAIL")
+                print(f"[designer]     [{mark}] {r['name']}: {r['detail'][:80]}")
+            spec.extra["verification_results"] = results
+            if not fails:
+                spec.extra["status"] = "built+verified"
+                spec.save(TARGETS_DIR)
+                return True, attempt
+            failure = ("BUILD OK but VERIFICATION FAILED:\n"
+                       + "\n".join(f"- {r['name']}: {r['detail']}" for r in fails)
+                       + f"\n\nCONTAINER LOGS:\n{logs}")
+        else:
+            spec.extra["status"] = "built"
+            spec.save(TARGETS_DIR)
+            return True, attempt
+        if attempt == max_attempts:
+            break
+        print(f"[designer]   repairing via {model} …")
+        spec = repair(spec, dockerfile, failure, model)
+        spec.save(TARGETS_DIR)
+    spec.extra["status"] = "build-repair-exhausted"
+    spec.save(TARGETS_DIR)
+    return False, max_attempts
+
+
+def deploy_via_dealer(tag: str, repo_root: str, do_wire: bool = True) -> bool:
+    """Wire a built target into the lab by handing the image to the dealer range
+    -- reusing its opaque-hostname standup on the internal soclab-dealer bridge
+    and wire.py (Suricata + the permanent Wazuh /lab-logs/dealer buckets). This
+    is the SAME path `lab-mode.sh switch dealer <image-ref>` takes, so no
+    parallel wiring. NB: this switches the lab's active mode to dealer and tears
+    down whatever else is up -- caller confirms.
+
+    cwd pinned to repo_root (nested compose cwd-drift is a known trap)."""
+    lab_mode = os.path.join(repo_root, "lab-mode.sh")
+    print(f"[designer]   deploy: ./lab-mode.sh switch dealer {tag}")
+    p = subprocess.run([lab_mode, "switch", "dealer", tag], cwd=repo_root,
+                       capture_output=True, text=True, timeout=900)
+    print(p.stdout[-1500:])
+    if p.returncode != 0:
+        print(f"[designer]   deploy FAILED:\n{p.stderr[-800:]}")
+        return False
+    # lab-mode.sh's dealer path already runs `make -C dealer-range wire`; keep an
+    # explicit wire here as a belt-and-suspenders no-op re-run if requested.
+    if do_wire:
+        subprocess.run(["make", "-C", os.path.join(repo_root, "dealer-range"), "wire"],
+                       cwd=repo_root, capture_output=True, text=True, timeout=600)
+    return True
 
 
 def save(spec: TargetSpec, dockerfile: str, raw: str | None = None) -> str:
@@ -278,8 +463,38 @@ def main() -> None:
     ap.add_argument("--env-file", default=os.path.join(os.path.dirname(ROOT), ".env"),
                     help="path to .env with GMI_API_KEY (default: repo-root .env)")
     ap.add_argument("--no-build", action="store_true", help="stop before docker build")
+    ap.add_argument("--max-repair", type=int, default=4,
+                    help="max build->verify->repair attempts (default 4)")
+    ap.add_argument("--build-timeout", type=int, default=600,
+                    help="per-attempt docker build cap in seconds; a timeout is a repairable "
+                         "failure (repair slims over-heavy deps), default 600")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="accept a clean build; skip the runtime non-exploit verification")
+    ap.add_argument("--from-spec", default=None,
+                    help="skip discover+design: load an existing targets/<id>/spec.json (by id or "
+                         "path) and run build->verify->repair on it")
+    ap.add_argument("--deploy", action="store_true",
+                    help="after a good build, wire the target into the lab via the dealer "
+                         "range (soclab-dealer bridge + Suricata + Wazuh). NB: switches the "
+                         "active lab mode to dealer.")
     args = ap.parse_args()
     load_dotenv(args.env_file)
+
+    if args.from_spec:
+        path = args.from_spec
+        if not path.endswith(".json"):
+            path = os.path.join(TARGETS_DIR, path, "spec.json")
+        from spec import TargetSpec as _TS
+        spec = _TS.from_dict(json.load(open(path)))
+        out = os.path.dirname(path)
+        print(f"[designer] from-spec: {spec.id} ({spec.title})")
+        ok, attempts = run_build_repair(spec, out, args.model, max_attempts=args.max_repair, build_timeout=args.build_timeout,
+                                        do_verify=not args.no_verify)
+        print(f"[designer]   {'BUILT' if ok else 'FAILED'} after {attempts} attempt(s); "
+              f"image={spec.extra.get('image_tag', '-')}")
+        if ok and args.deploy:
+            deploy_via_dealer(spec.extra["image_tag"], os.path.dirname(ROOT))
+        return
 
     print(f"[designer] discover: recent CVEs (last {args.days}d, CVSS>={args.min_cvss})")
     foothold, privesc = discover(args.days, args.min_cvss)
@@ -303,12 +518,18 @@ def main() -> None:
         print(f"[designer] (stopping before build; Dockerfile written to {out}/Dockerfile)")
         return
 
-    print(f"[designer] build: docker build {spec.id} …")
-    ok, tail = build(spec, out)
-    spec.save(TARGETS_DIR)  # persist build result into spec.json
-    print(f"[designer]   build {'OK' if ok else 'FAILED'} (log: {out}/build.log)")
+    print(f"[designer] build: build->verify->repair (max {args.max_repair} attempts) …")
+    ok, attempts = run_build_repair(spec, out, args.model, max_attempts=args.max_repair, build_timeout=args.build_timeout,
+                                    do_verify=not args.no_verify)
+    print(f"[designer]   {'BUILT' if ok else 'FAILED'} after {attempts} attempt(s); "
+          f"image={spec.extra.get('image_tag', '-')} (log: {out}/build.log)")
     if not ok:
-        print(tail)
+        print(f"[designer]   giving up -- inspect {out}/ and re-run with a higher --max-repair")
+        return
+    if args.deploy:
+        repo_root = os.path.dirname(ROOT)
+        print(f"[designer] deploy: wiring {spec.id} into the lab (dealer range) …")
+        deploy_via_dealer(spec.extra["image_tag"], repo_root)
 
 
 if __name__ == "__main__":
