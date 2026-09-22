@@ -1147,6 +1147,18 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 .map-sweep { fill: none; stroke-width: 2; opacity: 0.8; animation: mapSweep 1.2s ease-out forwards; }
 @keyframes mapSweep { 0% { r: 20; opacity: 0.8; } 100% { r: 340; opacity: 0; } }
 
+/* continuous "current activity" flow -- a moving dashed stream on the active edge,
+   so the current step reads as ongoing until the next one replaces it (color set
+   inline by map.js to match the activity). */
+.map-edge.flowing { stroke-width: 3; opacity: 0.95; stroke-dasharray: 5 9; animation: mapFlow 0.5s linear infinite; }
+@keyframes mapFlow { to { stroke-dashoffset: -14; } }
+
+/* persistent node pulses while an activity is live (not one-shot) */
+.map-node.under-attack .node-shape { animation: mapUnderAttack 0.9s ease-in-out infinite; }
+.map-node.soc-active .node-shape   { animation: mapSocActive 1.1s ease-in-out infinite; }
+@keyframes mapUnderAttack { 0%,100% { stroke-width: 2; } 50% { stroke-width: 5; filter: drop-shadow(0 0 6px currentColor); } }
+@keyframes mapSocActive   { 0%,100% { stroke-width: 2; } 50% { stroke-width: 5; filter: drop-shadow(0 0 7px #63e6c2); } }
+
 /* caption + legend */
 .map-caption { font: 600 13px ui-monospace, monospace; color: #9fb2d6; min-height: 20px;
   padding: 6px 12px; background: #0a1122; border: 1px solid #16243f; border-radius: 8px; }
@@ -1155,6 +1167,27 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 .map-caption .cap-arrow { color: #55688a; }
 .map-caption .cap-target { color: #7fb0ff; }
 .map-caption .cap-cmd { color: #b7c6e6; opacity: 0.85; }
+
+/* attacker (top) / defender (bottom) caption rows -- each shows the CURRENT action
+   for that side and persists until the next one replaces it */
+.map-caption-row { display: flex; align-items: stretch; gap: 8px; }
+.map-caption-row .map-caption { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; display: flex; align-items: center; }
+.cap-side { flex: none; display: flex; align-items: center; font: 700 10px system-ui, sans-serif;
+  letter-spacing: 0.08em; padding: 0 10px; border-radius: 8px; }
+.cap-side.atk { color: #ff9a70; background: #2a120c; border: 1px solid #7a3320; }
+.cap-side.def { color: #63e6c2; background: #082019; border: 1px solid #1d5346; }
+.map-caption.def { color: #9fd8cc; }
+.map-caption.def .cap-kind { font-weight: 700; color: #63e6c2; }
+.map-caption.def .cap-detail { color: #b7c6e6; opacity: 0.85; }
+.map-caption.def-detect   .cap-kind { color: #5bd0ff; }
+.map-caption.def-alert    .cap-kind { color: #63e6c2; }
+.map-caption.def-incident .cap-kind { color: #ff9a4d; }
+.map-caption.def-page     .cap-kind { color: #ffcf5b; }
+.map-caption.def-block    .cap-kind { color: #ff4d6d; }
+.map-caption.def-block  { border-color: #7a2233; }
+.map-caption.def-page   { border-color: #6a5a1f; }
+
 .map-legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--text-secondary); padding: 2px 4px; }
 .map-legend i.lg { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .map-legend i.attacker { background: #ff7b5a; } .map-legend i.target { background: #5b9bff; }

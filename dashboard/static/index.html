@@ -126,9 +126,16 @@
       <h2>Attack Map</h2>
       <span class="panel-sub">live · <span id="map-mode-label">—</span></span>
     </div>
-    <div id="map-caption" class="map-caption"><span class="cap-idle">waiting for activity…</span></div>
+    <div class="map-caption-row atk">
+      <span class="cap-side atk">ATTACKER</span>
+      <div id="map-caption" class="map-caption"><span class="cap-idle">waiting for activity…</span></div>
+    </div>
     <div class="map-stage">
       <svg id="map-svg" viewBox="0 0 1000 620" preserveAspectRatio="xMidYMid meet" role="img" aria-label="live attack map"></svg>
+    </div>
+    <div class="map-caption-row def">
+      <span class="cap-side def">SOC · DEFENDER</span>
+      <div id="map-caption-def" class="map-caption def"><span class="cap-idle">standing by…</span></div>
     </div>
     <div class="map-legend">
       <span><i class="lg attacker"></i>attacker</span>
