@@ -39,6 +39,7 @@
     <button class="tab-btn" data-tab="telemetry" role="tab" aria-selected="false">Live Telemetry</button>
     <button class="tab-btn" data-tab="analyst" role="tab" aria-selected="false">Analyst</button>
     <button class="tab-btn" data-tab="lab" role="tab" aria-selected="false">Lab</button>
+    <button class="tab-btn" data-tab="map" role="tab" aria-selected="false">Attack Map</button>
   </div>
 
   <section class="panel tab-panel" id="panel-lab" data-tab="lab">
@@ -131,6 +132,25 @@
   </div>
 </div>
 
+  <section class="panel tab-panel" id="panel-map" data-tab="map">
+    <div class="panel-head">
+      <h2>Attack Map</h2>
+      <span class="panel-sub">live · <span id="map-mode-label">—</span></span>
+    </div>
+    <div id="map-caption" class="map-caption"><span class="cap-idle">waiting for activity…</span></div>
+    <div class="map-stage">
+      <svg id="map-svg" viewBox="0 0 1000 620" preserveAspectRatio="xMidYMid meet" role="img" aria-label="live attack map"></svg>
+    </div>
+    <div class="map-legend">
+      <span><i class="lg attacker"></i>attacker</span>
+      <span><i class="lg target"></i>target</span>
+      <span><i class="lg flock"></i>decoy</span>
+      <span><i class="lg siem"></i>SOC/SIEM</span>
+      <span><i class="lg firewall"></i>perimeter (remote)</span>
+    </div>
+  </section>
+
+<script src="/static/map.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

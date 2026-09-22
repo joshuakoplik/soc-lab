@@ -130,6 +130,24 @@ async def status(docker: bool = True):
     return await asyncio.to_thread(orchestrate.status, False)
 
 
+_map_cache = {"at": 0.0, "data": None}
+_MAP_TTL = 4.0
+
+
+@router.get("/map")
+async def map_topology():
+    """Node topology for the live attack map (attacker/targets/flocks/siem/firewall).
+    Server-cached like /status; the map fetches this for layout and rides the existing
+    WebSocket for live activity."""
+    now = time.time()
+    if _map_cache["data"] is not None and (now - _map_cache["at"]) < _MAP_TTL:
+        return _map_cache["data"]
+    data = await asyncio.to_thread(orchestrate.map_topology)
+    _map_cache["at"] = now
+    _map_cache["data"] = data
+    return data
+
+
 @router.get("/config")
 async def get_config():
     cfg = lab_config.load()
