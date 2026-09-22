@@ -406,6 +406,51 @@ def supervisor_state():
     return {"up": bool(pid), "pid": pid}
 
 
+def _mode_state():
+    """Per-mode running-container state for the dashboard's 'what's running' view.
+    Classifies running containers by their docker network (soclab-<mode>) from a
+    single `docker ps` -- cwd-independent (no compose file needed) and it excludes
+    the multi-homed soc-attacker, soc-* infra, and flock containers so a mode's
+    count is just its own targets. northwind is its own project (nw-* names).
+    dealer also carries its target(s) + opaque hostname from .run/state.json."""
+    r = _run(["docker", "ps", "--format",
+              '{{.Names}}|{{.Networks}}|{{.Label "com.docker.compose.project"}}'], timeout=15)
+    state = {m: {"up": False, "containers": 0}
+             for m in ("easy", "hard", "wordpress", "dealer", "northwind")}
+    if r["rc"] == 0:
+        for line in (r["stdout"] or "").splitlines():
+            parts = line.split("|")
+            if len(parts) < 3:
+                continue
+            name, nets, project = parts[0].strip(), {n.strip() for n in parts[1].split(",")}, parts[2].strip()
+            # infra (soc-attacker is multi-homed onto every bridge; sensors are soc-*)
+            if name == "soc-attacker" or name.startswith("soc-"):
+                continue
+            # Classify by compose project -- this is what separates a mode's own
+            # target from the NPC flocks (project npc-*) that share its bridge.
+            if project == "dealer-range":
+                mode = "dealer"
+            elif project == "northwind-range" or name.startswith("nw-"):
+                mode = "northwind"
+            elif project == "soc-lab":
+                mode = next((m for m in ("easy", "hard", "wordpress") if "soclab-" + m in nets), None)
+            else:
+                mode = None  # npc-* flocks, or unrelated projects
+            if mode:
+                state[mode]["up"] = True
+                state[mode]["containers"] += 1
+    targets = []
+    try:
+        with open(os.path.join(config.ROOT, "dealer-range", ".run", "state.json")) as f:
+            for t in (json.load(f) or []):
+                targets.append({"hostname": t.get("hostname"),
+                                "label": t.get("source") or t.get("target", "")})
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    state["dealer"]["targets"] = targets
+    return state
+
+
 def status(include_docker=True, docker_timeout=60):
     """The composite lab-status dict consumed by `labctl status --json` and the
     dashboard Lab tab. Structured process/signal/mode data always; the (slower)
@@ -433,6 +478,7 @@ def status(include_docker=True, docker_timeout=60):
         },
     }
     if include_docker:
+        out["mode_state"] = _mode_state()
         res = lab_mode("status", timeout=docker_timeout)
         out["lab_status_text"] = res.get("stdout", "") + (
             ("\n[stderr]\n" + res["stderr"]) if res.get("stderr") else ""

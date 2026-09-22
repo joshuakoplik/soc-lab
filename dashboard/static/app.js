@@ -1348,11 +1348,33 @@ function renderLab(s) {
   const modes = (labConfig && labConfig.modes) || ["easy", "hard", "wordpress", "northwind", "dealer"];
   const selMode = labSelectedMode || s.mode || modes[0];
   const modeOpts = modes.map((m) => `<option value="${m}"${m === selMode ? " selected" : ""}>${m}</option>`).join("");
-  const dealerRow = selMode === "dealer"
-    ? `<div class="lab-controls lab-dealer-row">
-         <span class="lab-dim">target:</span>
-         <span class="lab-dealer-chosen">${labDealerTarget ? escapeHtml(labDealerTarget) : "<em>none chosen</em>"}</span>
-         <button class="lab-btn" data-act="dealer-pick">choose target…</button>
+  // Per-mode running-state view (from s.mode_state) -- what's ACTUALLY up, not
+  // just the primary-mode label in lab_mode.json.
+  const ms = s.mode_state || {};
+  const shortLabel = (t) => { t = String(t || ""); return t.length > 40 ? t.slice(0, 40) + "…" : t; };
+  const modeStateRows = modes.map((m) => {
+    const st = ms[m] || { up: false, containers: 0 };
+    const dot = st.up ? '<span class="lab-dot up"></span>' : '<span class="lab-dot"></span>';
+    let detail = st.up ? `up · ${st.containers} container${st.containers === 1 ? "" : "s"}` : "down";
+    if (m === "dealer" && st.up && (st.targets || []).length) {
+      const t = st.targets[0];
+      detail += ` · <b>${escapeHtml(t.hostname || "?")}</b>${t.label ? ` <span class="lab-dim">(${escapeHtml(shortLabel(t.label))})</span>` : ""}`;
+    }
+    const cls = "lab-mode-row" + (m === s.mode ? " primary" : "") + (st.up ? " up" : "");
+    return `<div class="${cls}">${dot}<span class="lab-mode-name">${escapeHtml(m)}</span><span class="lab-mode-detail">${detail}</span></div>`;
+  }).join("");
+  // Dealer target controls -- shown when dealer is the selected mode. "switch to
+  // target" cleanly REPLACES the running dealer target (up.py + --remove-orphans),
+  // distinct from the mode-level switch/up/down above.
+  const dealerRunning = (ms.dealer && ms.dealer.up && (ms.dealer.targets || [])[0]) || null;
+  const dealerTargetRow = selMode === "dealer"
+    ? `<div class="lab-dealer-target">
+         <div class="lab-line"><span class="lab-dim">running target:</span> ${dealerRunning ? "<b>" + escapeHtml(dealerRunning.hostname || "?") + "</b>" : "<em>none</em>"}</div>
+         <div class="lab-line"><span class="lab-dim">chosen:</span> ${labDealerTarget ? escapeHtml(labDealerTarget) : "<em>none — pick one</em>"}</div>
+         <div class="lab-controls">
+           <button class="lab-btn" data-act="dealer-pick">choose target…</button>
+           <button class="lab-btn" data-act="dealer-switch" title="cleanly replace the running dealer target with the chosen one">switch to target</button>
+         </div>
        </div>`
     : "";
   const templates = (labConfig && labConfig.flock_templates) || [];
@@ -1393,15 +1415,16 @@ function renderLab(s) {
     </div>
     <div class="lab-grid">
       <div class="lab-card">
-        <h3>Mode</h3>
-        <div class="lab-line">current: <b>${escapeHtml(s.mode || "—")}</b> · posture: ${escapeHtml(s.posture || "—")}</div>
+        <h3>Mode <span class="lab-dim">· posture: ${escapeHtml(s.posture || "—")}</span></h3>
+        <div class="lab-mode-state">${modeStateRows}</div>
         <div class="lab-controls">
           <select id="lab-mode-select">${modeOpts}</select>
-          <button class="lab-btn" data-act="mode" data-verb="switch">switch</button>
-          <button class="lab-btn" data-act="mode" data-verb="up">up</button>
-          <button class="lab-btn" data-act="mode" data-verb="down">down</button>
+          <button class="lab-btn" data-act="mode" data-verb="switch" title="tear down every other mode and make this the only one">switch</button>
+          <button class="lab-btn" data-act="mode" data-verb="up" title="bring this mode up alongside whatever else is running">up</button>
+          <button class="lab-btn lab-btn-danger" data-act="mode" data-verb="down" title="tear this mode down">down</button>
         </div>
-        ${dealerRow}
+        <div class="lab-line lab-dim">switch = make exclusive · up = add alongside · down = stop</div>
+        ${dealerTargetRow}
       </div>
 
       <div class="lab-card">
@@ -1811,6 +1834,14 @@ function onLabClick(ev) {
     labAction(() => labPost("/api/lab/mode", { verb: t.dataset.verb, mode, target }));
   } else if (act === "dealer-pick") {
     openDealerPicker();
+  } else if (act === "dealer-switch") {
+    // Target-level switch: cleanly replace the running dealer target. Uses `up`
+    // (which now --remove-orphans, so the previous target is torn down) against
+    // dealer, and ensures dealer is the selected mode.
+    if (!labDealerTarget) { labMsg("choose a dealer target first", true); return; }
+    labSelectedMode = "dealer";
+    labMsg(`switching dealer target → ${labDealerTarget}…`);
+    labAction(() => labPost("/api/lab/mode", { verb: "up", mode: "dealer", target: labDealerTarget }));
   } else if (act === "proc-launch") {
     if (t.dataset.name === "hunter") openHunterLaunch();
     else if (t.dataset.name === "analyst") openAnalystLaunch();
