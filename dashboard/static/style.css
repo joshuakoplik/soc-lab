@@ -1095,8 +1095,15 @@ h1 .muted { color: var(--muted); font-weight: 400; }
   position: relative; border-radius: 12px; overflow: hidden;
   background: radial-gradient(120% 100% at 30% 10%, #0f1830 0%, #070b16 60%, #04060d 100%);
   border: 1px solid #16243f;
+  /* Own the height explicitly: an inline <svg> with height:auto collapses to
+     ~0 in this flex-column panel (content was drawn but invisible -- verified
+     the scene builds with 65 elements). Drive the box from the 1000x620 viewBox
+     ratio with a floor, and let the SVG fill it. */
+  width: 100%;
+  aspect-ratio: 1000 / 620;
+  min-height: 340px;
 }
-#map-svg { width: 100%; height: auto; display: block; }
+#map-svg { width: 100%; height: 100%; display: block; }
 .map-grid line { stroke: #12305a; stroke-width: 0.5; opacity: 0.25; }
 
 /* nodes */
