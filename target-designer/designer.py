@@ -221,13 +221,63 @@ def _fail_design(raw: str, reason: str):
                      "-- re-run to try again (design is non-deterministic).")
 
 
+def _catalog_specs() -> list[dict]:
+    """Raw spec dicts from targets/<id>/spec.json (no docker probe) -- for dedup."""
+    out = []
+    if not os.path.isdir(TARGETS_DIR):
+        return out
+    for tid in sorted(os.listdir(TARGETS_DIR)):
+        p = os.path.join(TARGETS_DIR, tid, "spec.json")
+        if os.path.exists(p):
+            try:
+                with open(p) as f:
+                    out.append(json.load(f))
+            except (OSError, json.JSONDecodeError):
+                pass
+    return out
+
+
+def _used_cves(specs: list[dict]) -> set:
+    used = set()
+    for s in specs:
+        for role in ("foothold", "privesc"):
+            cve = (s.get(role) or {}).get("cve", "")
+            if cve:
+                used.add(cve.upper())
+    return used
+
+
+def _library_block(specs: list[dict]) -> str:
+    if not specs:
+        return ""
+    lines = []
+    for s in specs:
+        fh, pe = s.get("foothold") or {}, s.get("privesc") or {}
+        cves = " + ".join(x for x in (fh.get("cve", ""), pe.get("cve", "")) if x)
+        lines.append(f"- {s.get('title', '?')} [{cves}] (software: {fh.get('product', '?')})")
+    return ("\n\nALREADY IN THE LIBRARY -- design a DIFFERENT target. Do NOT reuse any CVE below, "
+            "and avoid the same primary software:\n" + "\n".join(lines))
+
+
 def design(foothold: list[dict], privesc: list[dict], model: str) -> TargetSpec:
+    # Dedup: never re-offer a CVE already in the catalog, and tell the model what
+    # exists so it avoids the same software. So a run mints a NEW target rather
+    # than reinventing (or silently overwriting -- the id is derived from the CVE
+    # pair) one already in the library.
+    specs = _catalog_specs()
+    used = _used_cves(specs)
+    foothold = [c for c in foothold if c["id"].upper() not in used]
+    privesc = [c for c in privesc if c["id"].upper() not in used]
+    if not foothold:
+        raise SystemExit("[designer] every recent foothold CVE is already in the catalog -- "
+                         "widen --days / lower --min-cvss, or wait for new disclosures.")
     user = (
         "Compose a chainable target from these recently-published CVEs.\n\n"
         f"FOOTHOLD candidates (RCE / injection / deserialization):\n"
         + "\n".join(_candidate_line(c) for c in foothold[:20])
         + "\n\nPRIVESC candidates (local privilege escalation):\n"
         + ("\n".join(_candidate_line(c) for c in privesc[:20]) or "(none surfaced this window -- design a single-stage box)")
+        + _library_block(specs)
         + "\n\nPick the most buildable, plausible pair and return the JSON spec."
     )
     raw = llm_complete(DESIGN_SYSTEM, user, model=model)
@@ -262,6 +312,12 @@ def design(foothold: list[dict], privesc: list[dict], model: str) -> TargetSpec:
         created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         extra={},
     )
+    # Backstop: even with the pool filter + prompt steering, if the model still
+    # lands on the same CVE pair as an existing entry, its id collides -- refuse
+    # rather than overwrite the existing target's files.
+    if os.path.exists(os.path.join(TARGETS_DIR, spec.id, "spec.json")):
+        _fail_design(raw, f"the design duplicates library target {spec.id} (same CVE pair); "
+                          "re-run for a different one")
     return spec, raw
 
 
