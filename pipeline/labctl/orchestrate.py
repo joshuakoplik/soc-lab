@@ -486,3 +486,61 @@ def status(include_docker=True, docker_timeout=60):
             ("\n[stderr]\n" + res["stderr"]) if res.get("stderr") else ""
         )
     return out
+
+
+def _bridge_info(bridge):
+    """(subnet, {container_name: ipv4}) for a docker bridge, or (None, {})."""
+    r = _run(["docker", "network", "inspect", bridge], timeout=15)
+    if r["rc"] != 0:
+        return (None, {})
+    try:
+        data = json.loads(r["stdout"])[0]
+    except (json.JSONDecodeError, IndexError, KeyError, TypeError):
+        return (None, {})
+    subnet = None
+    try:
+        subnet = data["IPAM"]["Config"][0]["Subnet"]
+    except (KeyError, IndexError, TypeError):
+        pass
+    members = {}
+    for c in (data.get("Containers") or {}).values():
+        name = c.get("Name")
+        ip = (c.get("IPv4Address") or "").split("/")[0]
+        if name:
+            members[name] = ip
+    return (subnet, members)
+
+
+def map_topology():
+    """Node topology for the live attack map: attacker, target(s), flock decoys,
+    siem, and a firewall (present only in remote posture). Assembled from the
+    active mode's docker bridge + compose-project labels (the same classifier
+    _mode_state uses) + posture. All-docker, cwd-independent."""
+    lm = read_lab_mode()
+    mode = lm.get("mode") or "dealer"
+    posture = lm.get("posture") or "insider"
+    ms = _mode_state()
+    bridge = "soclab-" + mode if mode in ("easy", "hard", "wordpress", "dealer") else None
+    subnet, members = _bridge_info(bridge) if bridge else (None, {})
+    projects = {}
+    r = _run(["docker", "ps", "--format",
+              '{{.Names}}|{{.Label "com.docker.compose.project"}}'], timeout=15)
+    if r["rc"] == 0:
+        for line in (r["stdout"] or "").splitlines():
+            if "|" in line:
+                n, p = line.split("|", 1)
+                projects[n.strip()] = p.strip()
+    dealer_labels = {t.get("hostname"): t.get("label")
+                     for t in (ms.get("dealer", {}).get("targets") or [])}
+    attacker, targets, flocks = None, [], []
+    for name, ip in sorted(members.items()):
+        proj = projects.get(name, "")
+        if name == "soc-attacker":
+            attacker = {"name": name, "ip": ip}
+        elif proj == "dealer-range" or (proj == "soc-lab" and not name.startswith("soc-")):
+            targets.append({"name": name, "ip": ip, "label": dealer_labels.get(name, ""), "mode": mode})
+        elif proj.startswith("npc-"):
+            flocks.append({"name": name, "ip": ip})
+    return {"mode": mode, "posture": posture, "subnet": subnet,
+            "attacker": attacker, "targets": targets, "flocks": flocks,
+            "siem": True, "firewall": posture == "remote"}

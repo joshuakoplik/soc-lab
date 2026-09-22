@@ -648,6 +648,7 @@ function handleMessage(msg) {
   const { table, row } = msg;
   if (table === "_reset") { resetLocalState(); loadBootstrap(); return; }
   if (table !== "_error" && row && row.id != null) detailStore.set(`${table}:${row.id}`, { table, row });
+  if (window.mapConsume) window.mapConsume(table, row);   // live attack map (Attack Map tab)
   switch (table) {
     case "events": renderEventLine(row); eventTimes.push(toEpoch(row.ts)); break;
     case "candidates": onCandidate(row); break;
@@ -882,6 +883,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     const target = btn.dataset.tab;
     document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.dataset.tab === target));
+    if (target === "map" && window.initMap) window.initMap();   // build/refresh the attack map on open
   });
 });
 
