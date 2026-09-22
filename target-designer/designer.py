@@ -104,22 +104,42 @@ def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
     return msg.get("reasoning_content") or content
 
 
+# Top-level keys that mark a real design/repair object (a spec, or a repair
+# result). Used to pick the RIGHT balanced object rather than blindly the last.
+_EXPECTED_KEYS = frozenset({"foothold", "privesc", "dockerfile_steps", "title", "base_image"})
+
+
 def extract_json(text: str) -> dict:
-    """Last balanced JSON object in the text (models often narrate first)."""
+    """Return the design/repair JSON object from the model's text.
+
+    Scans EVERY balanced object and prefers the largest one carrying an expected
+    top-level key (foothold/dockerfile_steps/title/...). This is deliberately NOT
+    'the last balanced object': a reasoning model routinely emits the spec and
+    then trailing prose (or a malformed/unterminated top-level object), and the
+    naive last-object scan grabs a nested fragment -- e.g. a single verification
+    check {name,kind,check,expect} -- yielding an empty spec that then builds a
+    junk target. If nothing spec-shaped parses (the real object was malformed),
+    raise ValueError so the caller fails loudly with the raw saved."""
     dec = json.JSONDecoder()
-    best, idx = None, 0
+    candidates, idx = [], 0
     while True:
         start = text.find("{", idx)
         if start == -1:
             break
         try:
             obj, end = dec.raw_decode(text, start)
-            best, idx = obj, end
+            if isinstance(obj, dict):
+                candidates.append(obj)
+            idx = end
         except json.JSONDecodeError:
             idx = start + 1
-    if best is None:
-        raise ValueError("no JSON object found in model output")
-    return best
+    spec_like = [o for o in candidates if _EXPECTED_KEYS & o.keys()]
+    if spec_like:
+        return max(spec_like, key=lambda o: len(json.dumps(o)))
+    if candidates:
+        raise ValueError("model output had JSON fragments but no spec-shaped object "
+                         "(the top-level object was likely malformed/unterminated)")
+    raise ValueError("no JSON object found in model output")
 
 
 # --------------------------------------------------------------------------- #
@@ -172,7 +192,10 @@ runtime (all deps installed at build time; nothing fetched on first request).
 wiring captures it into the SIEM. Prefer a foreground entrypoint that starts each service \
 without backgrounding its logs to a file only.
 
-Return ONE JSON object, no prose around it, with EXACTLY these keys:
+Output ONLY the JSON object -- nothing before it, nothing after it, no prose, no
+commentary, no code fences. Emit exactly one complete, well-formed JSON object and
+STOP. (Trailing explanation after the JSON corrupts the parse.) The object has
+EXACTLY these keys:
 {
   "title": str,
   "base_image": str,                      // e.g. "debian:12", "ubuntu:22.04"
@@ -184,6 +207,18 @@ Return ONE JSON object, no prose around it, with EXACTLY these keys:
   "verification": [{"name","kind","check","expect"}],  // kind in http|cmd|port
   "difficulty_notes": str
 }"""
+
+
+def _fail_design(raw: str, reason: str):
+    """Save the raw model output and exit loudly. A failed design must NOT
+    silently become a junk target -- surface it (same principle as the reset
+    exit-code fix)."""
+    dbg = os.path.join(TARGETS_DIR, "_last_design_failure.txt")
+    os.makedirs(TARGETS_DIR, exist_ok=True)
+    with open(dbg, "w") as f:
+        f.write(raw)
+    raise SystemExit(f"[designer] DESIGN FAILED: {reason}. Raw output saved to {dbg} "
+                     "-- re-run to try again (design is non-deterministic).")
 
 
 def design(foothold: list[dict], privesc: list[dict], model: str) -> TargetSpec:
@@ -198,14 +233,17 @@ def design(foothold: list[dict], privesc: list[dict], model: str) -> TargetSpec:
     raw = llm_complete(DESIGN_SYSTEM, user, model=model)
     try:
         d = extract_json(raw)
-    except ValueError:
-        dbg = os.path.join(TARGETS_DIR, "_last_design_failure.txt")
-        os.makedirs(TARGETS_DIR, exist_ok=True)
-        with open(dbg, "w") as f:
-            f.write(raw)
-        raise SystemExit(f"[designer] model returned no parseable JSON; raw saved to {dbg}")
+    except ValueError as e:
+        _fail_design(raw, f"no parseable spec in the model output ({e})")
     fh = d.get("foothold", {}) or {}
     pe = d.get("privesc", {}) or {}
+    # Validity guard: a parseable-but-degenerate spec (no CVE, or no build steps)
+    # is a FAILED design, not a target. Reject it here rather than let it build a
+    # bare image that "verifies" vacuously and lands in the catalog as junk.
+    if not (fh.get("cve") or pe.get("cve")):
+        _fail_design(raw, "the design named no foothold/privesc CVE")
+    if not d.get("dockerfile_steps"):
+        _fail_design(raw, "the design has no dockerfile_steps (nothing to build)")
     spec = TargetSpec(
         id=new_id(fh.get("cve", ""), pe.get("cve", "")),
         title=d.get("title", "untitled target"),
@@ -422,7 +460,12 @@ def run_build_repair(spec: TargetSpec, out: str, model: str, max_attempts: int =
                 print(f"[designer]     [{mark}] {r['name']}: {r['detail'][:80]}")
             spec.extra["verification_results"] = results
             if not fails:
-                spec.extra["status"] = "built+verified"
+                # Zero checks passing is not "verified" -- it's unverified. The
+                # design guard should prevent stepless specs reaching here, but
+                # don't stamp a hollow success either way.
+                spec.extra["status"] = "built+verified" if results else "built (no checks)"
+                if not results:
+                    print("[designer]   WARNING: spec had no verification checks -- built but UNVERIFIED")
                 spec.save(TARGETS_DIR)
                 return True, attempt
             failure = ("BUILD OK but VERIFICATION FAILED:\n"
