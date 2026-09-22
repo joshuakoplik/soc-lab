@@ -477,8 +477,10 @@ def status(include_docker=True, docker_timeout=60):
             "analyst_model": cfg["analyst_model"],
         },
     }
+    # mode_state is one cheap `docker ps` -- always include it (the Lab tab polls
+    # with docker=false for speed, but still needs to know what's actually up).
+    out["mode_state"] = _mode_state()
     if include_docker:
-        out["mode_state"] = _mode_state()
         res = lab_mode("status", timeout=docker_timeout)
         out["lab_status_text"] = res.get("stdout", "") + (
             ("\n[stderr]\n" + res["stderr"]) if res.get("stderr") else ""
