@@ -136,6 +136,7 @@ class Emitter:
     def __init__(self, conn, ctx):
         self.conn = conn
         self.c = ctx  # dict: rt/hunt/chat ids, ips, names
+        self._seq = 0  # monotonic, for globally-unique candidate dedupe keys
 
     def _commit(self):
         self.conn.commit()
@@ -182,11 +183,17 @@ class Emitter:
 
     def candidate(self, key_suffix, rule, severity, evidence, detail=None):
         ts = now_iso()
+        # candidates.dedupe_key is UNIQUE -- make it globally unique per insert
+        # (session id + monotonic seq) so re-runs and --loop passes don't collide
+        # (a fixed "demo:portscan" crashes on the 2nd pass). Still LIKE 'demo:%'
+        # so --clear finds it.
+        self._seq += 1
+        dedupe_key = f"{DEMO_DEDUPE_PREFIX}{key_suffix}:{self.c['rt']}:{self._seq}"
         cur = self.conn.execute(
             "INSERT INTO candidates (dedupe_key, rule, severity, src_ip, first_seen, last_seen, "
             "event_count, evidence, detail, status, created, updated) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (DEMO_DEDUPE_PREFIX + key_suffix, rule, severity, self.c["attacker_ip"], ts, ts,
+            (dedupe_key, rule, severity, self.c["attacker_ip"], ts, ts,
              1, evidence, json.dumps(detail or {}), "new", ts, ts),
         )
         self._commit()
