@@ -14,6 +14,7 @@ never rely on the ambient working directory.
 import json
 import os
 import subprocess
+import time
 
 from . import config, procman, signals, state
 
@@ -511,11 +512,38 @@ def _bridge_info(bridge):
     return (subnet, members)
 
 
+MAP_DEMO_OVERLAY = os.path.join(config.STATE_DIR, "map_demo.json")
+
+
+def _demo_topology():
+    """Return a scripted demo topology if the injector left an unexpired overlay,
+    else None. Lets `dashboard/demo_injector.py` render a fully self-contained
+    attack map (named target + flock nodes + subnet) with NOTHING running -- so
+    map tuning and GTM demos never touch docker or burn agent tokens. The overlay
+    is `{until: <epoch>, topology: {...}}`; a stale/missing/unreadable file is
+    ignored so a crashed demo can never wedge the live map."""
+    try:
+        with open(MAP_DEMO_OVERLAY) as f:
+            blob = json.load(f)
+        if float(blob.get("until", 0)) < time.time():
+            return None
+        topo = blob.get("topology")
+        return topo if isinstance(topo, dict) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def map_topology():
     """Node topology for the live attack map: attacker, target(s), flock decoys,
     siem, and a firewall (present only in remote posture). Assembled from the
     active mode's docker bridge + compose-project labels (the same classifier
-    _mode_state uses) + posture. All-docker, cwd-independent."""
+    _mode_state uses) + posture. All-docker, cwd-independent.
+
+    A demo overlay (see `_demo_topology`) takes precedence when present, so the
+    map can be driven entirely from scripted DB rows with no lab up."""
+    demo = _demo_topology()
+    if demo is not None:
+        return demo
     lm = read_lab_mode()
     mode = lm.get("mode") or "dealer"
     posture = lm.get("posture") or "insider"
