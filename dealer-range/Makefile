@@ -35,7 +35,7 @@ up: cache net
 	python3 up.py "$(DEALER_TARGET)"
 	@PROJECT_DIR=$$(cat .run/project_dir); \
 	  echo "[dealer] bringing target up on $(PROJECT) ..."; \
-	  docker compose -f "$(COMPOSE)" --project-directory "$$PROJECT_DIR" -p "$(PROJECT)" up -d --build
+	  docker compose -f "$(COMPOSE)" --project-directory "$$PROJECT_DIR" -p "$(PROJECT)" up -d --build --remove-orphans
 	@$(MAKE) --no-print-directory wait
 	@$(MAKE) --no-print-directory wire
 
