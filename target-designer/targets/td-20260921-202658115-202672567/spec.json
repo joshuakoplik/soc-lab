@@ -1,0 +1,137 @@
+{
+  "id": "td-20260921-202658115-202672567",
+  "title": "Open Node-RED Foothold -> deepwiki-open Loopback Root File Write (CVE-2026-58115 / CVE-2026-72567)",
+  "base_image": "node:22-bookworm",
+  "foothold": {
+    "cve": "CVE-2026-58115",
+    "product": "Node-RED (as shipped unauthenticated on SIMATIC IoT2050 Advanced / Industrial OS)",
+    "version": "Node-RED 4.0.9 with default settings (no adminAuth), modeling affected IoT2050 images < V4.3.4.1",
+    "role": "foothold",
+    "summary": "The affected device ships Node-RED without enforcing authentication on the admin/editor API. A default Node-RED install (adminAuth unset) reproduces this exactly: anyone who can reach TCP 1880 can read and deploy flows, and a flow containing an exec/function node yields remote code execution in the context of the service account. Here Node-RED is deliberately run as the unprivileged 'nodered' user, so this is the unauthenticated foothold that lands the attacker as a low-privilege local user."
+  },
+  "privesc": {
+    "cve": "CVE-2026-72567",
+    "product": "AsyncFuncAI/deepwiki-open",
+    "version": "git commit 16f35a0 (and earlier)",
+    "role": "privesc",
+    "summary": "Improper path validation in the wiki-cache handling of api/api.py (through commit 16f35a0) lets an unauthenticated HTTP client write to or delete arbitrary files on the server filesystem with the privileges of the API process. In this build the FastAPI service runs as root and is bound to 127.0.0.1:8001 only, so it is reachable exclusively from an on-host shell: after the Node-RED foothold, the attacker can abuse the wiki-cache endpoint to plant a file as root (e.g., a cron.d entry, sudoers.d drop-in, or overwrite a root-owned file) and escalate from the nodered user to root."
+  },
+  "chain_narrative": "Intended path: (1) Foothold via CVE-2026-58115 -- the attacker finds the Node-RED editor/admin API on TCP 1880 with no authentication, deploys a crafted flow, and obtains arbitrary command execution as the unprivileged service user 'nodered'. (2) Privilege escalation via CVE-2026-72567 -- from that shell, enumeration shows an HTTP service listening on 127.0.0.1:8001: deepwiki-open pinned at vulnerable commit 16f35a0, running as root. The attacker abuses the unauthenticated wiki-cache file-write/delete functionality (the improper path validation flaw) to write attacker-controlled content to a root-owned location that influences execution or authorization (root cron job, sudoers fragment, overwriting a root-consumed file), yielding root. Answer-key notes: none of the published privesc candidates were OS-level (sudo/kernel/polkit); they were Kubernetes operators, WordPress plugins, authentik, Dokploy, etc., which cannot plausibly coexist on a single Debian host. deepwiki-open's root-running unauthenticated file write is the only candidate that (a) installs natively on Debian, (b) yields actual root, and (c) chains naturally behind an unprivileged foothold when bound to loopback. Node-RED was chosen as the foothold because it is the lightest unauthenticated-RCE candidate (single npm package, no database) that deterministically lands as a non-root service account. The Vim (CVE-2026-73072) and Craft CMS (CVE-2026-7278x) options were rejected (local-file trigger / heavyweight PHP+DB+auth requirements); Fooocus (CVE-2025-31114) was rejected for its multi-GB torch stack.",
+  "dockerfile_steps": [
+    "LABEL soc-lab.target-id=\"td-20260921-202658115-202672567\"",
+    "LABEL soc-lab.foothold-cve=\"CVE-2026-58115\"",
+    "LABEL soc-lab.privesc-cve=\"CVE-2026-72567\"",
+    "ENV DEBIAN_FRONTEND=noninteractive",
+    "ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache",
+    "RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates python3 python3-venv python3-pip util-linux && rm -rf /var/lib/apt/lists/*",
+    "RUN useradd -m -s /bin/bash nodered",
+    "RUN npm install -g --unsafe-perm node-red@4.0.9",
+    "RUN git clone https://github.com/AsyncFuncAI/deepwiki-open.git /opt/deepwiki && cd /opt/deepwiki && git checkout 16f35a0",
+    "RUN python3 -m venv /opt/deepwiki/venv && /opt/deepwiki/venv/bin/pip install --no-cache-dir --upgrade pip && if [ -f /opt/deepwiki/api/requirements.txt ]; then /opt/deepwiki/venv/bin/pip install --no-cache-dir -r /opt/deepwiki/api/requirements.txt; elif [ -f /opt/deepwiki/api/pyproject.toml ]; then /opt/deepwiki/venv/bin/pip install --no-cache-dir poetry && (cd /opt/deepwiki/api && VIRTUAL_ENV=/opt/deepwiki/venv PATH=/opt/deepwiki/venv/bin:$PATH /opt/deepwiki/venv/bin/poetry install --no-root --no-interaction --no-ansi) || /opt/deepwiki/venv/bin/pip install --no-cache-dir fastapi 'uvicorn[standard]' pydantic pydantic-settings python-dotenv requests httpx openai google-generativeai anthropic adalflow litellm tiktoken ollama; else /opt/deepwiki/venv/bin/pip install --no-cache-dir fastapi 'uvicorn[standard]' pydantic pydantic-settings python-dotenv requests httpx openai google-generativeai anthropic adalflow litellm tiktoken ollama; fi && /opt/deepwiki/venv/bin/pip install --no-cache-dir uvicorn",
+    "RUN mkdir -p /opt/tiktoken-cache && /opt/deepwiki/venv/bin/python -c \"import tiktoken; tiktoken.get_encoding('cl100k_base'); tiktoken.get_encoding('o200k_base')\" && chmod -R a+rX /opt/tiktoken-cache",
+    "RUN printf '#!/bin/bash\\ncd /opt/deepwiki\\n( ./venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8001 || ./venv/bin/python -m api.main ) 2>&1 &\\nexec runuser -u nodered -- node-red --userDir /home/nodered/.node-red\\n' > /entrypoint.sh && chmod +x /entrypoint.sh",
+    "ENV PYTHONUNBUFFERED=1",
+    "EXPOSE 1880 8001",
+    "CMD [\"/entrypoint.sh\"]"
+  ],
+  "listening": [
+    {
+      "port": 1880,
+      "service": "node-red",
+      "proto": "tcp"
+    },
+    {
+      "port": 8001,
+      "service": "deepwiki-open",
+      "proto": "tcp"
+    }
+  ],
+  "verification": [
+    {
+      "name": "nodered-port",
+      "kind": "port",
+      "check": "1880",
+      "expect": "open"
+    },
+    {
+      "name": "nodered-editor",
+      "kind": "http",
+      "check": "http://127.0.0.1:1880/",
+      "expect": "200"
+    },
+    {
+      "name": "nodered-version",
+      "kind": "cmd",
+      "check": "npm ls -g node-red --depth=0",
+      "expect": "node-red@4.0.9"
+    },
+    {
+      "name": "deepwiki-port",
+      "kind": "port",
+      "check": "8001",
+      "expect": "open"
+    },
+    {
+      "name": "deepwiki-docs",
+      "kind": "http",
+      "check": "http://127.0.0.1:8001/docs",
+      "expect": "200"
+    },
+    {
+      "name": "deepwiki-commit",
+      "kind": "cmd",
+      "check": "git -C /opt/deepwiki rev-parse --short HEAD",
+      "expect": "16f35a0"
+    }
+  ],
+  "difficulty_notes": "Easy foothold, medium privesc. The Node-RED admin API on 1880 is completely unauthenticated, so initial code execution as 'nodered' is trivial (easy/HTB-easy tier). The escalation requires on-host enumeration to notice the loopback-only deepwiki API on 127.0.0.1:8001, recognizing the path-validation flaw in the wiki-cache endpoint, and turning an arbitrary root file write into code execution (cron.d, sudoers.d, or overwriting a root-consumed file) -- solidly medium. Deliberate design choices: deepwiki is bound to loopback so the privesc cannot be shortcut from the network; Node-RED runs as a dedicated unprivileged user so the foothold is clearly non-root; both services log to stdout/stderr via the foreground entrypoint for SIEM capture. Build note: the deepwiki pip install (adalflow, openai, google-generativeai, boto3, etc.) is the slow step (~2-4 min) but is the vendor-supported dependency set for the vulnerable API component; no torch/transformers are pulled. No SSH server is shipped -- root is demonstrated via file write / executed cron task, not login.",
+  "designed_by": "moonshotai/kimi-k3",
+  "created_at": "2026-09-22T00:13:23Z",
+  "extra": {
+    "image_tag": "soclab-td/td-20260921-202658115-202672567:latest",
+    "build_ok": true,
+    "repair_notes": [
+      "Build failed because /opt/deepwiki/api/requirements.txt does not exist at pinned vulnerable commit 16f35a0 (the pinned commit and versions are intentionally unchanged). The dependency-install step is now layout-tolerant: it uses api/requirements.txt when present, otherwise installs from api/pyproject.toml via Poetry into the venv (--no-root so it doesn't require the project itself to be packageable), and as a final fallback installs a curated superset of the deepwiki-open API runtime deps (fastapi/uvicorn/pydantic/openai/google-generativeai/anthropic/adalflow/litellm/tiktoken/ollama) so api.main:app can import and serve. Everything else is untouched: node-red 4.0.9 with default no-auth settings as the foothold, deepwiki-open@16f35a0 running as root on loopback:8001 for the privesc, both services logging to stdout, fully self-contained at runtime, no network needed after build.",
+      "Runtime failure only: adalflow's TextSplitter calls tiktoken.get_encoding('cl100k_base') at import time, which downloads the BPE file from openaipublic.blob.core.windows.net -- impossible in the no-egress runtime, so uvicorn crashed and port 8001 stayed shut. Fix: set TIKTOKEN_CACHE_DIR to a persistent path (/opt/tiktoken-cache) and pre-warm it at build time (network available during build) by loading cl100k_base and o200k_base encodings. tiktoken's read_file_cached checks this cache dir first, so no runtime egress is needed. Vulnerable versions (node-red@4.0.9, deepwiki commit 16f35a0) and all service/entrypoint behavior unchanged."
+    ],
+    "verification_results": [
+      {
+        "name": "nodered-port",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "OPEN"
+      },
+      {
+        "name": "nodered-editor",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "http 200 (want 200)"
+      },
+      {
+        "name": "nodered-version",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "/usr/local/lib\n`-- node-red@4.0.9"
+      },
+      {
+        "name": "deepwiki-port",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "OPEN"
+      },
+      {
+        "name": "deepwiki-docs",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "http 200 (want 200)"
+      },
+      {
+        "name": "deepwiki-commit",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "16f35a0"
+      }
+    ],
+    "status": "built+verified"
+  }
+}
