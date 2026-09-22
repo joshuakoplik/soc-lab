@@ -328,12 +328,18 @@ async def index():
     # Plain FileResponse left style.css/app.js on flat /static/... URLs with
     # no cache-busting -- across a run of edits to this dashboard, browsers
     # kept serving a stale mix of old CSS with new HTML (or vice versa) on a
-    # normal reload. Stamp each asset URL with its own mtime so any edit
-    # forces a fresh fetch of exactly that file.
+    # normal reload. Stamp each asset URL with a version so an edit forces a
+    # fresh fetch. Use ONE shared version (the newest mtime across the whole
+    # JS/CSS bundle), not per-file: a per-file stamp left app.js cached when a
+    # change touched only map.js/index.html (observed live -- the panel-switch
+    # handler in the stale app.js kept the Defender feed on screen under the
+    # Attack Map tab). A shared version re-fetches the entire bundle together
+    # on any deploy, so HTML/CSS/JS can never be a stale mix again.
     html = (STATIC_DIR / "index.html").read_text()
-    for asset in ("style.css", "app.js", "map.js"):
-        mtime = int((STATIC_DIR / asset).stat().st_mtime)
-        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={mtime}")
+    assets = ("style.css", "app.js", "map.js")
+    ver = max(int((STATIC_DIR / a).stat().st_mtime) for a in assets)
+    for asset in assets:
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
     # The asset URLs above are cache-busted by mtime, but that only helps if
     # the browser actually re-fetches THIS document to see the new URLs --
     # otherwise a cached index.html keeps pointing at the old ?v= assets and
