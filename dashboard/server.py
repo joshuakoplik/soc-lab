@@ -331,7 +331,7 @@ async def index():
     # normal reload. Stamp each asset URL with its own mtime so any edit
     # forces a fresh fetch of exactly that file.
     html = (STATIC_DIR / "index.html").read_text()
-    for asset in ("style.css", "app.js"):
+    for asset in ("style.css", "app.js", "map.js"):
         mtime = int((STATIC_DIR / asset).stat().st_mtime)
         html = html.replace(f"/static/{asset}", f"/static/{asset}?v={mtime}")
     # The asset URLs above are cache-busted by mtime, but that only helps if
