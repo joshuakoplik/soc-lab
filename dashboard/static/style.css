@@ -909,7 +909,7 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 }
 .lab-dot.up { background: var(--status-good); }
 .lab-mode-target { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 8px 0; }
-.lab-mode-tsummary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lab-mode-tsummary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lab-mode-tactions { display: flex; gap: 6px; flex: none; }
 .lab-posture { font-size: 12px; color: var(--text-secondary); margin-top: 8px; padding-top: 8px;
   border-top: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
