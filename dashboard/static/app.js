@@ -1424,15 +1424,15 @@ function renderLab(s) {
         <div class="lab-mode-target">
           ${selDot}<span class="lab-mode-tsummary">${targetSummary}</span>
           <span class="lab-mode-tactions">
-            <button class="lab-btn" data-act="mode" data-verb="switch" title="make this the active mode (tears down any other)">up</button>
+            ${selMode === "dealer"
+              ? `<button class="lab-btn" data-act="dealer-pick" title="pick a Vulhub or designed target">choose target…</button>`
+              : ""}
+            <button class="lab-btn lab-btn-primary" data-act="mode" data-verb="switch" title="${selMode === "dealer" ? "switch to the chosen dealer target (replaces any running one)" : "make this the only active mode (tears down any other)"}">${selMode === "dealer" ? "switch to target" : "switch"}</button>
             <button class="lab-btn lab-btn-danger" data-act="mode" data-verb="down" title="tear this mode down">down</button>
           </span>
         </div>
-        ${selMode === "dealer"
-          ? `<div class="lab-controls"><button class="lab-btn" data-act="dealer-pick">choose target…</button></div>`
-          : ""}
         ${otherUpNote}
-        <div class="lab-line lab-dim">up = make this the only active mode · down = stop it</div>
+        <div class="lab-line lab-dim">${selMode === "dealer" ? "choose a target, then switch to it" : "switch = make this the only active mode"} · down = stop it</div>
         <div class="lab-posture">posture: <b>${escapeHtml(posture)}</b> ${postureBtns}</div>
       </div>
 
