@@ -1421,18 +1421,17 @@ function renderLab(s) {
       <div class="lab-card">
         <h3>Mode</h3>
         <div class="lab-controls"><select id="lab-mode-select">${modeOpts}</select></div>
-        <div class="lab-mode-target">
-          ${selDot}<span class="lab-mode-tsummary">${targetSummary}</span>
-          <span class="lab-mode-tactions">
-            ${selMode === "dealer"
-              ? `<button class="lab-btn" data-act="dealer-pick" title="pick a Vulhub or designed target">choose target…</button>`
-              : ""}
-            <button class="lab-btn lab-btn-primary" data-act="mode" data-verb="switch" title="${selMode === "dealer" ? "switch to the chosen dealer target (replaces any running one)" : "make this the only active mode (tears down any other)"}">${selMode === "dealer" ? "switch to target" : "switch"}</button>
-            <button class="lab-btn lab-btn-danger" data-act="mode" data-verb="down" title="tear this mode down">down</button>
-          </span>
+        <div class="lab-mode-target">${selDot}<span class="lab-mode-tsummary">${targetSummary}</span></div>
+        <div class="lab-controls">
+          ${selMode === "dealer"
+            ? `<button class="lab-btn" data-act="dealer-pick" title="pick a Vulhub or designed target">choose target…</button>`
+            : ""}
+          <button class="lab-btn lab-btn-primary" data-act="mode" data-verb="up" title="${selMode === "dealer" ? "start the chosen dealer target" : "bring this mode up"}">up</button>
+          <button class="lab-btn" data-act="mode" data-verb="switch" title="make this the only active mode (tears down every other)">switch</button>
+          <button class="lab-btn lab-btn-danger" data-act="mode" data-verb="down" title="tear this mode down">down</button>
         </div>
         ${otherUpNote}
-        <div class="lab-line lab-dim">${selMode === "dealer" ? "choose a target, then switch to it" : "switch = make this the only active mode"} · down = stop it</div>
+        <div class="lab-line lab-dim">up = start ${selMode === "dealer" ? "chosen target" : "this mode"} · switch = make exclusive · down = stop</div>
         <div class="lab-posture">posture: <b>${escapeHtml(posture)}</b> ${postureBtns}</div>
       </div>
 
