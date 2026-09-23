@@ -914,6 +914,8 @@ h1 .muted { color: var(--muted); font-weight: 400; }
 .lab-posture { font-size: 12px; color: var(--text-secondary); margin-top: 8px; padding-top: 8px;
   border-top: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
 .lab-btn-on { border-color: var(--status-good); color: var(--status-good); }
+.lab-btn-primary { border-color: var(--status-good); background: color-mix(in srgb, var(--status-good) 16%, transparent); color: var(--status-good); font-weight: 600; }
+.lab-btn-primary:hover { background: color-mix(in srgb, var(--status-good) 26%, transparent); }
 .lab-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
 .lab-policies { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
 .lab-toggle { font-size: 12px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
