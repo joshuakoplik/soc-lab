@@ -69,14 +69,25 @@ def load_dotenv(path: str) -> None:
 
 
 def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
-                 max_tokens: int = 16000, timeout: int = 600) -> str:
+                 max_tokens: int = 24000, timeout: int = 1200) -> str:
     """One-shot completion via the GMI OpenAI-compatible /chat/completions.
 
     Reasoning models (kimi-k3) split output into `reasoning_content` (the think
     trace) and `content` (the answer); a big prompt can spend the whole budget
-    thinking and leave `content` empty, so max_tokens is generous and we fall
-    back to the reasoning field when the answer field carries no JSON. A
-    default urllib User-Agent is 403'd by GMI -- set one."""
+    thinking and leave `content` empty, so we fall back to the reasoning field
+    when the answer field carries no JSON. A default urllib User-Agent is 403'd
+    by GMI -- set one.
+
+    Two coupled settings keep kimi-k3 from failing the design/repair parse:
+    - `response_format=json_object` forces the answer into `content` as clean
+      JSON via the proper reasoning split. WITHOUT it, kimi-k3 reasons *inside*
+      `content` (reasoning_content stays empty) and emits ~65KB of deliberation
+      prose that blows the budget before it ever lands a complete spec.
+    - the budget must cover reasoning + the spec: kimi-k3 spends ~15K tokens
+      reasoning, so 16000 truncated the JSON body mid-`dockerfile_steps`
+      (finish_reason=length). 24000 leaves ~9K for the spec. A much larger cap
+      just lets it ramble past the read timeout, so the timeout is 1200s to
+      match (a full run is ~10-13 min)."""
     api_key = os.environ.get("GMI_API_KEY")
     if not api_key:
         raise SystemExit("[designer] GMI_API_KEY not set (pass --env-file /home/josh/soc-lab/.env)")
@@ -87,6 +98,7 @@ def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
                      {"role": "user", "content": user}],
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
     }).encode()
     req = urllib.request.Request(
         f"{base}/chat/completions", data=body,
