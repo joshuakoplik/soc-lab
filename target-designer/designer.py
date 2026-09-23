@@ -46,6 +46,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 TARGETS_DIR = os.path.join(ROOT, "targets")
 DEFAULT_MODEL = "moonshotai/kimi-k3"
 GMI_DEFAULT_BASE = "https://api.gmi-serving.com/v1"
+# Design is non-deterministic; retry a bad generation instead of aborting the run.
+DESIGN_ATTEMPTS = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -69,7 +71,7 @@ def load_dotenv(path: str) -> None:
 
 
 def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
-                 max_tokens: int = 24000, timeout: int = 1200) -> str:
+                 max_tokens: int = 32000, timeout: int = 1200) -> str:
     """One-shot completion via the GMI OpenAI-compatible /chat/completions.
 
     Reasoning models (kimi-k3) split output into `reasoning_content` (the think
@@ -78,16 +80,23 @@ def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
     when the answer field carries no JSON. A default urllib User-Agent is 403'd
     by GMI -- set one.
 
-    Two coupled settings keep kimi-k3 from failing the design/repair parse:
+    Three coupled settings keep kimi-k3 from failing the design/repair parse:
     - `response_format=json_object` forces the answer into `content` as clean
       JSON via the proper reasoning split. WITHOUT it, kimi-k3 reasons *inside*
       `content` (reasoning_content stays empty) and emits ~65KB of deliberation
       prose that blows the budget before it ever lands a complete spec.
-    - the budget must cover reasoning + the spec: kimi-k3 spends ~15K tokens
-      reasoning, so 16000 truncated the JSON body mid-`dockerfile_steps`
-      (finish_reason=length). 24000 leaves ~9K for the spec. A much larger cap
-      just lets it ramble past the read timeout, so the timeout is 1200s to
-      match (a full run is ~10-13 min)."""
+    - the budget must cover reasoning + the spec, and kimi-k3's reasoning length
+      varies a lot run to run: 16000 truncated the JSON body mid-`dockerfile_steps`
+      and a run that reasons long can burn the WHOLE budget in `reasoning_content`
+      and never emit the `content` JSON at all. 32000 gives headroom for a long
+      reasoning trace plus the spec; `design()` also retries a starved generation
+      (see DESIGN_ATTEMPTS) since the failure is non-deterministic.
+    - `stream=True` is REQUIRED, not an optimization: a non-streaming call sits
+      idle for the whole generation and GMI's gateway kills it with HTTP 524
+      ("A timeout occurred") well before kimi-k3 finishes -- observed failing
+      two runs in a row. Streaming keeps tokens flowing so the gateway never
+      sees an idle origin (and it returns sooner, ~2min vs ~9min buffered).
+      timeout stays 1200s as an outer wall-clock bound on the whole stream."""
     api_key = os.environ.get("GMI_API_KEY")
     if not api_key:
         raise SystemExit("[designer] GMI_API_KEY not set (pass --env-file /home/josh/soc-lab/.env)")
@@ -99,21 +108,38 @@ def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
+        "stream": True,
     }).encode()
     req = urllib.request.Request(
         f"{base}/chat/completions", data=body,
         headers={"Authorization": f"Bearer {api_key}",
                  "Content-Type": "application/json",
                  "User-Agent": "soc-lab-target-designer/0.1"})
+    # SSE stream: accumulate the content and reasoning_content deltas separately.
+    content_parts, reasoning_parts = [], []
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.load(r)
-    msg = data["choices"][0]["message"]
-    content = msg.get("content") or ""
+        for raw_line in r:
+            line = raw_line.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            delta = ((obj.get("choices") or [{}])[0]).get("delta") or {}
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            if delta.get("reasoning_content"):
+                reasoning_parts.append(delta["reasoning_content"])
+    content = "".join(content_parts)
     if "{" in content:
         return content
-    # answer field starved / empty -> the JSON often lands at the end of the
-    # reasoning trace instead.
-    return msg.get("reasoning_content") or content
+    # answer field starved / empty -> the JSON often lands in the reasoning
+    # trace instead.
+    return "".join(reasoning_parts) or content
 
 
 # Top-level keys that mark a real design/repair object (a spec, or a repair
@@ -203,6 +229,16 @@ runtime (all deps installed at build time; nothing fetched on first request).
 - Every service must LOG TO STDOUT/STDERR (run in the foreground) so the range's telemetry \
 wiring captures it into the SIEM. Prefer a foreground entrypoint that starts each service \
 without backgrounding its logs to a file only.
+- Known build traps -- bake the fix into your dockerfile_steps so a repair pass doesn't have to \
+rediscover it:
+  - Composer 2.x REFUSES to install packages flagged by security advisories by default \
+(`policy.advisories.block`). A vulnerable target installs exactly such packages, so run \
+`composer config --no-plugins policy.advisories.block false` in the project dir BEFORE any \
+`composer install`/`update`/`require`, or the resolve dies with "Your requirements could not be \
+resolved ... affected by security advisories". Do NOT drop the vulnerable pin to appease it.
+  - A database server started during the build (mariadbd/mysqld) needs its runtime socket dir to \
+exist first: `mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld` before launching it, else it \
+aborts with "Bind on unix socket: No such file or directory".
 
 Output ONLY the JSON object -- nothing before it, nothing after it, no prose, no
 commentary, no code fences. Emit exactly one complete, well-formed JSON object and
@@ -292,11 +328,24 @@ def design(foothold: list[dict], privesc: list[dict], model: str) -> TargetSpec:
         + _library_block(specs)
         + "\n\nPick the most buildable, plausible pair and return the JSON spec."
     )
-    raw = llm_complete(DESIGN_SYSTEM, user, model=model)
-    try:
-        d = extract_json(raw)
-    except ValueError as e:
-        _fail_design(raw, f"no parseable spec in the model output ({e})")
+    # Design is non-deterministic: kimi-k3's reasoning length varies run to run,
+    # and a run that reasons past the token budget never emits the content JSON
+    # (raw comes back as reasoning-only prose -> extract_json finds no object).
+    # Retry a few times before giving up rather than aborting the whole run on
+    # one unlucky generation.
+    raw, last_err = "", ""
+    for attempt in range(1, DESIGN_ATTEMPTS + 1):
+        raw = llm_complete(DESIGN_SYSTEM, user, model=model)
+        try:
+            d = extract_json(raw)
+            break
+        except ValueError as e:
+            last_err = str(e)
+            if attempt < DESIGN_ATTEMPTS:
+                print(f"[designer]   design attempt {attempt}/{DESIGN_ATTEMPTS}: "
+                      f"no parseable spec ({e}); retrying …")
+    else:
+        _fail_design(raw, f"no parseable spec after {DESIGN_ATTEMPTS} attempts ({last_err})")
     fh = d.get("foothold", {}) or {}
     pe = d.get("privesc", {}) or {}
     # Validity guard: a parseable-but-degenerate spec (no CVE, or no build steps)
@@ -480,6 +529,15 @@ box is SUPPOSED to be vulnerable. Only change what stops the image building or t
 up (wrong package name, missing dependency, bad path, wrong download URL, entrypoint that exits, a \
 service that backgrounds instead of logging to stdout, needing egress at runtime, etc.). Keep every \
 service logging to stdout/stderr and fully self-contained (no network at runtime).
+
+Failure signatures you MUST recognize (the raw error misleads -- read past the first line):
+- "Your requirements could not be resolved ... because they are affected by security advisories" / \
+"PKSA-..." is NOT a version-solver problem and is NOT a reason to change a pin. It is Composer 2.x \
+refusing to install advisory-flagged (i.e. vulnerable) packages -- the whole point of this box. Fix \
+it by adding `composer config --no-plugins policy.advisories.block false` before the composer \
+install/update/require step; keep the vulnerable pins exactly as they are.
+- mariadbd/mysqld "Bind on unix socket: No such file or directory" (missing /run/mysqld): create the \
+socket dir before starting the server -- `mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld`.
 
 Return ONE JSON object, no prose: {"base_image": str, "dockerfile_steps": [str], "notes": str}
 (omit base_image to keep it). dockerfile_steps is the FULL corrected list of RUN/COPY/ENV/EXPOSE/CMD \

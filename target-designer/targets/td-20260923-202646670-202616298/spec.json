@@ -1,0 +1,160 @@
+{
+  "id": "td-20260923-202646670-202616298",
+  "title": "WikiPress Duo: YesWiki 4.6.3 unauth SQLi -> WordPress FoodBoxBooker root chain (CVE-2026-46670 + CVE-2026-16298)",
+  "base_image": "debian:12",
+  "foothold": {
+    "cve": "CVE-2026-46670",
+    "product": "YesWiki",
+    "version": "4.6.3 (all prior to 4.6.4)",
+    "role": "foothold",
+    "summary": "YesWiki is a PHP wiki system. Prior to 4.6.4, an unauthenticated SQL injection in the Bazar form-import path (FormManager::create()) lets any remote visitor run arbitrary SQL against the application database (CVSS 9.8, CWE-89). Intended use: dump the yeswiki database, recover the WikiAdmin credential, then abuse YesWiki's administrative theme/extension management (PHP template upload) to execute code as the www-data service user."
+  },
+  "privesc": {
+    "cve": "CVE-2026-16298",
+    "product": "FoodBoxBooker WordPress plugin (on WordPress 6.7.2)",
+    "version": "1.0.6 (all before 1.0.7)",
+    "role": "privesc",
+    "summary": "The FoodBoxBooker WordPress plugin before 1.0.7 does not properly validate the password-reset request, allowing unauthenticated attackers to reset the password of arbitrary users, including administrators (CVSS 9.8, CWE-269). Intended use: reset the WP admin password, log into /wp-admin on the second site (port 8080), upload/activate a plugin; this host's WordPress PHP-FPM pool is (mis)configured to run as root, so the uploaded PHP executes as root."
+  },
+  "chain_narrative": "Single LEMP-style host (nginx + PHP-FPM + MariaDB) serving two PHP applications. Stage 1 (foothold): the wiki on port 80 runs YesWiki 4.6.3, vulnerable to CVE-2026-46670 -- an unauthenticated SQL injection in the Bazar form-import path (FormManager::create()). The attacker uses the injection to dump the yeswiki database, recover/crack the WikiAdmin credential (seeded at build time), authenticate to YesWiki's administrative interface, and leverage the admin theme/extension management to place PHP code, obtaining remote code execution as www-data. Stage 2 (privesc): local enumeration (or external port scan) reveals a second vhost on port 8080 running WordPress 6.7.2 with the FoodBoxBooker 1.0.6 plugin active. Via CVE-2026-16298 the attacker abuses the plugin's unauthenticated, unvalidated password-reset flow to take over the WordPress administrator account, logs into wp-admin, and uploads/activates a plugin containing PHP. Because the operator misconfigured the WordPress site's dedicated PHP-FPM pool (/etc/php/8.2/fpm/pool.d/wproot.conf) to run its workers as root, the plugin's code executes with root privileges, completing the chain www-data -> root. Note for operators: the provided CVE set contained no local Linux kernel/sudo privesc suitable for pairing, so stage 2 is an application-level privilege-escalation CVE whose impact is anchored to root by the intentional php-fpm pool misconfiguration; both CVEs are real, published, and unauthenticated, and the two-apps-on-one-web-server coexistence is a plausible small-org deployment.",
+  "dockerfile_steps": [
+    "LABEL soc-lab.target-id=\"td-20260923-202646670-202616298\"",
+    "LABEL soc-lab.foothold-cve=\"CVE-2026-46670\"",
+    "LABEL soc-lab.privesc-cve=\"CVE-2026-16298\"",
+    "ENV DEBIAN_FRONTEND=noninteractive",
+    "RUN apt-get update && apt-get install -y --no-install-recommends nginx-light mariadb-server mariadb-client php-fpm php-cli php-mysql php-xml php-mbstring php-curl php-gd php-intl php-zip unzip curl ca-certificates && rm -rf /var/lib/apt/lists/*",
+    "RUN curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php && php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer && rm -f /tmp/composer-setup.php",
+    "RUN curl -sSL https://github.com/YesWiki/yeswiki/archive/refs/tags/v4.6.3.tar.gz -o /tmp/yeswiki.tgz && mkdir -p /var/www/yeswiki && tar xzf /tmp/yeswiki.tgz --strip-components=1 -C /var/www/yeswiki && rm -f /tmp/yeswiki.tgz",
+    "RUN cd /var/www/yeswiki && composer config --no-plugins policy.advisories.block false && COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --no-interaction --prefer-dist --no-progress",
+    "RUN curl -sSL https://wordpress.org/wordpress-6.7.2.tar.gz -o /tmp/wp.tgz && mkdir -p /var/www/wordpress && tar xzf /tmp/wp.tgz --strip-components=1 -C /var/www/wordpress && rm -f /tmp/wp.tgz",
+    "RUN curl -sSL https://downloads.wordpress.org/plugin/foodboxbooker.1.0.6.zip -o /tmp/fbb.zip && unzip -q /tmp/fbb.zip -d /var/www/wordpress/wp-content/plugins/ && rm -f /tmp/fbb.zip",
+    "RUN curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp && chmod +x /usr/local/bin/wp",
+    "RUN { echo '<?php'; echo '$wakkaConfig = array('; echo \"'mysql_host' => 'localhost',\"; echo \"'mysql_database' => 'yeswiki',\"; echo \"'mysql_user' => 'yeswiki',\"; echo \"'mysql_password' => 'yeswiki_pass',\"; echo \"'table_prefix' => 'yeswiki_',\"; echo \"'root_page' => 'PagePrincipale',\"; echo \"'base_url' => 'http://'.\\$_SERVER['HTTP_HOST'].'/ ',\"; echo \"'rewrite_mode' => '0',\"; echo \"'admin_users' => 'WikiAdmin',\"; echo \"'yeswiki_version' => 'doryphore',\"; echo \"'yeswiki_release' => '4.6.3',\"; echo ');'; } > /var/www/yeswiki/wakka.config.php && sed -i \"s|'/ '|'/'|\" /var/www/yeswiki/wakka.config.php",
+    "RUN printf '[wproot]\\nuser = root\\ngroup = root\\nlisten = /run/php/php8.2-fpm-root.sock\\nlisten.owner = www-data\\nlisten.group = www-data\\nlisten.mode = 0660\\npm = dynamic\\npm.max_children = 6\\npm.start_servers = 2\\npm.min_spare_servers = 1\\npm.max_spare_servers = 3\\nclear_env = no\\ncatch_workers_output = yes\\n' > /etc/php/8.2/fpm/pool.d/wproot.conf && sed -i 's|^error_log = .*|error_log = /proc/self/fd/2|' /etc/php/8.2/fpm/php-fpm.conf && (grep -q '^error_log' /etc/php/8.2/fpm/php-fpm.conf || echo 'error_log = /proc/self/fd/2' >> /etc/php/8.2/fpm/php-fpm.conf)",
+    "RUN printf 'server {\\n  listen 80 default_server;\\n  root /var/www/yeswiki;\\n  index index.php wakka.php index.html;\\n  access_log /dev/stdout;\\n  error_log /dev/stderr;\\n  location / { try_files $uri $uri/ /index.php?$query_string; }\\n  location ~ [.]php$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:/run/php/php8.2-fpm.sock; }\\n}\\nserver {\\n  listen 8080;\\n  root /var/www/wordpress;\\n  index index.php;\\n  access_log /dev/stdout;\\n  error_log /dev/stderr;\\n  location / { try_files $uri $uri/ /index.php?$args; }\\n  location ~ [.]php$ { include snippets/fastcgi-php.conf; fastcgi_pass unix:/run/php/php8.2-fpm-root.sock; }\\n}\\n' > /etc/nginx/sites-available/default",
+    "RUN mkdir -p /run/mysqld /run/php && chown mysql:mysql /run/mysqld && (mariadbd --user=mysql --bind-address=127.0.0.1 &) && for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do mariadb-admin ping >/dev/null 2>&1 && break; sleep 1; done; mariadb -e \"CREATE DATABASE IF NOT EXISTS yeswiki CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS 'yeswiki'@'localhost' IDENTIFIED BY 'yeswiki_pass'; GRANT ALL PRIVILEGES ON yeswiki.* TO 'yeswiki'@'localhost'; CREATE USER IF NOT EXISTS 'wp'@'localhost' IDENTIFIED BY 'wp_pass'; GRANT ALL PRIVILEGES ON wordpress.* TO 'wp'@'localhost'; FLUSH PRIVILEGES;\"; if [ -d /var/www/yeswiki/setup/sql ]; then sed -i 's/wikka_/yeswiki_/g' /var/www/yeswiki/setup/sql/*.sql 2>/dev/null; for f in /var/www/yeswiki/setup/sql/*.sql; do [ -f \"$f\" ] && mariadb yeswiki < \"$f\" 2>/dev/null; done; fi; mariadb yeswiki -e \"INSERT INTO yeswiki_users (name,password,email) SELECT 'WikiAdmin', MD5('W1k1Adm1n!'), 'admin@example.local' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM yeswiki_users WHERE name='WikiAdmin');\" 2>/dev/null; wp config create --path=/var/www/wordpress --dbname=wordpress --dbuser=wp --dbpass=wp_pass --dbhost=localhost --allow-root --force; wp core install --path=/var/www/wordpress --url=http://127.0.0.1:8080 --title=RangeBlog --admin_user=admin --admin_password=Adm1nRang3! --admin_email=admin@example.local --skip-email --allow-root; wp plugin activate --all --path=/var/www/wordpress --allow-root || true; chown -R www-data:www-data /var/www/yeswiki; php-fpm8.2 --daemonize --allow-to-run-as-root; nginx; for i in $(seq 1 45); do code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/ 2>/dev/null || true); if [ \"$code\" = \"200\" ]; then break; fi; sleep 2; done; curl -s -o /dev/null http://127.0.0.1/ || true; curl -s -o /dev/null http://127.0.0.1:8080/ || true; nginx -s quit 2>/dev/null || true; if [ -f /run/php/php8.2-fpm.pid ]; then kill \"$(cat /run/php/php8.2-fpm.pid)\" 2>/dev/null || true; fi; sleep 2; mariadb-admin shutdown || true",
+    "RUN sed -i '/wp-settings.php/i define(\"WP_HOME\", \"http://\" . $_SERVER[\"HTTP_HOST\"]);' /var/www/wordpress/wp-config.php && sed -i '/wp-settings.php/i define(\"WP_SITEURL\", \"http://\" . $_SERVER[\"HTTP_HOST\"]);' /var/www/wordpress/wp-config.php",
+    "RUN chown -R www-data:www-data /var/www/yeswiki && chown -R root:root /var/www/wordpress && chmod -R u+rwX /var/www/wordpress",
+    "RUN printf '#!/bin/bash\\nmkdir -p /run/mysqld /run/php\\nchown mysql:mysql /run/mysqld\\nchown www-data:www-data /run/php\\nmariadbd --user=mysql --bind-address=127.0.0.1 --port=3306 &\\nfor i in $(seq 1 60); do mariadb-admin ping >/dev/null 2>&1 && break; sleep 1; done\\nphp-fpm8.2 --nodaemonize --allow-to-run-as-root &\\nfor i in $(seq 1 30); do [ -S /run/php/php8.2-fpm.sock ] && [ -S /run/php/php8.2-fpm-root.sock ] && break; sleep 1; done\\nnginx -g \"daemon off;\" &\\nfor i in $(seq 1 60); do code=$(curl -s -o /dev/null -w \"%%{http_code}\" http://127.0.0.1/ 2>/dev/null || true); [ \"$code\" = \"200\" ] && break; sleep 1; done\\nwait\\n' > /entrypoint.sh && chmod +x /entrypoint.sh",
+    "EXPOSE 80 8080 3306",
+    "CMD [\"/entrypoint.sh\"]"
+  ],
+  "listening": [
+    {
+      "port": 80,
+      "service": "nginx -> YesWiki 4.6.3 (php-fpm, www-data)",
+      "proto": "tcp"
+    },
+    {
+      "port": 8080,
+      "service": "nginx -> WordPress 6.7.2 + FoodBoxBooker 1.0.6 (php-fpm root pool)",
+      "proto": "tcp"
+    },
+    {
+      "port": 3306,
+      "service": "mariadb (loopback only)",
+      "proto": "tcp"
+    }
+  ],
+  "verification": [
+    {
+      "name": "yeswiki-site-up",
+      "kind": "http",
+      "check": "http://127.0.0.1/",
+      "expect": "200"
+    },
+    {
+      "name": "wordpress-site-up",
+      "kind": "http",
+      "check": "http://127.0.0.1:8080/",
+      "expect": "200"
+    },
+    {
+      "name": "mariadb-listening",
+      "kind": "port",
+      "check": "3306",
+      "expect": "open"
+    },
+    {
+      "name": "yeswiki-4.6.3-pinned",
+      "kind": "cmd",
+      "check": "grep yeswiki_release /var/www/yeswiki/wakka.config.php",
+      "expect": "4.6.3"
+    },
+    {
+      "name": "yeswiki-vendor-installed",
+      "kind": "cmd",
+      "check": "ls /var/www/yeswiki/vendor",
+      "expect": "autoload.php"
+    },
+    {
+      "name": "foodboxbooker-plugin-present",
+      "kind": "cmd",
+      "check": "ls /var/www/wordpress/wp-content/plugins",
+      "expect": "food"
+    },
+    {
+      "name": "wordpress-fpm-pool-runs-as-root",
+      "kind": "cmd",
+      "check": "grep '^user' /etc/php/8.2/fpm/pool.d/wproot.conf",
+      "expect": "root"
+    }
+  ],
+  "difficulty_notes": "Medium build, all light PHP/MariaDB components (no ML stacks). Known traps already handled: (1) `composer config --no-plugins policy.advisories.block false` runs BEFORE `composer install` so YesWiki 4.6.3's advisory-flagged transitive dependencies resolve; the pin was NOT relaxed. (2) /run/mysqld is created and chowned before mariadbd starts, both during the build-time DB seed and in the runtime entrypoint (fresh /run tmpfs). Possible repair-pass items: the YesWiki git tag may be '4.6.3' rather than 'v4.6.3' (if the tarball 404s, retry without the 'v'); the FoodBoxBooker plugin zip slug on downloads.wordpress.org may differ from 'foodboxbooker' (check plugins.svn.wordpress.org for the exact slug and the 1.0.6 tag; the build activates ALL plugins via `wp plugin activate --all`, so only the fetch/unzip line depends on the slug). YesWiki's DB is seeded by importing its setup/sql dumps with a defensive `sed wikka_->yeswiki_` prefix rewrite and a guarded WikiAdmin (MD5 password) insert so the SQLi-to-admin-credential path exists; if the dump layout changed in 4.6.3, an alternative is to drive YesWiki's own web installer once at build time against the pre-created 'yeswiki' database. WordPress core is current (6.7.2) -- only the plugin is vulnerable. WP_HOME/WP_SITEURL are set dynamically from HTTP_HOST so redirects work regardless of the range's external mapping. All services log to stdout/stderr (nginx access/error to /dev/stdout|/dev/stderr per vhost, php-fpm error_log to /proc/self/fd/2, mariadbd console stderr) and run in the foreground under the bash entrypoint. MariaDB is bound to loopback; runtime is fully self-contained with no egress.",
+  "designed_by": "moonshotai/kimi-k3",
+  "created_at": "2026-09-23T14:31:12Z",
+  "extra": {
+    "image_tag": "soclab-td/td-20260923-202646670-202616298:latest",
+    "build_ok": true,
+    "verification_results": [
+      {
+        "name": "yeswiki-site-up",
+        "ok": false,
+        "inconclusive": false,
+        "detail": "http 500 (want 200)"
+      },
+      {
+        "name": "wordpress-site-up",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "http 200 (want 200)"
+      },
+      {
+        "name": "mariadb-listening",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "OPEN"
+      },
+      {
+        "name": "yeswiki-4.6.3-pinned",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "'yeswiki_release' => '4.6.3',"
+      },
+      {
+        "name": "yeswiki-vendor-installed",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "autoload.php\nbin\ncarbonphp\ncaxy\ncomposer\ndoctrine\nenshrined\nezyang\njbroadway\nnesbot\noomphinc\nphpmailer\npsr\nstefangabos\nsymfony\ntamtamchik\ntwig\nvoku"
+      },
+      {
+        "name": "foodboxbooker-plugin-present",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "akismet\nfoodboxbooker\nhello.php\nindex.php"
+      },
+      {
+        "name": "wordpress-fpm-pool-runs-as-root",
+        "ok": true,
+        "inconclusive": false,
+        "detail": "user = root"
+      }
+    ],
+    "repair_notes": [
+      "Root cause of the 502s: the wproot php-fpm pool runs as user=root, and PHP-FPM refuses to start any pool as root unless passed -R/--allow-to-run-as-root (\"[pool wproot] user root is not allowed\"). The whole fpm master aborts on that config error, so neither /run/php/php8.2-fpm.sock nor php8.2-fpm-root.sock is ever created -> nginx returns 502 on both vhosts. Fix: start fpm with 'php-fpm8.2 --nodaemonize --allow-to-run-as-root' in the entrypoint (keeps the intentionally root WordPress pool needed for the privesc chain) and wait for both sockets to exist before launching nginx. All vulnerable pins (YesWiki 4.6.3, WP 6.7.2, FoodBoxBooker 1.0.6) and the composer advisory-block bypass are unchanged.",
+      "Build was fine; the box is flaky at first hit, not broken. YesWiki 4.6.3 self-heals on its first HTTP requests: the initial hits return 500 while it runs its automatic table creation/migration and compiles its Symfony/Twig cache under /var/www/yeswiki/cache (visible in the logs: 500, 500, then 200 with no config change). The verifier's first request landed during that cold-start window. Fix: warm the app at image-build time. In the existing DB-setup RUN (MariaDB already running there), after WP is installed, chown the YesWiki tree to www-data (so PHP-FPM can write cache/config), start php-fpm8.2 and nginx, then poll http://127.0.0.1/ until it returns 200 (and touch :8080 for WP). This bakes the created tables and compiled cache into the image (MariaDB datadir /var/lib/mysql and /var/www persist in the image), so the first runtime request is already a 200. Then cleanly stop nginx and php-fpm and shut MariaDB down. base_url uses $_SERVER['HTTP_HOST'] dynamically, so build-time warmup under 127.0.0.1 does not freeze a host into the app. Vulnerable pins (YesWiki 4.6.3, WP 6.7.2, FoodBoxBooker 1.0.6) and all services/logging/entrypoint behavior are unchanged.",
+      "Startup race: the entrypoint waited only for the PHP-FPM sockets before starting nginx, so nginx served YesWiki while MariaDB was still initializing -> DB connect failure -> HTTP 500 on early requests (log shows 500,500, then 200 once mariadbd was up). Fixed by gating on 'mariadb-admin ping' (up to 60s) before launching php-fpm/nginx, and added a localhost warmup loop after nginx starts so the first external hit returns 200. All vulnerable pins (YesWiki 4.6.3, WordPress 6.7.2, FoodBoxBooker 1.0.6) and the composer advisories bypass are unchanged. All services still log to stdout/stderr and no runtime egress is needed (warmup hits 127.0.0.1 only)."
+    ],
+    "status": "build-repair-exhausted"
+  }
+}
