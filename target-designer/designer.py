@@ -46,6 +46,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 TARGETS_DIR = os.path.join(ROOT, "targets")
 DEFAULT_MODEL = "moonshotai/kimi-k3"
 GMI_DEFAULT_BASE = "https://api.gmi-serving.com/v1"
+# Design is non-deterministic; retry a bad generation instead of aborting the run.
+DESIGN_ATTEMPTS = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -69,7 +71,7 @@ def load_dotenv(path: str) -> None:
 
 
 def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
-                 max_tokens: int = 24000, timeout: int = 1200) -> str:
+                 max_tokens: int = 32000, timeout: int = 1200) -> str:
     """One-shot completion via the GMI OpenAI-compatible /chat/completions.
 
     Reasoning models (kimi-k3) split output into `reasoning_content` (the think
@@ -78,16 +80,23 @@ def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
     when the answer field carries no JSON. A default urllib User-Agent is 403'd
     by GMI -- set one.
 
-    Two coupled settings keep kimi-k3 from failing the design/repair parse:
+    Three coupled settings keep kimi-k3 from failing the design/repair parse:
     - `response_format=json_object` forces the answer into `content` as clean
       JSON via the proper reasoning split. WITHOUT it, kimi-k3 reasons *inside*
       `content` (reasoning_content stays empty) and emits ~65KB of deliberation
       prose that blows the budget before it ever lands a complete spec.
-    - the budget must cover reasoning + the spec: kimi-k3 spends ~15K tokens
-      reasoning, so 16000 truncated the JSON body mid-`dockerfile_steps`
-      (finish_reason=length). 24000 leaves ~9K for the spec. A much larger cap
-      just lets it ramble past the read timeout, so the timeout is 1200s to
-      match (a full run is ~10-13 min)."""
+    - the budget must cover reasoning + the spec, and kimi-k3's reasoning length
+      varies a lot run to run: 16000 truncated the JSON body mid-`dockerfile_steps`
+      and a run that reasons long can burn the WHOLE budget in `reasoning_content`
+      and never emit the `content` JSON at all. 32000 gives headroom for a long
+      reasoning trace plus the spec; `design()` also retries a starved generation
+      (see DESIGN_ATTEMPTS) since the failure is non-deterministic.
+    - `stream=True` is REQUIRED, not an optimization: a non-streaming call sits
+      idle for the whole generation and GMI's gateway kills it with HTTP 524
+      ("A timeout occurred") well before kimi-k3 finishes -- observed failing
+      two runs in a row. Streaming keeps tokens flowing so the gateway never
+      sees an idle origin (and it returns sooner, ~2min vs ~9min buffered).
+      timeout stays 1200s as an outer wall-clock bound on the whole stream."""
     api_key = os.environ.get("GMI_API_KEY")
     if not api_key:
         raise SystemExit("[designer] GMI_API_KEY not set (pass --env-file /home/josh/soc-lab/.env)")
@@ -99,21 +108,38 @@ def llm_complete(system: str, user: str, model: str, temperature: float = 0.7,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
+        "stream": True,
     }).encode()
     req = urllib.request.Request(
         f"{base}/chat/completions", data=body,
         headers={"Authorization": f"Bearer {api_key}",
                  "Content-Type": "application/json",
                  "User-Agent": "soc-lab-target-designer/0.1"})
+    # SSE stream: accumulate the content and reasoning_content deltas separately.
+    content_parts, reasoning_parts = [], []
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.load(r)
-    msg = data["choices"][0]["message"]
-    content = msg.get("content") or ""
+        for raw_line in r:
+            line = raw_line.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            delta = ((obj.get("choices") or [{}])[0]).get("delta") or {}
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            if delta.get("reasoning_content"):
+                reasoning_parts.append(delta["reasoning_content"])
+    content = "".join(content_parts)
     if "{" in content:
         return content
-    # answer field starved / empty -> the JSON often lands at the end of the
-    # reasoning trace instead.
-    return msg.get("reasoning_content") or content
+    # answer field starved / empty -> the JSON often lands in the reasoning
+    # trace instead.
+    return "".join(reasoning_parts) or content
 
 
 # Top-level keys that mark a real design/repair object (a spec, or a repair
@@ -302,11 +328,24 @@ def design(foothold: list[dict], privesc: list[dict], model: str) -> TargetSpec:
         + _library_block(specs)
         + "\n\nPick the most buildable, plausible pair and return the JSON spec."
     )
-    raw = llm_complete(DESIGN_SYSTEM, user, model=model)
-    try:
-        d = extract_json(raw)
-    except ValueError as e:
-        _fail_design(raw, f"no parseable spec in the model output ({e})")
+    # Design is non-deterministic: kimi-k3's reasoning length varies run to run,
+    # and a run that reasons past the token budget never emits the content JSON
+    # (raw comes back as reasoning-only prose -> extract_json finds no object).
+    # Retry a few times before giving up rather than aborting the whole run on
+    # one unlucky generation.
+    raw, last_err = "", ""
+    for attempt in range(1, DESIGN_ATTEMPTS + 1):
+        raw = llm_complete(DESIGN_SYSTEM, user, model=model)
+        try:
+            d = extract_json(raw)
+            break
+        except ValueError as e:
+            last_err = str(e)
+            if attempt < DESIGN_ATTEMPTS:
+                print(f"[designer]   design attempt {attempt}/{DESIGN_ATTEMPTS}: "
+                      f"no parseable spec ({e}); retrying …")
+    else:
+        _fail_design(raw, f"no parseable spec after {DESIGN_ATTEMPTS} attempts ({last_err})")
     fh = d.get("foothold", {}) or {}
     pe = d.get("privesc", {}) or {}
     # Validity guard: a parseable-but-degenerate spec (no CVE, or no build steps)
