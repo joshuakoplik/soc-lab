@@ -203,6 +203,16 @@ runtime (all deps installed at build time; nothing fetched on first request).
 - Every service must LOG TO STDOUT/STDERR (run in the foreground) so the range's telemetry \
 wiring captures it into the SIEM. Prefer a foreground entrypoint that starts each service \
 without backgrounding its logs to a file only.
+- Known build traps -- bake the fix into your dockerfile_steps so a repair pass doesn't have to \
+rediscover it:
+  - Composer 2.x REFUSES to install packages flagged by security advisories by default \
+(`policy.advisories.block`). A vulnerable target installs exactly such packages, so run \
+`composer config --no-plugins policy.advisories.block false` in the project dir BEFORE any \
+`composer install`/`update`/`require`, or the resolve dies with "Your requirements could not be \
+resolved ... affected by security advisories". Do NOT drop the vulnerable pin to appease it.
+  - A database server started during the build (mariadbd/mysqld) needs its runtime socket dir to \
+exist first: `mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld` before launching it, else it \
+aborts with "Bind on unix socket: No such file or directory".
 
 Output ONLY the JSON object -- nothing before it, nothing after it, no prose, no
 commentary, no code fences. Emit exactly one complete, well-formed JSON object and
@@ -480,6 +490,15 @@ box is SUPPOSED to be vulnerable. Only change what stops the image building or t
 up (wrong package name, missing dependency, bad path, wrong download URL, entrypoint that exits, a \
 service that backgrounds instead of logging to stdout, needing egress at runtime, etc.). Keep every \
 service logging to stdout/stderr and fully self-contained (no network at runtime).
+
+Failure signatures you MUST recognize (the raw error misleads -- read past the first line):
+- "Your requirements could not be resolved ... because they are affected by security advisories" / \
+"PKSA-..." is NOT a version-solver problem and is NOT a reason to change a pin. It is Composer 2.x \
+refusing to install advisory-flagged (i.e. vulnerable) packages -- the whole point of this box. Fix \
+it by adding `composer config --no-plugins policy.advisories.block false` before the composer \
+install/update/require step; keep the vulnerable pins exactly as they are.
+- mariadbd/mysqld "Bind on unix socket: No such file or directory" (missing /run/mysqld): create the \
+socket dir before starting the server -- `mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld`.
 
 Return ONE JSON object, no prose: {"base_image": str, "dockerfile_steps": [str], "notes": str}
 (omit base_image to keep it). dockerfile_steps is the FULL corrected list of RUN/COPY/ENV/EXPOSE/CMD \
