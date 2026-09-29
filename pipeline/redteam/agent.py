@@ -734,12 +734,13 @@ _RECON_TOOL_SCHEMAS = [
     },
     {
         "name": "http_probe",
-        "description": ("Fetch one or more paths from a web target and report status code plus a "
-                        "capped preview of the response body. Read-only content discovery. "
-                        "Defaults to http on port 80 -- set `port` to reach a web service nmap "
+        "description": ("Issue one or more HTTP requests to a web target and report each status "
+                        "code plus a capped preview of the response body. Defaults to a GET on "
+                        "port 80 -- set `method` for POST, `port` to reach a web service nmap "
                         "found on a non-standard port (e.g. 5678, 8080, 8443), and `scheme` to "
-                        "\"https\" for a TLS service (certificate errors are ignored). You can "
-                        "also write the port straight into `target` as host:port."),
+                        "\"https\" for a TLS service (certificate errors are ignored). Pass "
+                        "`headers` to set arbitrary request headers and `body` to send a request "
+                        "body. You can also write the port straight into `target` as host:port."),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -750,6 +751,11 @@ _RECON_TOOL_SCHEMAS = [
                           "description": "TCP port of the web service (default 80). Use the port nmap reported."},
                 "scheme": {"type": "string", "enum": ["http", "https"], "default": "http",
                             "description": "URL scheme (default http). Use https for a TLS service."},
+                "headers": {"type": "object", "additionalProperties": {"type": "string"},
+                             "description": "Optional request headers as a name->value map, "
+                                            "e.g. {\"Content-Type\": \"application/json\"}."},
+                "body": {"type": "string",
+                          "description": "Optional raw request body, sent verbatim (e.g. with a POST)."},
             },
             "required": ["target", "paths"],
         },
@@ -1706,7 +1712,8 @@ def _autofollow_listing(base, tls_flags, path, body, method):
     return followed
 
 
-def tool_http_probe(conn, session_id, target, paths, method, port=None, scheme="http"):
+def tool_http_probe(conn, session_id, target, paths, method, port=None, scheme="http",
+                    headers=None, body=None):
     # Subnet-scope: any host on the segment is probeable. There's no HTTP-target
     # allowlist any more -- probing a host with no web surface just returns
     # connection errors, which is legitimate recon feedback (that's how the
@@ -1728,6 +1735,20 @@ def tool_http_probe(conn, session_id, target, paths, method, port=None, scheme="
     scheme = scheme if scheme in ("http", "https") else "http"
     redteam_exec.validate_target(host)
     tls_flags = ["-k"] if scheme == "https" else []
+    # Optional custom headers / body -- http_probe is already a curl wrapper, so
+    # these are just the -H/--data-raw flags it was missing (curl parity for a
+    # header/body-driven request). No new reach: validate_target() above still
+    # fences `host` to the lab subnets, and curl runs inside soc-attacker under
+    # its iptables OUTPUT lockdown, both regardless of what headers/body say.
+    # List-form argv (never a shell), so a header value can't inject extra args.
+    # Deliberately NOT threaded into _autofollow_listing below: that's a GET-style
+    # content-discovery helper, and re-sending a POST body to each sub-path is wrong.
+    req_flags = []
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            req_flags += ["-H", f"{k}: {v}"]
+    if body is not None:
+        req_flags += ["--data-raw", str(body)]
     base = f"{scheme}://{host}:{port}"
     results = []
     for p in (paths or [])[:25]:
@@ -1739,7 +1760,7 @@ def tool_http_probe(conn, session_id, target, paths, method, port=None, scheme="
         # which would silently eat a trailing status marker before it's ever
         # read. Separate calls means the body cap can't corrupt the status.
         status_r = redteam_exec.run(
-            ["curl", "-s", "--max-time", "15", *tls_flags, "-o", "/dev/null", "-w", "%{http_code}", "-X", method, url],
+            ["curl", "-s", "--max-time", "15", *tls_flags, *req_flags, "-o", "/dev/null", "-w", "%{http_code}", "-X", method, url],
             timeout_s=15,
         )
         # Content discovery is useless if you only learn a path exists and
@@ -1751,7 +1772,7 @@ def tool_http_probe(conn, session_id, target, paths, method, port=None, scheme="
         # should now separately request the Location" just to see a
         # directory listing that's one hop away.
         body_r = redteam_exec.run(
-            ["curl", "-s", "--max-time", "15", "-L", *tls_flags, "-X", method, url], timeout_s=15, max_output_chars=1500,
+            ["curl", "-s", "--max-time", "15", "-L", *tls_flags, *req_flags, "-X", method, url], timeout_s=15, max_output_chars=1500,
         )
         entry = {
             "path": path, "url": url, "status": status_r.stdout.strip() or None,
@@ -1952,6 +1973,7 @@ def dispatch_recon_tool(conn, session_id, provider, name, tool_input):
                 conn, session_id, tool_input.get("target"),
                 tool_input.get("paths") or [], tool_input.get("method", "GET"),
                 tool_input.get("port"), tool_input.get("scheme", "http"),
+                tool_input.get("headers"), tool_input.get("body"),
             )
         if name == "get_recon_findings":
             return tool_get_recon_findings(conn, session_id, tool_input.get("target"), tool_input.get("ids"))
